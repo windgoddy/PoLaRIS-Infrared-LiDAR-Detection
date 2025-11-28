@@ -3,8 +3,48 @@ import sys
 import json
 import cv2
 import numpy as np
-import glob
+import pandas as pd
 import matplotlib.cm
+
+# --- Filter Configuration ---
+FILTER_CONFIG = {
+    'min_depth': 3.0,        # Minimum depth (m) - filter ego vehicle
+    'max_depth': 120.0,      # Maximum depth (m) - remove distant noise
+    'min_height': -160.0,    # Minimum height (m) - keep ground points
+    'max_height': 10.0,      # Maximum height (m) - filter sky artifacts
+    'use_intensity_filter': True,
+    'min_intensity': 5.0,
+    'filter_zero_intensity': True,
+}
+
+def filter_lidar_points(points, config=FILTER_CONFIG):
+    """
+    Filter LiDAR points to remove noise and ego-vehicle.
+    """
+    original_count = points.shape[0]
+    
+    x, y, z = points[:, 0], points[:, 1], points[:, 2]
+    intensity = points[:, 3]
+    
+    distances = np.sqrt(x**2 + y**2 + z**2)
+    
+    mask = np.ones(original_count, dtype=bool)
+    
+    # 1. Depth filter
+    mask &= (distances >= config['min_depth']) & (distances <= config['max_depth'])
+    
+    # 2. Height filter
+    mask &= (y >= config['min_height']) & (y <= config['max_height'])
+    
+    # 3. Intensity filter
+    if config.get('use_intensity_filter', False):
+        if config.get('filter_zero_intensity', False):
+            mask &= intensity > config['min_intensity']
+        else:
+            mask &= intensity >= config['min_intensity']
+    
+    filtered_points = points[mask]
+    return filtered_points
 
 def get_rotation_matrix_from_quaternion(quat):
     """
@@ -93,7 +133,12 @@ def color_points_by_depth(depths, vmin=1.0, vmax=80.0):
     clipped_depths = np.clip(depths, vmin, vmax)
     normalized_depths = (clipped_depths - vmin) / (vmax - vmin)
     
-    viridis_colormap = matplotlib.cm.get_cmap('viridis')
+    # Use matplotlib.colormaps if available (newer matplotlib), else fallback
+    try:
+        viridis_colormap = matplotlib.colormaps['viridis']
+    except AttributeError:
+        viridis_colormap = matplotlib.cm.get_cmap('viridis')
+        
     rgba_colors = viridis_colormap(normalized_depths)
     
     rgb_colors = rgba_colors[:, :3]
@@ -102,22 +147,53 @@ def color_points_by_depth(depths, vmin=1.0, vmax=80.0):
     
     return bgr_colors_255
 
+def load_timestamps(timestamp_path):
+    """
+    Load timestamps from file.
+    Format: timestamp filename
+    """
+    if not os.path.exists(timestamp_path):
+        print(f"Error: Timestamp file not found: {timestamp_path}")
+        return pd.DataFrame()
+    
+    try:
+        # Try reading with tab separator first, then whitespace
+        # Force filename to be string to preserve leading zeros
+        df = pd.read_csv(timestamp_path, sep='\t', header=None, names=['timestamp', 'filename'], dtype={'filename': str})
+        if len(df.columns) != 2 or df['timestamp'].dtype == object:
+             df = pd.read_csv(timestamp_path, delim_whitespace=True, header=None, names=['timestamp', 'filename'], dtype={'filename': str})
+        
+        df['timestamp'] = df['timestamp'].astype(float)
+        return df
+    except Exception as e:
+        print(f"Error reading timestamps {timestamp_path}: {e}")
+        return pd.DataFrame()
+
 def main():
     # --- Configuration ---
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     
-    # Input/Output Paths
-    images_dir = os.path.join(project_root, 'dataset/Pohang-Canal/images')
-    lidar_dir = os.path.join(project_root, 'dataset/Pohang-Canal/LiDAR')
-    output_dir = os.path.join(project_root, 'dataset/Pohang-Canal/vis_lidar_on_ir')
+    # Paths
+    # Note: Using the original dataset paths for timestamps and raw data to ensure correctness
+    dataset_base = '/home/b311/data2/25-zhangxizhe/Pohang Canal Dataset And PoLaRIS/Pohang Canal Dataset/00'
     
-    # Calibration Path (Hardcoded as per user request)
-    calib_dir = '/home/b311/data2/25-zhangxizhe/Pohang Canal Dataset And PoLaRIS/Pohang Canal Dataset/00/calibration'
+    ir_timestamp_path = os.path.join(dataset_base, 'infrared/timestamp.txt')
+    lidar_timestamp_path = os.path.join(dataset_base, 'lidar_front/timestamp.txt')
     
-    print(f"Images Dir: {images_dir}")
-    print(f"LiDAR Dir: {lidar_dir}")
+    # We will read images from the user's project folder if they exist there, otherwise from original
+    # But for synchronization we need the original filenames/timestamps.
+    # The user's project folder: dataset/Pohang-Canal/images
+    # The user's project folder: dataset/Pohang-Canal/LiDAR (contains .bin files copied earlier)
+    
+    local_images_dir = os.path.join(project_root, 'dataset/Pohang-Canal/images')
+    local_lidar_dir = os.path.join(project_root, 'dataset/Pohang-Canal/LiDAR')
+    output_dir = os.path.join(project_root, 'dataset/Pohang-Canal/vis_lidar_on_ir_synced')
+    
+    calib_dir = os.path.join(dataset_base, 'calibration')
+    
+    print(f"IR Timestamps: {ir_timestamp_path}")
+    print(f"LiDAR Timestamps: {lidar_timestamp_path}")
     print(f"Output Dir: {output_dir}")
-    print(f"Calibration Dir: {calib_dir}")
     
     os.makedirs(output_dir, exist_ok=True)
     
@@ -132,22 +208,16 @@ def main():
 
     with open(intrinsics_path) as f:
         intrinsics_data = json.load(f)
-        if 'infrared' not in intrinsics_data:
-            print("Error: 'infrared' key not found in intrinsics.json")
-            return
         ir_intrinsics = intrinsics_data['infrared']
 
     with open(extrinsics_path) as f:
         extrinsics_data = json.load(f)
-        if 'infrared' not in extrinsics_data or 'lidar_front' not in extrinsics_data:
-            print("Error: 'infrared' or 'lidar_front' not found in extrinsics.json")
-            return
         ir_extrinsics = extrinsics_data['infrared']
         lidar_extrinsics = extrinsics_data['lidar_front']
 
     # Construct Camera Matrix (K)
     fx = ir_intrinsics['focal_length']
-    fy = ir_intrinsics['focal_length'] # Assuming square pixels if only one focal length provided
+    fy = ir_intrinsics['focal_length']
     cx = ir_intrinsics['cc_x']
     cy = ir_intrinsics['cc_y']
     
@@ -157,71 +227,126 @@ def main():
         [0, 0, 1]
     ], dtype=np.float32)
     
-    print(f"Camera Matrix K:\n{K_cam}")
-    
     # Construct Transformation Matrices
     T_cam_to_base = get_transform_matrix(ir_extrinsics)
     T_lidar_to_base = get_transform_matrix(lidar_extrinsics)
-    
-    # T_cam_to_lidar = inv(T_cam_to_base) @ T_lidar_to_base
-    # This transforms a point from LiDAR frame to Camera frame
     T_cam_to_lidar = np.linalg.inv(T_cam_to_base) @ T_lidar_to_base
     
     print(f"T_cam_to_lidar:\n{T_cam_to_lidar}")
     
-    # --- Process Files ---
-    image_files = sorted(glob.glob(os.path.join(images_dir, '*.png')))
-    print(f"Found {len(image_files)} images.")
+    # --- Synchronization ---
+    print("Synchronizing data...")
+    ir_df = load_timestamps(ir_timestamp_path)
+    lidar_df = load_timestamps(lidar_timestamp_path)
     
-    # Process a subset for verification (e.g., first 20)
-    # Remove the slice [:20] to process all
-    process_count = 0
-    for img_path in image_files:
-        img_name = os.path.basename(img_path)
-        lidar_name = os.path.splitext(img_name)[0] + '.bin'
-        lidar_path = os.path.join(lidar_dir, lidar_name)
+    if ir_df.empty or lidar_df.empty:
+        print("Failed to load timestamps.")
+        return
         
+    ir_df = ir_df.sort_values('timestamp')
+    lidar_df = lidar_df.sort_values('timestamp')
+    
+    # Rename columns for merge
+    ir_df = ir_df.rename(columns={'filename': 'ir_filename'})
+    lidar_df = lidar_df.rename(columns={'filename': 'lidar_filename'})
+    
+    # Merge: Query=IR, Key=LiDAR
+    # We want to find the closest LiDAR frame for each IR frame
+    merged_df = pd.merge_asof(
+        ir_df,
+        lidar_df,
+        on='timestamp',
+        direction='nearest',
+        tolerance=0.2 # 200ms tolerance
+    )
+    
+    # Filter out unmatched rows
+    merged_df = merged_df.dropna(subset=['lidar_filename'])
+    
+    print(f"Synchronization complete. Found {len(merged_df)} matches out of {len(ir_df)} IR frames.")
+    
+    # --- Processing Loop ---
+    process_count = 0
+    
+    # Get list of local images to filter processing
+    local_image_names = set(os.listdir(local_images_dir))
+    print(f"Found {len(local_image_names)} local images in {local_images_dir}")
+    
+    # Iterate over synchronized frames
+    for idx, row in merged_df.iterrows():
+        ir_fname = str(row['ir_filename'])
+        lidar_fname = str(row['lidar_filename'])
+        
+        # Ensure filenames have extensions if missing in timestamp file
+        # Note: timestamp.txt has '008881', we need '008881.png'
+        # But wait, if 'ir_filename' is read as float/int by pandas, it might lose leading zeros?
+        # Let's force string conversion and padding if needed, but '008881' is string in txt.
+        
+        if not ir_fname.endswith('.png'): ir_fname += '.png'
+        if not lidar_fname.endswith('.bin'): lidar_fname += '.bin'
+        
+        # Filter: Only process if the IR image exists in our local project folder
+        if ir_fname not in local_image_names:
+            continue
+
+        # Construct paths
+        ir_path = os.path.join(local_images_dir, ir_fname)
+        lidar_path = os.path.join(local_lidar_dir, lidar_fname)
+        
+        # Fallback to original dataset paths if local LiDAR not found
+        # (We assume IR must be local based on user request, but LiDAR might need fallback if not copied yet)
         if not os.path.exists(lidar_path):
-            # print(f"Skipping {img_name}: LiDAR file not found.")
+             lidar_path = os.path.join(dataset_base, 'lidar_front/points', lidar_fname)
+             
+        if not os.path.exists(ir_path):
+            print(f"Error: Local IR image missing despite check: {ir_path}")
+            continue
+            
+        if not os.path.exists(lidar_path):
+            # print(f"Skipping {ir_fname}: LiDAR file not found at {lidar_path}")
             continue
             
         if process_count % 100 == 0:
-            print(f"Processing {img_name}...")
-        
-        # Load Image
-        img = cv2.imread(img_path)
-        if img is None:
-            print(f"Error reading image: {img_path}")
+            print(f"Processing Pair {process_count}: IR={ir_fname} <-> LiDAR={lidar_fname}")
+            
+        # Load Data
+        img = cv2.imread(ir_path)
+        if img is None: 
+            print(f"Failed to read image: {ir_path}")
             continue
             
-        # Load LiDAR
         try:
             points = np.fromfile(lidar_path, dtype=np.float32).reshape(-1, 4)
         except Exception as e:
-            print(f"Error reading LiDAR {lidar_path}: {e}")
+            print(f"Failed to read LiDAR: {lidar_path} ({e})")
+            continue
+            
+        # Filter Points
+        points_filtered = filter_lidar_points(points)
+        
+        if points_filtered.shape[0] == 0:
+            print(f"Warning: No points after filtering for {ir_fname}")
             continue
             
         # Project
-        pixels, depths = project_lidar_to_image(points, K_cam, T_cam_to_lidar, img.shape)
+        pixels, depths = project_lidar_to_image(points_filtered, K_cam, T_cam_to_lidar, img.shape)
         
         if len(pixels) > 0:
-            # Colorize
             colors = color_points_by_depth(depths)
-            
-            # Draw
             vis_img = img.copy()
             for (u, v), color in zip(pixels, colors):
                 cv2.circle(vis_img, (u, v), 1, (int(color[0]), int(color[1]), int(color[2])), -1)
-                
-            # Save
-            cv2.imwrite(os.path.join(output_dir, img_name), vis_img)
-        else:
-            print(f"Warning: No points projected for {img_name}")
             
+            cv2.imwrite(os.path.join(output_dir, ir_fname), vis_img)
+        else:
+            # print(f"No points projected for {ir_fname}")
+            pass
+        
         process_count += 1
-        if process_count >= 20: # Limit to 20 for the "minimal runnable" request to be quick
-             break
-
+        # Removed limit to process all local images
+        # if process_count >= 20:
+        #    break
+            
     print(f"Done. Processed {process_count} frames. Results saved to {output_dir}")
 
 if __name__ == "__main__":
