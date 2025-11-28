@@ -102,3 +102,12 @@ venv.bak/
 
 # mypy
 .mypy_cache/
+
+# Ignore PNG files in the dataset (images/masks/results/visualizations)
+dataset/**/images/**/*.png
+dataset/**/masks/**/*.png
+dataset/**/LiDAR/**/*.bin
+dataset/**/value_result/**/*.png
+dataset/**/visulization_result/**/*.png
+dataset/**/*.PNG
+
