@@ -9,9 +9,9 @@ import matplotlib.cm
 # --- Filter Configuration ---
 FILTER_CONFIG = {
     'min_depth': 3.0,        # Minimum depth (m) - filter ego vehicle
-    'max_depth': 120.0,      # Maximum depth (m) - remove distant noise
+    'max_depth': 150.0,      # Maximum depth (m) - remove distant noise
     'min_height': -160.0,    # Minimum height (m) - keep ground points
-    'max_height': 10.0,      # Maximum height (m) - filter sky artifacts
+    'max_height': 50.0,      # Maximum height (m) - filter sky artifacts
     'use_intensity_filter': True,
     'min_intensity': 5.0,
     'filter_zero_intensity': True,
@@ -77,6 +77,7 @@ def get_transform_matrix(extrinsics):
 def project_lidar_to_image(lidar_points, K_cam, T_cam_to_lidar, img_shape):
     """
     Project LiDAR points to image plane.
+    Returns pixels, depths, and indices of valid points in the input array.
     """
     # 1. Extract XYZ
     xyz_points = lidar_points[:, :3]
@@ -93,10 +94,13 @@ def project_lidar_to_image(lidar_points, K_cam, T_cam_to_lidar, img_shape):
     # 4. Filter by Depth (Z > 0.1)
     z_coords = P_cam[:, 2]
     valid_depth_mask = z_coords >= 0.1
+    # Indices of points that passed depth filter
+    valid_depth_indices = np.where(valid_depth_mask)[0]
+
     P_cam_filtered = P_cam[valid_depth_mask]
     
     if P_cam_filtered.shape[0] == 0:
-        return np.array([]).reshape(0, 2).astype(int), np.array([])
+        return np.array([]).reshape(0, 2).astype(int), np.array([]), np.array([], dtype=int)
     
     # 5. Apply Intrinsics
     xyz_cam = P_cam_filtered[:, :3]
@@ -121,7 +125,12 @@ def project_lidar_to_image(lidar_points, K_cam, T_cam_to_lidar, img_shape):
     pixels = np.column_stack([u_final.astype(int), v_final.astype(int)])
     depths = Z_final.astype(float)
     
-    return pixels, depths
+    # Map back to original indices
+    # valid_boundary_mask is boolean mask for P_cam_filtered
+    # valid_depth_indices maps P_cam_filtered indices to original lidar_points indices
+    final_indices = valid_depth_indices[valid_boundary_mask]
+    
+    return pixels, depths, final_indices
 
 def color_points_by_depth(depths, vmin=1.0, vmax=80.0):
     """
@@ -188,14 +197,17 @@ def main():
     local_images_dir = os.path.join(project_root, 'dataset/Pohang-Canal/images')
     local_lidar_dir = os.path.join(project_root, 'dataset/Pohang-Canal/LiDAR')
     output_dir = os.path.join(project_root, 'dataset/Pohang-Canal/vis_lidar_on_ir_synced')
+    lidar_output_dir = os.path.join(project_root, 'dataset/Pohang-Canal/lidar_roi')
     
     calib_dir = os.path.join(dataset_base, 'calibration')
     
     print(f"IR Timestamps: {ir_timestamp_path}")
     print(f"LiDAR Timestamps: {lidar_timestamp_path}")
     print(f"Output Dir: {output_dir}")
+    print(f"LiDAR Output Dir: {lidar_output_dir}")
     
     os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(lidar_output_dir, exist_ok=True)
     
     # --- Load Calibration ---
     print("Loading calibration...")
@@ -329,9 +341,14 @@ def main():
             continue
             
         # Project
-        pixels, depths = project_lidar_to_image(points_filtered, K_cam, T_cam_to_lidar, img.shape)
+        pixels, depths, valid_indices = project_lidar_to_image(points_filtered, K_cam, T_cam_to_lidar, img.shape)
         
         if len(pixels) > 0:
+            # Save filtered point cloud
+            points_in_fov = points_filtered[valid_indices]
+            save_path = os.path.join(lidar_output_dir, lidar_fname)
+            points_in_fov.tofile(save_path)
+
             colors = color_points_by_depth(depths)
             vis_img = img.copy()
             for (u, v), color in zip(pixels, colors):
