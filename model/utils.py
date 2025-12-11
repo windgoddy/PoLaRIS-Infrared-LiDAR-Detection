@@ -23,16 +23,19 @@ class TrainSetLoader(Dataset):
         self._items = img_id
         self.masks = dataset_dir+'/'+'masks'
         self.images = dataset_dir+'/'+'images'
+        self.depth_maps = dataset_dir+'/'+'depth_maps'
         self.base_size = base_size
         self.crop_size = crop_size
         self.suffix = suffix
         self.in_channels = in_channels
 
-    def _sync_transform(self, img, mask):
+    def _sync_transform(self, img, mask, depth=None):
         # random mirror
         if random.random() < 0.5:
             img = img.transpose(Image.FLIP_LEFT_RIGHT)
             mask = mask.transpose(Image.FLIP_LEFT_RIGHT)
+            if depth is not None:
+                depth = depth.transpose(Image.FLIP_LEFT_RIGHT)
         crop_size = self.crop_size
         # random scale (short edge)
         long_size = random.randint(int(self.base_size * 0.5), int(self.base_size * 2.0))
@@ -47,25 +50,46 @@ class TrainSetLoader(Dataset):
             short_size = oh
         img = img.resize((ow, oh), Image.BILINEAR)
         mask = mask.resize((ow, oh), Image.NEAREST)
+        if depth is not None:
+            depth = depth.resize((ow, oh), Image.BILINEAR)
+
         # pad crop
         if short_size < crop_size:
             padh = crop_size - oh if oh < crop_size else 0
             padw = crop_size - ow if ow < crop_size else 0
             img = ImageOps.expand(img, border=(0, 0, padw, padh), fill=0)
             mask = ImageOps.expand(mask, border=(0, 0, padw, padh), fill=0)
+            if depth is not None:
+                # ImageOps.expand might not work for float images directly or fill value issues
+                # But let's try. Fill 0 is correct for depth.
+                # ImageOps.expand converts to RGB if not careful? No, it respects mode.
+                # But 'F' mode support in ImageOps is limited.
+                # Fallback to paste
+                new_depth = Image.new('F', (ow + padw, oh + padh), 0.0)
+                new_depth.paste(depth, (0, 0))
+                depth = new_depth
+
         # random crop crop_size
         w, h = img.size
         x1 = random.randint(0, w - crop_size)
         y1 = random.randint(0, h - crop_size)
         img = img.crop((x1, y1, x1 + crop_size, y1 + crop_size))
         mask = mask.crop((x1, y1, x1 + crop_size, y1 + crop_size))
+        if depth is not None:
+            depth = depth.crop((x1, y1, x1 + crop_size, y1 + crop_size))
+
         # gaussian blur as in PSP
         if random.random() < 0.5:
             img = img.filter(ImageFilter.GaussianBlur(
                 radius=random.random()))
+            # Don't blur depth? Or maybe yes? Let's skip blurring depth for now.
+
         # final transform
         img, mask = np.array(img), np.array(mask, dtype=np.float32)
-        return img, mask
+        if depth is not None:
+            depth = np.array(depth, dtype=np.float32)
+            return img, mask, depth
+        return img, mask, None
 
     def __getitem__(self, idx):
 
@@ -73,19 +97,45 @@ class TrainSetLoader(Dataset):
         img_path   = self.images+'/'+img_id+self.suffix   # img_id的数值正好补了self._image_path在上面定义的2个空
         label_path = self.masks +'/'+img_id+self.suffix
 
+        depth = None
         if self.in_channels == 1:
             img = Image.open(img_path).convert('L')
+        elif self.in_channels == 2:
+            img = Image.open(img_path).convert('L')
+            depth_path = self.depth_maps + '/' + img_id + '.npy'
+            if os.path.exists(depth_path):
+                depth_arr = np.load(depth_path)
+            else:
+                # Fallback if not generated
+                depth_arr = np.zeros((img.size[1], img.size[0]), dtype=np.float32)
+            depth = Image.fromarray(depth_arr, mode='F')
         else:
             img = Image.open(img_path).convert('RGB')         ##由于输入的三通道、单通道图像都有，所以统一转成RGB的三通道，这也符合Unet等网络的期待尺寸
         
         mask = Image.open(label_path)
 
         # synchronized transform
-        img, mask = self._sync_transform(img, mask)
+        img, mask, depth = self._sync_transform(img, mask, depth)
 
         # general resize, normalize and toTensor
-        if self.transform is not None:
+        if self.in_channels == 2:
+            # Manual handling for 2-channel
+            img = img.astype(np.float32) / 255.0
+            depth = depth.astype(np.float32) / 80.0 # Normalize depth (approx max 80m)
+            combined = np.stack([img, depth], axis=0) # (2, H, W)
+            img = torch.from_numpy(combined).float()
+            # Normalize? Let's apply simple normalization
+            # IR: (x - 0.485)/0.229, Depth: (x - 0.1)/0.1 (Sparse)
+            # Using standard ImageNet for IR
+            norm = torch.nn.Sequential(
+                # transforms.Normalize([0.485, 0.0], [0.229, 1.0]) # Don't normalize depth further?
+                # Let's just subtract mean.
+            )
+            # For simplicity in Naive Fusion, let's just return the scaled tensors.
+            # The BN layers in DNANet will handle distribution shift.
+        elif self.transform is not None:
             img = self.transform(img)
+            
         mask = np.expand_dims(mask, axis=0).astype('float32')/ 255.0
 
 
@@ -105,19 +155,25 @@ class TestSetLoader(Dataset):
         self._items    = img_id
         self.masks     = dataset_dir+'/'+'masks'
         self.images    = dataset_dir+'/'+'images'
+        self.depth_maps = dataset_dir+'/'+'depth_maps'
         self.base_size = base_size
         self.crop_size = crop_size
         self.suffix    = suffix
         self.in_channels = in_channels
 
-    def _testval_sync_transform(self, img, mask):
+    def _testval_sync_transform(self, img, mask, depth=None):
         base_size = self.base_size
         img  = img.resize ((base_size, base_size), Image.BILINEAR)
         mask = mask.resize((base_size, base_size), Image.NEAREST)
+        if depth is not None:
+            depth = depth.resize((base_size, base_size), Image.BILINEAR)
 
         # final transform
         img, mask = np.array(img), np.array(mask, dtype=np.float32)  # img: <class 'mxnet.ndarray.ndarray.NDArray'> (512, 512, 3)
-        return img, mask
+        if depth is not None:
+            depth = np.array(depth, dtype=np.float32)
+            return img, mask, depth
+        return img, mask, None
 
     def __getitem__(self, idx):
         # print('idx:',idx)
@@ -125,17 +181,31 @@ class TestSetLoader(Dataset):
         img_path   = self.images+'/'+img_id+self.suffix    # img_id的数值正好补了self._image_path在上面定义的2个空
         label_path = self.masks +'/'+img_id+self.suffix
         
+        depth = None
         if self.in_channels == 1:
             img = Image.open(img_path).convert('L')
+        elif self.in_channels == 2:
+            img = Image.open(img_path).convert('L')
+            depth_path = self.depth_maps + '/' + img_id + '.npy'
+            if os.path.exists(depth_path):
+                depth_arr = np.load(depth_path)
+            else:
+                depth_arr = np.zeros((img.size[1], img.size[0]), dtype=np.float32)
+            depth = Image.fromarray(depth_arr, mode='F')
         else:
             img  = Image.open(img_path).convert('RGB')  ##由于输入的三通道、单通道图像都有，所以统一转成RGB的三通道，这也符合Unet等网络的期待尺寸
             
         mask = Image.open(label_path)
         # synchronized transform
-        img, mask = self._testval_sync_transform(img, mask)
+        img, mask, depth = self._testval_sync_transform(img, mask, depth)
 
         # general resize, normalize and toTensor
-        if self.transform is not None:
+        if self.in_channels == 2:
+            img = img.astype(np.float32) / 255.0
+            depth = depth.astype(np.float32) / 80.0
+            combined = np.stack([img, depth], axis=0)
+            img = torch.from_numpy(combined).float()
+        elif self.transform is not None:
             img = self.transform(img)
         mask = np.expand_dims(mask, axis=0).astype('float32') / 255.0
 

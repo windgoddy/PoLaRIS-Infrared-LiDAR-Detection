@@ -5,7 +5,7 @@ import  torch
 def SoftIoULoss( pred, target):
         # Old One
         pred = torch.sigmoid(pred)
-        smooth = 1
+        smooth = 0.8
 
         # print("pred.shape: ", pred.shape)
         # print("target.shape: ", target.shape)
@@ -39,5 +39,3 @@ class AverageMeter(object):
         self.sum += val * n
         self.count += n
         self.avg = self.sum / self.count
-
-
