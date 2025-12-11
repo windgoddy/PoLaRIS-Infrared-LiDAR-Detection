@@ -10,7 +10,7 @@ python train.py \
     --root dataset \
     --model DNANet \
     --in_channels 2 \
-    --epochs 100 \
+    --epochs 30 \
     --train_batch_size 4 \
     --test_batch_size 4 \
     --base_size 256 \
@@ -18,4 +18,5 @@ python train.py \
     --deep_supervision True \
     --optimizer Adam \
     --lr 0.05 \
-    --scheduler CosineAnnealingLR
+    --scheduler CosineAnnealingLR \
+    --backbone resnet_34 \
