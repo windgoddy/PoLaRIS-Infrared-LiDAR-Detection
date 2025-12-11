@@ -16,7 +16,7 @@ class TrainSetLoader(Dataset):
     """Iceberg Segmentation dataset."""
     NUM_CLASS = 1
 
-    def __init__(self, dataset_dir, img_id ,base_size=512,crop_size=480,transform=None,suffix='.png'):
+    def __init__(self, dataset_dir, img_id ,base_size=512,crop_size=480,transform=None,suffix='.png', in_channels=3):
         super(TrainSetLoader, self).__init__()
 
         self.transform = transform
@@ -26,6 +26,7 @@ class TrainSetLoader(Dataset):
         self.base_size = base_size
         self.crop_size = crop_size
         self.suffix = suffix
+        self.in_channels = in_channels
 
     def _sync_transform(self, img, mask):
         # random mirror
@@ -72,7 +73,11 @@ class TrainSetLoader(Dataset):
         img_path   = self.images+'/'+img_id+self.suffix   # img_id的数值正好补了self._image_path在上面定义的2个空
         label_path = self.masks +'/'+img_id+self.suffix
 
-        img = Image.open(img_path).convert('RGB')         ##由于输入的三通道、单通道图像都有，所以统一转成RGB的三通道，这也符合Unet等网络的期待尺寸
+        if self.in_channels == 1:
+            img = Image.open(img_path).convert('L')
+        else:
+            img = Image.open(img_path).convert('RGB')         ##由于输入的三通道、单通道图像都有，所以统一转成RGB的三通道，这也符合Unet等网络的期待尺寸
+        
         mask = Image.open(label_path)
 
         # synchronized transform
@@ -94,7 +99,7 @@ class TestSetLoader(Dataset):
     """Iceberg Segmentation dataset."""
     NUM_CLASS = 1
 
-    def __init__(self, dataset_dir, img_id,transform=None,base_size=512,crop_size=480,suffix='.png'):
+    def __init__(self, dataset_dir, img_id,transform=None,base_size=512,crop_size=480,suffix='.png', in_channels=3):
         super(TestSetLoader, self).__init__()
         self.transform = transform
         self._items    = img_id
@@ -103,6 +108,7 @@ class TestSetLoader(Dataset):
         self.base_size = base_size
         self.crop_size = crop_size
         self.suffix    = suffix
+        self.in_channels = in_channels
 
     def _testval_sync_transform(self, img, mask):
         base_size = self.base_size
@@ -118,7 +124,12 @@ class TestSetLoader(Dataset):
         img_id = self._items[idx]  # idx：('../SIRST', 'Misc_70') 成对出现，因为我的workers设置为了2
         img_path   = self.images+'/'+img_id+self.suffix    # img_id的数值正好补了self._image_path在上面定义的2个空
         label_path = self.masks +'/'+img_id+self.suffix
-        img  = Image.open(img_path).convert('RGB')  ##由于输入的三通道、单通道图像都有，所以统一转成RGB的三通道，这也符合Unet等网络的期待尺寸
+        
+        if self.in_channels == 1:
+            img = Image.open(img_path).convert('L')
+        else:
+            img  = Image.open(img_path).convert('RGB')  ##由于输入的三通道、单通道图像都有，所以统一转成RGB的三通道，这也符合Unet等网络的期待尺寸
+            
         mask = Image.open(label_path)
         # synchronized transform
         img, mask = self._testval_sync_transform(img, mask)

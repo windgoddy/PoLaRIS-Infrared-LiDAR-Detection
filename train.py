@@ -32,11 +32,17 @@ class Trainer(object):
             train_img_ids, val_img_ids, test_txt = load_dataset(args.root, args.dataset, args.split_method)
 
         # Preprocess and load data
-        input_transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize([.485, .456, .406], [.229, .224, .225])])
-        trainset        = TrainSetLoader(dataset_dir,img_id=train_img_ids,base_size=args.base_size,crop_size=args.crop_size,transform=input_transform,suffix=args.suffix)
-        testset         = TestSetLoader (dataset_dir,img_id=val_img_ids,base_size=args.base_size, crop_size=args.crop_size, transform=input_transform,suffix=args.suffix)
+        if args.in_channels == 1:
+            input_transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize([0.5], [0.5])])
+        else:
+            input_transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize([.485, .456, .406], [.229, .224, .225])])
+                
+        trainset        = TrainSetLoader(dataset_dir,img_id=train_img_ids,base_size=args.base_size,crop_size=args.crop_size,transform=input_transform,suffix=args.suffix, in_channels=args.in_channels)
+        testset         = TestSetLoader (dataset_dir,img_id=val_img_ids,base_size=args.base_size, crop_size=args.crop_size, transform=input_transform,suffix=args.suffix, in_channels=args.in_channels)
         self.train_data = DataLoader(dataset=trainset, batch_size=args.train_batch_size, shuffle=True, num_workers=args.workers,drop_last=True)
         self.test_data  = DataLoader(dataset=testset,  batch_size=args.test_batch_size, num_workers=args.workers,drop_last=False)
 
