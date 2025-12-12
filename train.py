@@ -75,7 +75,7 @@ class Trainer(object):
         tbar = tqdm(self.train_data)
         self.model.train()
         losses = AverageMeter()
-        for i, ( data, labels) in enumerate(tbar):
+        for i, ( data, labels, _) in enumerate(tbar):
             data   = data.cuda()
             labels = labels.cuda()
             if args.deep_supervision == 'True':

@@ -24,18 +24,21 @@ class TrainSetLoader(Dataset):
         self.masks = dataset_dir+'/'+'masks'
         self.images = dataset_dir+'/'+'images'
         self.depth_maps = dataset_dir+'/'+'depth_maps'
+        self.oracle_masks = dataset_dir+'/'+'oracle_masks'
         self.base_size = base_size
         self.crop_size = crop_size
         self.suffix = suffix
         self.in_channels = in_channels
 
-    def _sync_transform(self, img, mask, depth=None):
+    def _sync_transform(self, img, mask, depth=None, oracle_mask=None):
         # random mirror
         if random.random() < 0.5:
             img = img.transpose(Image.FLIP_LEFT_RIGHT)
             mask = mask.transpose(Image.FLIP_LEFT_RIGHT)
             if depth is not None:
                 depth = depth.transpose(Image.FLIP_LEFT_RIGHT)
+            if oracle_mask is not None:
+                oracle_mask = oracle_mask.transpose(Image.FLIP_LEFT_RIGHT)
         crop_size = self.crop_size
         # random scale (short edge)
         long_size = random.randint(int(self.base_size * 0.5), int(self.base_size * 2.0))
@@ -52,6 +55,8 @@ class TrainSetLoader(Dataset):
         mask = mask.resize((ow, oh), Image.NEAREST)
         if depth is not None:
             depth = depth.resize((ow, oh), Image.BILINEAR)
+        if oracle_mask is not None:
+            oracle_mask = oracle_mask.resize((ow, oh), Image.NEAREST)
 
         # pad crop
         if short_size < crop_size:
@@ -59,6 +64,8 @@ class TrainSetLoader(Dataset):
             padw = crop_size - ow if ow < crop_size else 0
             img = ImageOps.expand(img, border=(0, 0, padw, padh), fill=0)
             mask = ImageOps.expand(mask, border=(0, 0, padw, padh), fill=0)
+            if oracle_mask is not None:
+                oracle_mask = ImageOps.expand(oracle_mask, border=(0, 0, padw, padh), fill=0)
             if depth is not None:
                 # ImageOps.expand might not work for float images directly or fill value issues
                 # But let's try. Fill 0 is correct for depth.
@@ -77,6 +84,8 @@ class TrainSetLoader(Dataset):
         mask = mask.crop((x1, y1, x1 + crop_size, y1 + crop_size))
         if depth is not None:
             depth = depth.crop((x1, y1, x1 + crop_size, y1 + crop_size))
+        if oracle_mask is not None:
+            oracle_mask = oracle_mask.crop((x1, y1, x1 + crop_size, y1 + crop_size))
 
         # gaussian blur as in PSP
         if random.random() < 0.5:
@@ -88,14 +97,17 @@ class TrainSetLoader(Dataset):
         img, mask = np.array(img), np.array(mask, dtype=np.float32)
         if depth is not None:
             depth = np.array(depth, dtype=np.float32)
-            return img, mask, depth
-        return img, mask, None
+        if oracle_mask is not None:
+            oracle_mask = np.array(oracle_mask, dtype=np.float32)
+            
+        return img, mask, depth, oracle_mask
 
     def __getitem__(self, idx):
 
         img_id     = self._items[idx]                        # idx：('../SIRST', 'Misc_70') 成对出现，因为我的workers设置为了2
         img_path   = self.images+'/'+img_id+self.suffix   # img_id的数值正好补了self._image_path在上面定义的2个空
         label_path = self.masks +'/'+img_id+self.suffix
+        oracle_path = self.oracle_masks + '/' + img_id + self.suffix
 
         depth = None
         if self.in_channels == 1:
@@ -113,9 +125,15 @@ class TrainSetLoader(Dataset):
             img = Image.open(img_path).convert('RGB')         ##由于输入的三通道、单通道图像都有，所以统一转成RGB的三通道，这也符合Unet等网络的期待尺寸
         
         mask = Image.open(label_path)
+        
+        # Load Oracle Mask if exists, else zeros
+        if os.path.exists(oracle_path):
+            oracle_mask = Image.open(oracle_path).convert('L') # Load as grayscale
+        else:
+            oracle_mask = Image.new('L', mask.size, 0)
 
         # synchronized transform
-        img, mask, depth = self._sync_transform(img, mask, depth)
+        img, mask, depth, oracle_mask = self._sync_transform(img, mask, depth, oracle_mask)
 
         # general resize, normalize and toTensor
         if self.in_channels == 2:
@@ -137,9 +155,9 @@ class TrainSetLoader(Dataset):
             img = self.transform(img)
             
         mask = np.expand_dims(mask, axis=0).astype('float32')/ 255.0
+        oracle_mask = np.expand_dims(oracle_mask, axis=0).astype('float32') / 255.0
 
-
-        return img, torch.from_numpy(mask) #img_id[-1]
+        return img, torch.from_numpy(mask), torch.from_numpy(oracle_mask) #img_id[-1]
 
     def __len__(self):
         return len(self._items)

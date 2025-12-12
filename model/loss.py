@@ -22,6 +22,14 @@ def SoftIoULoss( pred, target):
 
         return loss
 
+class ConfidenceLoss(nn.Module):
+    def __init__(self):
+        super(ConfidenceLoss, self).__init__()
+        self.bce = nn.BCELoss()
+
+    def forward(self, pred, target):
+        return self.bce(pred, target)
+
 class AverageMeter(object):
     """Computes and stores the average and current value"""
 
