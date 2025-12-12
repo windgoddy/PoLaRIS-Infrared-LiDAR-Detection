@@ -271,7 +271,7 @@ class DemoLoader (Dataset):
 def weights_init_xavier(m):
     classname = m.__class__.__name__
     if classname.find('Conv2d') != -1:
-        init.xavier_normal(m.weight.data)
+        init.xavier_normal_(m.weight.data)
 
 
 class AverageMeter(object):

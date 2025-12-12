@@ -65,7 +65,7 @@ class Trainer(object):
             self.optimizer  = torch.optim.Adagrad(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr)
         if args.scheduler   == 'CosineAnnealingLR':
             self.scheduler  = lr_scheduler.CosineAnnealingLR( self.optimizer, T_max=args.epochs, eta_min=args.min_lr)
-        self.scheduler.step()
+        # self.scheduler.step()
 
         # Evaluation metrics
         self.best_iou       = 0
@@ -157,6 +157,7 @@ def main(args):
     for epoch in range(args.start_epoch, args.epochs):
         trainer.training(epoch)
         trainer.testing(epoch)
+        trainer.scheduler.step()
 
 
 if __name__ == "__main__":

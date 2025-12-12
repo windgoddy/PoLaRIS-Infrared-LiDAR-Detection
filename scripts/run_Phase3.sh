@@ -7,11 +7,11 @@ export CUDA_VISIBLE_DEVICES=0
 # 注意：这里调用的是 train_Phase3.py
 # 确保 dataset_dir 指向您的 Pohang-Canal 数据集路径
 python train_Phase3.py \
-    --model_name MS_CAFNet \
-    --dataset_dir dataset/Pohang-Canal \
-    --batch_size 4 \
+    --model MS_CAFNet \
+    --dataset Pohang-Canal \
+    --train_batch_size 4 \
+    --test_batch_size 4 \
     --epochs 500 \
     --lr 0.0005 \
     --in_channels 2 \
-    --deep_supervision False \
-    --save_dir result/Phase3_MS_CAFNet
+    --deep_supervision False
