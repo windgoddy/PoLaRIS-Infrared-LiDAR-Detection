@@ -122,3 +122,7 @@ dataset/**/*.bin
 !dataset/**/*.txt
 !dataset/**/*.json
 
+# Visualization results (Phase 3 output)
+vis_phase3_results/
+vis_phase3_results/**/*
+
