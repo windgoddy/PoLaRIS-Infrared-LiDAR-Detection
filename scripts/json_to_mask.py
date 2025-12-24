@@ -32,8 +32,8 @@ def json_to_mask(json_dir, out_dir, label_name='boat'):
             shape_type = shape['shape_type']
             
             # 只处理目标类别 (或者处理所有非背景类别)
-            # 这里假设标签是 'boat' 或者 'target'
-            if label == label_name or label == 'target':
+            # 这里假设标签是 'boat' 或者 'target' 或者 '0' (YOLO class)
+            if label == label_name or label == 'target' or label == '0':
                 points = np.array(points, dtype=np.int32)
                 
                 if shape_type == 'polygon':
@@ -56,7 +56,8 @@ def json_to_mask(json_dir, out_dir, label_name='boat'):
 
 if __name__ == "__main__":
     # 配置路径
-    JSON_DIR = 'dataset/Pohang-Canal/golden_set/json_prep'
+    # 注意：您的 JSON 文件似乎保存在 labels_yolo 文件夹中
+    JSON_DIR = 'dataset/Pohang-Canal/golden_set/labels_yolo'
     MASK_OUT_DIR = 'dataset/Pohang-Canal/golden_set/masks'
     
     # 执行转换
