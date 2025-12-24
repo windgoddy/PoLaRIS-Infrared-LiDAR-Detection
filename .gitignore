@@ -126,3 +126,7 @@ dataset/**/*.bin
 vis_phase3_results/
 vis_phase3_results/**/*
 
+# Temporary data processing folders
+dataset/**/json_prep/
+dataset/**/json_prep/**/*
+
