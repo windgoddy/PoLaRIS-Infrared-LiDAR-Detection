@@ -8,12 +8,15 @@
 # 2. 保留远距离目标的红外特征
 # 3. 浅层-深层特征融合
 # ========================================
+# chmod +x scripts/run_Phase3_ResidualFPN.sh
+# ./scripts/run_Phase3_ResidualFPN.sh
 
 # GPU 设置 (根据你的设备调整)
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=4
 
 # 训练参数
 python train_Phase3.py \
+    --experiment_name Phase3_ResidualFPN \
     --model MS_CAFNet \
     --dataset Pohang-Canal \
     --split_method 50_50 \

@@ -1,10 +1,17 @@
 #!/bin/bash
 
+# chmod +x scripts/run_baseline2.sh
+# ./scripts/run_baseline2.sh
+
+# GPU 设置 (根据你的设备调整)
+export CUDA_VISIBLE_DEVICES=4
+
 # Baseline 2: Naive Fusion (IR + LiDAR Depth)
 # Input: Infrared Images + LiDAR Depth Maps (2 channels)
 # Label: Original GT Masks (Loose Bounding Boxes)
 
 python train.py \
+    --experiment_name baseline2_IR_Depth_naive \
     --dataset Pohang-Canal \
     --split_method 50_50 \
     --root dataset \

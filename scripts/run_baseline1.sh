@@ -1,10 +1,18 @@
 #!/bin/bash
 
+
+# chmod +x scripts/run_baseline1.sh
+# ./scripts/run_baseline1.sh
+
+# GPU 设置 (根据你的设备调整)
+export CUDA_VISIBLE_DEVICES=4
+
 # Baseline 1: Pure Infrared DNANet
 # Input: Infrared Images (1 channel)
 # Label: Original GT Masks (Loose Bounding Boxes)
 
 python train.py \
+    --experiment_name baseline1_IR_only \
     --dataset Pohang-Canal \
     --split_method 50_50 \
     --root dataset \

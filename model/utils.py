@@ -344,13 +344,29 @@ def save_model(mean_IOU, best_iou, save_dir, save_prefix, train_loss, test_loss,
         best_iou = mean_IOU
         save_model_and_result(dt_string, epoch, train_loss, test_loss, best_iou,
                               recall, precision, save_mIoU_dir, save_other_metric_dir)
+
+        # 保存最佳模型（包含 epoch 和 IoU 信息）
+        best_model_filename = f'best_model_epoch{epoch:04d}_mIoU{mean_IOU:.4f}.pth.tar'
         save_ckpt({
             'epoch': epoch,
             'state_dict': net,
             'loss': test_loss,
             'mean_IOU': mean_IOU,
+            'recall': recall,
+            'precision': precision,
         }, save_path='result/' + save_dir,
-            filename='mIoU_' + '_' + save_prefix + '_epoch' + '.pth.tar')
+            filename=best_model_filename)
+
+        # 同时保存一个 latest_best.pth.tar（方便加载）
+        save_ckpt({
+            'epoch': epoch,
+            'state_dict': net,
+            'loss': test_loss,
+            'mean_IOU': mean_IOU,
+            'recall': recall,
+            'precision': precision,
+        }, save_path='result/' + save_dir,
+            filename='latest_best_model.pth.tar')
 
 def save_result_for_test(dataset_dir, st_model, epochs, best_iou, recall, precision ):
     with open(dataset_dir + '/' + 'value_result'+'/' + st_model +'_best_IoU.log', 'a') as f:
@@ -385,13 +401,21 @@ def init_weights(net, init_type='normal'):
     else:
         raise NotImplementedError('initialization method [%s] is not implemented' % init_type)
 
-def make_dir(deep_supervision, dataset, model):
+def make_dir(deep_supervision, dataset, model, experiment_name=None):
     now = datetime.now()
     dt_string = now.strftime("%d_%m_%Y_%H_%M_%S")
-    if deep_supervision:
-        save_dir = "%s_%s_%s_wDS" % (dataset, model, dt_string)
+
+    # 如果提供了实验名称，将其作为前缀
+    if experiment_name:
+        prefix = f"{experiment_name}_"
     else:
-        save_dir = "%s_%s_%s_woDS" % (dataset, model, dt_string)
+        prefix = ""
+
+    if deep_supervision:
+        save_dir = "%s%s_%s_%s_wDS" % (prefix, dataset, model, dt_string)
+    else:
+        save_dir = "%s%s_%s_%s_woDS" % (prefix, dataset, model, dt_string)
+
     os.makedirs('result/%s' % save_dir, exist_ok=True)
     return save_dir
 

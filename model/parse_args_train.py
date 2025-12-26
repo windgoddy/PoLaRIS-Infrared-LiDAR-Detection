@@ -55,10 +55,14 @@ def parse_args():
     parser.add_argument('--gpus', type=str, default='0',
                         help='Training with GPUs, you can specify 1,3 for example.')
 
+    # experiment naming (for better organization)
+    parser.add_argument('--experiment_name', type=str, default=None,
+                        help='Experiment name for result folder (e.g., baseline1, Phase3_ResidualFPN)')
+
 
     args = parser.parse_args()
     # make dir for save result
-    args.save_dir = make_dir(args.deep_supervision, args.dataset, args.model)
+    args.save_dir = make_dir(args.deep_supervision, args.dataset, args.model, args.experiment_name)
     # save training log
     save_train_log(args, args.save_dir)
     # the parser
