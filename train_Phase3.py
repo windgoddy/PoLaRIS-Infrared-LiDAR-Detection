@@ -60,9 +60,11 @@ class Trainer(object):
 
         # Optimizer and lr scheduling
         if args.optimizer   == 'Adam':
-            self.optimizer  = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr)
+            self.optimizer  = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()),
+                                        lr=args.lr, weight_decay=args.weight_decay)
         elif args.optimizer == 'Adagrad':
-            self.optimizer  = torch.optim.Adagrad(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr)
+            self.optimizer  = torch.optim.Adagrad(filter(lambda p: p.requires_grad, model.parameters()),
+                                                 lr=args.lr, weight_decay=args.weight_decay)
         if args.scheduler   == 'CosineAnnealingLR':
             self.scheduler  = lr_scheduler.CosineAnnealingLR( self.optimizer, T_max=args.epochs, eta_min=args.min_lr)
         # self.scheduler.step()

@@ -51,6 +51,8 @@ def parse_args():
                         choices=['CosineAnnealingLR', 'ReduceLROnPlateau'])
     parser.add_argument('--lr', type=float, default=0.05, metavar='LR',
                         help='learning rate (default: 0.1)')
+    parser.add_argument('--weight_decay', type=float, default=0,
+                        help='weight decay (L2 penalty) (default: 0)')
     # cuda and logging
     parser.add_argument('--gpus', type=str, default='0',
                         help='Training with GPUs, you can specify 1,3 for example.')

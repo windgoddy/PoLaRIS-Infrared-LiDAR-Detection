@@ -11,7 +11,7 @@ python train_Phase3.py \
     --model MS_CAFNet \
     --dataset Pohang-Canal \
     --train_batch_size 4 \
-    --epochs 500 \
+    --epochs 50 \
     --optimizer Adam \
     --lr 0.0005 \
     --in_channels 2 \
