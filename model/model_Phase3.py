@@ -209,3 +209,186 @@ class MS_CAFNet(nn.Module):
 
     def up(self, x):
         return F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=True)
+
+
+# ============================================================================
+# [NEW] 双流几何引导升级版 (Dual-Geometry Enhanced Version)
+# 创建日期: 2026-01-06
+# 设计理念: 双保险门锁 - LiDAR (电子锁) + Visual (机械锁)
+# ============================================================================
+
+class VisualStructureExtractor(nn.Module):
+    """
+    轻量级视觉结构提取器 (Visual Structure Branch)
+    灵感来源: SG-LLIE 的结构先验提取思想
+
+    作用: 从红外图像中提取边缘/纹理结构，作为 LiDAR 失效时的几何先验
+    输入: 单通道红外图像 (1通道)
+    输出: 视觉结构图 (1通道, 0~1) - 作为注意力图
+
+    设计理念: "机械锁" - 不依赖 LiDAR，只从视觉本身提取结构信息
+    """
+    def __init__(self, in_channels=1):
+        super(VisualStructureExtractor, self).__init__()
+
+        # 方案1: 使用轻量级卷积模拟边缘提取 (类似 Sobel)
+        # 单层 3x3 卷积 + BN + ReLU，保持极轻量
+        self.edge_extractor = nn.Sequential(
+            nn.Conv2d(in_channels, 8, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(8),
+            nn.ReLU(inplace=True),
+            # 1x1 卷积降维到单通道
+            nn.Conv2d(8, 1, kernel_size=1, bias=False),
+            nn.Sigmoid()  # 确保输出 [0, 1]，作为结构先验强度
+        )
+
+    def forward(self, x_ir):
+        """
+        Args:
+            x_ir: 红外图像 [B, 1, H, W]
+        Returns:
+            structure_map: 视觉结构图 [B, 1, H, W], 范围 [0, 1]
+        """
+        structure_map = self.edge_extractor(x_ir)
+        return structure_map
+
+
+class MS_CAFNet_DualGeo(nn.Module):
+    """
+    MS_CAFNet with Adaptive Dual-Geometry Guidance (升级版)
+
+    核心升级:
+    1. 置信度门控 (Confidence Gating) - 保留
+    2. MSBlock 多尺度感知 (Multi-Scale Context) - 保留
+    3. 密集嵌套骨干 (Dense Nested Backbone) - 保留
+    4. [NEW] 自适应双流几何引导 (Adaptive Dual-Geometry Guidance)
+       - LiDAR 几何分支 (电子锁): 从深度图提取几何信息
+       - 视觉结构分支 (机械锁): 从红外提取边缘/纹理结构
+       - 自适应融合门控 (智能联动): 可学习的权重平衡
+
+    公式升级:
+    旧版: feat_enhanced = feat × (1 + lidar_conf)
+    新版: feat_enhanced = feat × (1 + α·lidar_conf + β·visual_struct)
+
+    参数量: 相比原始 MS_CAFNet 仅增加 82 个参数 (<0.003%)
+    """
+    def __init__(self, num_classes=1, input_channels=2):
+        super(MS_CAFNet_DualGeo, self).__init__()
+
+        # 滤波器通道数配置 (与 DNANet 保持一致)
+        nb_filter = [16, 32, 64, 128, 256]
+
+        # --- 1. 置信度分支 (LiDAR 几何引导) ---
+        self.conf_net = ConfidenceNet(in_channels=1)
+
+        # --- [NEW] 视觉结构分支 (Visual 几何引导) ---
+        self.visual_extractor = VisualStructureExtractor(in_channels=1)
+
+        # --- 2. 编码器 (Encoder) ---
+        self.pool = nn.MaxPool2d(2, 2)
+
+        # 使用 Res_CBAM_block 构建骨干网络
+        self.conv0_0 = Res_CBAM_block(2, nb_filter[0])
+        self.conv1_0 = Res_CBAM_block(nb_filter[0], nb_filter[1])
+        self.conv2_0 = Res_CBAM_block(nb_filter[1], nb_filter[2])
+        self.conv3_0 = Res_CBAM_block(nb_filter[2], nb_filter[3])
+        self.conv4_0 = Res_CBAM_block(nb_filter[3], nb_filter[4])
+
+        # --- 3. MSBlock 模块 (核心改进：适配大目标) ---
+        self.ms_context = MSBlock(nb_filter[4], nb_filter[4])
+
+        # --- 4. 解码器 (Decoder) ---
+        self.conv3_1 = Res_CBAM_block(nb_filter[3] + nb_filter[4], nb_filter[3])
+        self.conv2_2 = Res_CBAM_block(nb_filter[2] + nb_filter[3], nb_filter[2])
+        self.conv1_3 = Res_CBAM_block(nb_filter[1] + nb_filter[2], nb_filter[1])
+        self.conv0_4 = Res_CBAM_block(nb_filter[0] + nb_filter[1], nb_filter[0])
+
+        # --- 5. [NEW] 自适应双流融合 FPN 模块 ---
+        self.shallow_reducer = nn.Sequential(
+            nn.Conv2d(nb_filter[1], nb_filter[1], kernel_size=1, bias=False),
+            nn.BatchNorm2d(nb_filter[1]),
+            nn.ReLU(inplace=True)
+        )
+
+        # [NEW] 自适应门控参数 (Adaptive Gating Parameters)
+        # gate_lidar (alpha): LiDAR 置信度分支的权重
+        # gate_visual (beta): 视觉结构分支的权重
+        # 初始化为 0.5，让网络学习如何平衡两个分支
+        self.gate_lidar = nn.Parameter(torch.tensor(0.5))   # alpha: 电子锁权重
+        self.gate_visual = nn.Parameter(torch.tensor(0.5))  # beta: 机械锁权重
+
+        self.final = nn.Conv2d(nb_filter[0], num_classes, kernel_size=1)
+
+    def forward(self, input):
+        # input shape: [Batch, 2, H, W]
+        # 假设通道 0 是红外(IR), 通道 1 是深度(Depth)
+        x_ir = input[:, 0:1, :, :]
+        x_depth = input[:, 1:2, :, :]
+
+        # === Step A: 置信度生成 ===
+        pred_conf = self.conf_net(x_depth)
+
+        # === Step B: 门控融合 (Input Gating) ===
+        x_gated_depth = x_depth * pred_conf
+        x_fused = torch.cat([x_ir, x_gated_depth], dim=1)
+
+        # === Step C: 编码 (Encoding) ===
+        x0_0 = self.conv0_0(x_fused)
+        x1_0 = self.conv1_0(self.pool(x0_0))
+        x2_0 = self.conv2_0(self.pool(x1_0))
+        x3_0 = self.conv3_0(self.pool(x2_0))
+        x4_0 = self.conv4_0(self.pool(x3_0))
+
+        # === Step D: 多尺度增强 (MSBlock) ===
+        x4_0_enhanced = self.ms_context(x4_0)
+
+        # === Step E: 解码 (Decoding) ===
+        x3_1 = self.conv3_1(torch.cat([x3_0, self.up(x4_0_enhanced)], 1))
+        x2_2 = self.conv2_2(torch.cat([x2_0, self.up(x3_1)], 1))
+
+        # === Step F: [NEW] 自适应双流几何融合 FPN ===
+        # 升级：从单流 LiDAR 增强 → 双流自适应几何引导
+        # 核心理念：LiDAR (电子锁) + Visual (机械锁) = 双保险
+
+        # F1. 提取浅层高分辨率特征
+        feat_shallow = x1_0  # shape: [B, nb_filter[1]=32, H/2, W/2]
+
+        # F2. 第一流：LiDAR 几何引导 (Geometry from LiDAR)
+        lidar_guidance = F.interpolate(pred_conf, size=feat_shallow.shape[2:],
+                                       mode='bilinear', align_corners=True)
+
+        # F2b. [NEW] 第二流：视觉结构引导 (Geometry from Visual)
+        visual_structure = self.visual_extractor(x_ir)  # [B, 1, H, W]
+        visual_guidance = F.interpolate(visual_structure, size=feat_shallow.shape[2:],
+                                        mode='bilinear', align_corners=True)
+
+        # F3. [NEW] 自适应双流残差增强
+        # 新公式: feat_enhanced = feat_shallow × (1 + alpha*lidar + beta*visual)
+        #
+        # 工作模式：
+        # - 富裕模式 (LiDAR 强): alpha↑, beta 适中 → 主导 LiDAR，视觉辅助修边
+        # - 低保模式 (LiDAR 弱): alpha↓, beta↑ → 依赖视觉结构先验
+        feat_enhanced = feat_shallow * (
+            1.0 +
+            self.gate_lidar * lidar_guidance +    # 电子锁分支
+            self.gate_visual * visual_guidance     # 机械锁分支
+        )
+
+        # F4. 通过 1x1 卷积进一步提炼增强后的特征
+        feat_enhanced_processed = self.shallow_reducer(feat_enhanced)
+
+        # F5. 继续解码（在 x1_3 处融合增强特征）
+        x1_3_base = self.conv1_3(torch.cat([x1_0, self.up(x2_2)], 1))
+        x1_3_fused = x1_3_base + feat_enhanced_processed
+
+        # F6. 完成最后一层解码
+        x0_4 = self.conv0_4(torch.cat([x0_0, self.up(x1_3_fused)], 1))
+
+        # F7. 最终分割输出
+        output = self.final(x0_4)
+
+        # 返回两个结果：[检测图, 置信度图]
+        return output, pred_conf
+
+    def up(self, x):
+        return F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=True)
