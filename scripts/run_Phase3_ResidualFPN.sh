@@ -24,7 +24,7 @@ python train_Phase3.py \
     --in_channels 2 \
     --train_batch_size 4 \
     --test_batch_size 4 \
-    --epochs 500 \
+    --epochs 50 \
     --optimizer Adam \
     --lr 0.0005 \
     --min_lr 1e-5 \

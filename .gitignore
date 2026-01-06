@@ -130,3 +130,9 @@ vis_phase3_results/**/*
 dataset/**/json_prep/
 dataset/**/json_prep/**/*
 
+# Training results and model weights
+result/
+result/**/*
+result_good/
+result_good/**/*
+

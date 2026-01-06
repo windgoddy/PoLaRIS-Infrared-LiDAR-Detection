@@ -73,7 +73,14 @@ class Trainer(object):
         self.best_iou       = 0
         self.best_recall    = [0,0,0,0,0,0,0,0,0,0,0]
         self.best_precision = [0,0,0,0,0,0,0,0,0,0,0]
-        
+
+        # Last epoch metrics (for saving final model)
+        self.last_epoch = 0
+        self.last_test_loss = 0
+        self.last_mean_IOU = 0
+        self.last_recall = [0,0,0,0,0,0,0,0,0,0,0]
+        self.last_precision = [0,0,0,0,0,0,0,0,0,0,0]
+
         # Loss
         self.conf_loss = ConfidenceLoss()
 
@@ -150,6 +157,14 @@ class Trainer(object):
                 _, mean_IOU = self.mIoU.get()
                 tbar.set_description('Epoch %d, test loss %.4f, mean_IoU: %.4f' % (epoch, losses.avg, mean_IOU ))
             test_loss=losses.avg
+
+        # Store last epoch metrics
+        self.last_epoch = epoch
+        self.last_test_loss = test_loss
+        self.last_mean_IOU = mean_IOU
+        self.last_recall = recall
+        self.last_precision = precision
+
         # save high-performance model
         save_model(mean_IOU, self.best_iou, self.save_dir, self.save_prefix,
                    self.train_loss, test_loss, recall, precision, epoch, self.model.state_dict())
@@ -160,6 +175,14 @@ def main(args):
         trainer.training(epoch)
         trainer.testing(epoch)
         trainer.scheduler.step()
+
+    # Save the last epoch model
+    print("\n" + "="*60)
+    print("Training completed! Saving last epoch model...")
+    print("="*60)
+    save_last_epoch(trainer.save_dir, trainer.train_loss, trainer.last_test_loss,
+                    trainer.last_mean_IOU, trainer.last_recall, trainer.last_precision,
+                    trainer.last_epoch, trainer.model.state_dict())
 
 
 if __name__ == "__main__":
