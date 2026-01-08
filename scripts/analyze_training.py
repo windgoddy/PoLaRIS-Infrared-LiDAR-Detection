@@ -197,18 +197,22 @@ def extract_experiment_name(dir_name):
                 if len(parts) >= 8:
                     timestamp = '_'.join(parts[-7:-1])  # 去掉最后的 wDS/woDS
                     model = ''
-                    if 'DNANet' in dir_name:
-                        model = 'DNANet'
+                    if 'MS_CAFNet_DualGeo' in dir_name:
+                        model = 'MS_CAFNet_DualGeo'
                     elif 'MS_CAFNet' in dir_name or 'MSCAFNet' in dir_name:
                         model = 'MS_CAFNet'
+                    elif 'DNANet' in dir_name:
+                        model = 'DNANet'
 
                     return f"{model}_{timestamp}" if model else timestamp
                 else:
                     # 降级方案：使用模型名称
-                    if 'DNANet' in dir_name:
-                        return 'DNANet (old format)'
+                    if 'MS_CAFNet_DualGeo' in dir_name:
+                        return 'MS_CAFNet_DualGeo (old format)'
                     elif 'MS_CAFNet' in dir_name or 'MSCAFNet' in dir_name:
                         return 'MS_CAFNet (old format)'
+                    elif 'DNANet' in dir_name:
+                        return 'DNANet (old format)'
                     else:
                         return 'Unknown'
 
@@ -220,8 +224,19 @@ def get_experiment_info(result_dir):
 
     # 从文件夹名称中提取基本信息（作为降级方案）
     dir_name = os.path.basename(result_dir)
+
+    # 识别模型类型（优先匹配更具体的模型名）
+    if 'MS_CAFNet_DualGeo' in dir_name:
+        default_model = 'MS_CAFNet_DualGeo'
+    elif 'MS_CAFNet' in dir_name or 'MSCAFNet' in dir_name:
+        default_model = 'MS_CAFNet'
+    elif 'DNANet' in dir_name:
+        default_model = 'DNANet'
+    else:
+        default_model = 'N/A'
+
     info = {
-        'model': 'DNANet' if 'DNANet' in dir_name else ('MS_CAFNet' if 'MS_CAFNet' in dir_name else 'N/A'),
+        'model': default_model,
         'in_channels': 'N/A',
         'optimizer': 'N/A',
         'lr': 'N/A',
@@ -589,26 +604,130 @@ def print_detailed_analysis(experiments):
     # 性能对比
     print("\n📊 性能提升分析:")
 
-    # 查找 baseline
+    # 查找不同模型类型的实验
     baselines = [exp for exp in valid_experiments if 'baseline' in exp['experiment_name'].lower()]
-    phase3_exps = [exp for exp in valid_experiments if 'phase3' in exp['experiment_name'].lower()]
+    phase3_exps = [exp for exp in valid_experiments if 'phase3' in exp['experiment_name'].lower() and 'dualgeo' not in exp['experiment_name'].lower()]
+    dualgeo_exps = [exp for exp in valid_experiments if 'dualgeo' in exp['experiment_name'].lower() or exp['config']['model'] == 'MS_CAFNet_DualGeo']
 
+    # 对比 Baseline vs Phase3
     if baselines and phase3_exps:
-        baseline_iou = max([exp['iou_data']['mean_IoU'] for exp in baselines])
-        phase3_iou = max([exp['iou_data']['mean_IoU'] for exp in phase3_exps])
+        # 找到最佳实验
+        baseline_best = max(baselines, key=lambda x: x['iou_data']['mean_IoU'])
+        phase3_best = max(phase3_exps, key=lambda x: x['iou_data']['mean_IoU'])
+
+        baseline_iou = baseline_best['iou_data']['mean_IoU']
+        phase3_iou = phase3_best['iou_data']['mean_IoU']
 
         improvement = ((phase3_iou - baseline_iou) / baseline_iou) * 100
 
         print(f"  📊 Baseline 最佳 IoU: {baseline_iou:.4f}")
-        print(f"  📊 Phase3 最佳 IoU: {phase3_iou:.4f}")
-        print(f"  {'📈' if improvement > 0 else '📉'} 性能变化: {improvement:+.2f}%")
+        print(f"  📊 Phase3 (原模型) 最佳 IoU: {phase3_iou:.4f}")
+        print(f"  {'📈' if improvement > 0 else '📉'} 相比 Baseline: {improvement:+.2f}%")
+
+        # 添加 Recall 和 Precision 对比
+        if (baseline_best['metric_data'] and baseline_best['metric_data']['recall'] and
+            phase3_best['metric_data'] and phase3_best['metric_data']['recall']):
+            idx = 5 if len(baseline_best['metric_data']['recall']) > 5 else len(baseline_best['metric_data']['recall']) // 2
+
+            baseline_recall = baseline_best['metric_data']['recall'][idx]
+            phase3_recall = phase3_best['metric_data']['recall'][idx]
+            baseline_precision = baseline_best['metric_data']['precision'][idx]
+            phase3_precision = phase3_best['metric_data']['precision'][idx]
+
+            recall_improvement = ((phase3_recall - baseline_recall) / baseline_recall) * 100
+            precision_improvement = ((phase3_precision - baseline_precision) / baseline_precision) * 100
+
+            print(f"\n  🎯 检测性能对比 (@ IoU 0.5):")
+            print(f"    Recall:    {baseline_recall:.4f} → {phase3_recall:.4f} ({recall_improvement:+.2f}%)")
+            print(f"    Precision: {baseline_precision:.4f} → {phase3_precision:.4f} ({precision_improvement:+.2f}%)")
 
         if improvement > 5:
-            print("  ✅ Phase3 显著优于 Baseline")
+            print("\n  ✅ Phase3 显著优于 Baseline")
         elif improvement > 0:
-            print("  ⚡ Phase3 略优于 Baseline")
+            print("\n  ⚡ Phase3 略优于 Baseline")
         else:
-            print("  ⚠️  Phase3 未带来提升，需要调整")
+            print("\n  ⚠️  Phase3 未带来提升，需要调整")
+
+    # 对比 Phase3 vs DualGeo
+    if phase3_exps and dualgeo_exps:
+        phase3_iou = max([exp['iou_data']['mean_IoU'] for exp in phase3_exps])
+        dualgeo_iou = max([exp['iou_data']['mean_IoU'] for exp in dualgeo_exps])
+
+        improvement = ((dualgeo_iou - phase3_iou) / phase3_iou) * 100
+
+        print(f"\n  📊 Phase3_DualGeo 最佳 IoU: {dualgeo_iou:.4f}")
+        print(f"  {'📈' if improvement > 0 else '📉'} 相比原 Phase3: {improvement:+.2f}%")
+
+        if improvement > 2:
+            print("  🎉 DualGeo 显著优于原模型！双流几何引导有效！")
+        elif improvement > 0:
+            print("  ✅ DualGeo 略优于原模型，双流机制有正面效果")
+        else:
+            print("  ⚠️  DualGeo 未带来提升，可能需要调整超参数")
+
+        # 添加 Recall 和 Precision 对比
+        phase3_best = max(phase3_exps, key=lambda x: x['iou_data']['mean_IoU'])
+        dualgeo_best = max(dualgeo_exps, key=lambda x: x['iou_data']['mean_IoU'])
+
+        if (phase3_best['metric_data'] and phase3_best['metric_data']['recall'] and
+            dualgeo_best['metric_data'] and dualgeo_best['metric_data']['recall']):
+            idx = 5 if len(phase3_best['metric_data']['recall']) > 5 else len(phase3_best['metric_data']['recall']) // 2
+
+            phase3_recall = phase3_best['metric_data']['recall'][idx]
+            dualgeo_recall = dualgeo_best['metric_data']['recall'][idx]
+            phase3_precision = phase3_best['metric_data']['precision'][idx]
+            dualgeo_precision = dualgeo_best['metric_data']['precision'][idx]
+
+            recall_improvement = ((dualgeo_recall - phase3_recall) / phase3_recall) * 100
+            precision_improvement = ((dualgeo_precision - phase3_precision) / phase3_precision) * 100
+
+            print(f"\n  🎯 检测性能对比 (@ IoU 0.5):")
+            print(f"    Recall:    {phase3_recall:.4f} → {dualgeo_recall:.4f} ({recall_improvement:+.2f}%)")
+            print(f"    Precision: {phase3_precision:.4f} → {dualgeo_precision:.4f} ({precision_improvement:+.2f}%)")
+
+    # 三模型对比
+    if baselines and phase3_exps and dualgeo_exps:
+        baseline_iou = max([exp['iou_data']['mean_IoU'] for exp in baselines])
+        phase3_iou = max([exp['iou_data']['mean_IoU'] for exp in phase3_exps])
+        dualgeo_iou = max([exp['iou_data']['mean_IoU'] for exp in dualgeo_exps])
+
+        print(f"\n  🏆 总体进化路径:")
+        print(f"    Baseline → Phase3 → DualGeo")
+        print(f"    {baseline_iou:.4f} → {phase3_iou:.4f} (+{((phase3_iou - baseline_iou) / baseline_iou) * 100:.2f}%) → {dualgeo_iou:.4f} (+{((dualgeo_iou - phase3_iou) / phase3_iou) * 100:.2f}%)")
+        print(f"    总提升: {((dualgeo_iou - baseline_iou) / baseline_iou) * 100:+.2f}%")
+
+        # 添加 Recall 和 Precision 的三模型对比
+        baseline_best = max(baselines, key=lambda x: x['iou_data']['mean_IoU'])
+        phase3_best = max(phase3_exps, key=lambda x: x['iou_data']['mean_IoU'])
+        dualgeo_best = max(dualgeo_exps, key=lambda x: x['iou_data']['mean_IoU'])
+
+        if (baseline_best['metric_data'] and baseline_best['metric_data']['recall'] and
+            phase3_best['metric_data'] and phase3_best['metric_data']['recall'] and
+            dualgeo_best['metric_data'] and dualgeo_best['metric_data']['recall']):
+            idx = 5 if len(baseline_best['metric_data']['recall']) > 5 else len(baseline_best['metric_data']['recall']) // 2
+
+            baseline_recall = baseline_best['metric_data']['recall'][idx]
+            phase3_recall = phase3_best['metric_data']['recall'][idx]
+            dualgeo_recall = dualgeo_best['metric_data']['recall'][idx]
+            baseline_precision = baseline_best['metric_data']['precision'][idx]
+            phase3_precision = phase3_best['metric_data']['precision'][idx]
+            dualgeo_precision = dualgeo_best['metric_data']['precision'][idx]
+
+            recall_phase3_improve = ((phase3_recall - baseline_recall) / baseline_recall) * 100
+            recall_dualgeo_improve = ((dualgeo_recall - phase3_recall) / phase3_recall) * 100
+            recall_total_improve = ((dualgeo_recall - baseline_recall) / baseline_recall) * 100
+
+            precision_phase3_improve = ((phase3_precision - baseline_precision) / baseline_precision) * 100
+            precision_dualgeo_improve = ((dualgeo_precision - phase3_precision) / phase3_precision) * 100
+            precision_total_improve = ((dualgeo_precision - baseline_precision) / baseline_precision) * 100
+
+            print(f"\n  🎯 检测性能进化路径 (@ IoU 0.5):")
+            print(f"    Recall:")
+            print(f"      {baseline_recall:.4f} → {phase3_recall:.4f} (+{recall_phase3_improve:.2f}%) → {dualgeo_recall:.4f} (+{recall_dualgeo_improve:.2f}%)")
+            print(f"      总提升: {recall_total_improve:+.2f}%")
+            print(f"    Precision:")
+            print(f"      {baseline_precision:.4f} → {phase3_precision:.4f} (+{precision_phase3_improve:.2f}%) → {dualgeo_precision:.4f} (+{precision_dualgeo_improve:.2f}%)")
+            print(f"      总提升: {precision_total_improve:+.2f}%")
 
 def main():
     print("=" * 160)

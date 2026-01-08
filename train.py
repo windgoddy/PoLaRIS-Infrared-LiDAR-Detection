@@ -122,9 +122,9 @@ class Trainer(object):
                 _, mean_IOU = self.mIoU.get()
                 tbar.set_description('Epoch %d, test loss %.4f, mean_IoU: %.4f' % (epoch, losses.avg, mean_IOU ))
             test_loss=losses.avg
-        # save high-performance model
-        save_model(mean_IOU, self.best_iou, self.save_dir, self.save_prefix,
-                   self.train_loss, test_loss, recall, precision, epoch, self.model.state_dict())
+        # save high-performance model and update best_iou
+        self.best_iou = save_model(mean_IOU, self.best_iou, self.save_dir, self.save_prefix,
+                                    self.train_loss, test_loss, recall, precision, epoch, self.model.state_dict())
 
 def main(args):
     trainer = Trainer(args)
