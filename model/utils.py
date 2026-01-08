@@ -387,7 +387,6 @@ def save_last_epoch(save_dir, train_loss, test_loss, mean_IOU, recall, precision
     for old_model in old_last_models:
         try:
             os.remove(old_model)
-            print(f'Deleted old last epoch model: {os.path.basename(old_model)}')
         except Exception as e:
             print(f'Failed to delete {old_model}: {e}')
 

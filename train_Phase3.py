@@ -1,10 +1,13 @@
 # torch and visulization
 from tqdm             import tqdm
+import torch
 import torch.optim    as optim
 from torch.optim      import lr_scheduler
 from torchvision      import transforms
 from torch.utils.data import DataLoader
 from model.parse_args_train import  parse_args
+import random
+import numpy as np
 
 # metric, loss .etc
 from model.utils import *
@@ -15,7 +18,30 @@ from model.load_param_data import  load_dataset, load_param
 # model
 from model.model_DNANet import  Res_CBAM_block
 from model.model_DNANet import  DNANet
-from model.model_Phase3 import MS_CAFNet
+from model.model_Phase3 import MS_CAFNet, MS_CAFNet_DualGeo
+
+def set_seed(seed=42):
+    """
+    设置随机种子以确保实验可复现
+
+    Args:
+        seed: 随机种子值，默认 42
+
+    说明：
+        - random: Python 内置随机数生成器
+        - numpy: NumPy 随机数生成器
+        - torch: PyTorch CPU 随机数生成器
+        - torch.cuda: PyTorch GPU 随机数生成器
+        - cudnn.deterministic: 使用确定性算法（可能稍慢，但可复现）
+        - cudnn.benchmark: 关闭自动寻找最优算法（确保每次运行一致）
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    print(f"✅ 随机种子已设置: {seed} (确保实验可复现)")
 
 class Trainer(object):
     def __init__(self, args):
@@ -52,6 +78,8 @@ class Trainer(object):
             model       = DNANet(num_classes=1,input_channels=args.in_channels, block=Res_CBAM_block, num_blocks=num_blocks, nb_filter=nb_filter, deep_supervision=args.deep_supervision)
         elif args.model == 'MS_CAFNet':
             model       = MS_CAFNet(num_classes=1, input_channels=args.in_channels)
+        elif args.model == 'MS_CAFNet_DualGeo':
+            model       = MS_CAFNet_DualGeo(num_classes=1, input_channels=args.in_channels)
 
         model           = model.cuda()
         model.apply(weights_init_xavier)
@@ -95,7 +123,7 @@ class Trainer(object):
             labels = labels.cuda()
             oracle_masks = oracle_masks.cuda()
             
-            if self.args.model == 'MS_CAFNet':
+            if self.args.model == 'MS_CAFNet' or self.args.model == 'MS_CAFNet_DualGeo':
                 pred, pred_conf = self.model(data)
                 loss_seg = SoftIoULoss(pred, labels)
                 loss_conf = self.conf_loss(pred_conf, oracle_masks)
@@ -114,7 +142,7 @@ class Trainer(object):
             loss.backward()
             self.optimizer.step()
             
-            if self.args.model == 'MS_CAFNet':
+            if self.args.model == 'MS_CAFNet' or self.args.model == 'MS_CAFNet_DualGeo':
                  losses.update(loss.item(), pred.size(0))
             elif self.args.deep_supervision == 'True':
                  losses.update(loss.item(), preds[-1].size(0))
@@ -136,7 +164,7 @@ class Trainer(object):
                 data = data.cuda()
                 labels = labels.cuda()
                 
-                if self.args.model == 'MS_CAFNet':
+                if self.args.model == 'MS_CAFNet' or self.args.model == 'MS_CAFNet_DualGeo':
                     pred, pred_conf = self.model(data)
                     loss = SoftIoULoss(pred, labels) # Only seg loss for validation
                 elif self.args.deep_supervision == 'True':
@@ -170,6 +198,9 @@ class Trainer(object):
                    self.train_loss, test_loss, recall, precision, epoch, self.model.state_dict())
 
 def main(args):
+    # 设置随机种子以确保实验可复现
+    set_seed(42)
+
     trainer = Trainer(args)
     for epoch in range(args.start_epoch, args.epochs):
         trainer.training(epoch)
