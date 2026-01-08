@@ -199,7 +199,7 @@ class Trainer(object):
 
 def main(args):
     # 设置随机种子以确保实验可复现
-    set_seed(42)
+    set_seed(args.seed)
 
     trainer = Trainer(args)
     for epoch in range(args.start_epoch, args.epochs):

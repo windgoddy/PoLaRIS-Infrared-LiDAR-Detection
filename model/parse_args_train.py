@@ -61,6 +61,9 @@ def parse_args():
     parser.add_argument('--experiment_name', type=str, default=None,
                         help='Experiment name for result folder (e.g., baseline1, Phase3_ResidualFPN)')
 
+    # reproducibility
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Random seed for reproducibility (default: 42)')
 
     args = parser.parse_args()
     # make dir for save result

@@ -18,7 +18,7 @@ export CUDA_VISIBLE_DEVICES=4
 #    - 公式: feat_enhanced = feat × (1 + α·lidar_conf + β·visual_struct)
 # 4. 参数量增加: 仅 +82 参数 (<0.003%)
 
-# 训练配置：与原版 MS_CAFNet 保持一致，便于公平对比
+# 训练配置：与原版 MS_CAFNet 保持完全一致，便于公平对比
 python train_Phase3.py \
     --experiment_name Phase3_DualGeo \
     --model MS_CAFNet_DualGeo \
@@ -26,9 +26,10 @@ python train_Phase3.py \
     --train_batch_size 4 \
     --epochs 30 \
     --optimizer Adam \
-    --lr 0.003 \
+    --lr 0.0001 \
     --weight_decay 5e-4 \
     --scheduler CosineAnnealingLR \
     --min_lr 1e-6 \
     --in_channels 2 \
-    --deep_supervision False
+    --deep_supervision False \
+    --seed 42
