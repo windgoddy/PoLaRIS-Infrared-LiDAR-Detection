@@ -315,6 +315,10 @@ def analyze_single_experiment(result_dir):
     if other_logs:
         result['metric_data'] = analyze_other_metric_log(other_logs[0])
 
+    # 修正实验名称：确保DualGeo模型的实验名称包含'DualGeo'标识
+    if result['config']['model'] == 'MS_CAFNet_DualGeo' and 'dualgeo' not in experiment_name.lower():
+        result['experiment_name'] = experiment_name + '_DualGeo'
+
     return result
 
 def print_comparison_table(experiments):
@@ -604,10 +608,10 @@ def print_detailed_analysis(experiments):
     # 性能对比
     print("\n📊 性能提升分析:")
 
-    # 查找不同模型类型的实验
-    baselines = [exp for exp in valid_experiments if 'baseline' in exp['experiment_name'].lower()]
-    phase3_exps = [exp for exp in valid_experiments if 'phase3' in exp['experiment_name'].lower() and 'dualgeo' not in exp['experiment_name'].lower()]
-    dualgeo_exps = [exp for exp in valid_experiments if 'dualgeo' in exp['experiment_name'].lower() or exp['config']['model'] == 'MS_CAFNet_DualGeo']
+    # 查找不同模型类型的实验（优先使用模型类型而非实验名称）
+    baselines = [exp for exp in valid_experiments if exp['config']['model'] == 'DNANet']
+    phase3_exps = [exp for exp in valid_experiments if exp['config']['model'] == 'MS_CAFNet']
+    dualgeo_exps = [exp for exp in valid_experiments if exp['config']['model'] == 'MS_CAFNet_DualGeo']
 
     # 对比 Baseline vs Phase3
     if baselines and phase3_exps:
@@ -620,8 +624,8 @@ def print_detailed_analysis(experiments):
 
         improvement = ((phase3_iou - baseline_iou) / baseline_iou) * 100
 
-        print(f"  📊 Baseline 最佳 IoU: {baseline_iou:.4f}")
-        print(f"  📊 Phase3 (原模型) 最佳 IoU: {phase3_iou:.4f}")
+        print(f"  📊 Baseline (DNANet) 最佳 IoU: {baseline_iou:.4f}")
+        print(f"  📊 MS_CAFNet 最佳 IoU: {phase3_iou:.4f}")
         print(f"  {'📈' if improvement > 0 else '📉'} 相比 Baseline: {improvement:+.2f}%")
 
         # 添加 Recall 和 Precision 对比
@@ -642,11 +646,11 @@ def print_detailed_analysis(experiments):
             print(f"    Precision: {baseline_precision:.4f} → {phase3_precision:.4f} ({precision_improvement:+.2f}%)")
 
         if improvement > 5:
-            print("\n  ✅ Phase3 显著优于 Baseline")
+            print("\n  ✅ MS_CAFNet 显著优于 Baseline")
         elif improvement > 0:
-            print("\n  ⚡ Phase3 略优于 Baseline")
+            print("\n  ⚡ MS_CAFNet 略优于 Baseline")
         else:
-            print("\n  ⚠️  Phase3 未带来提升，需要调整")
+            print("\n  ⚠️  MS_CAFNet 未带来提升，需要调整")
 
     # 对比 Phase3 vs DualGeo
     if phase3_exps and dualgeo_exps:
@@ -655,15 +659,15 @@ def print_detailed_analysis(experiments):
 
         improvement = ((dualgeo_iou - phase3_iou) / phase3_iou) * 100
 
-        print(f"\n  📊 Phase3_DualGeo 最佳 IoU: {dualgeo_iou:.4f}")
-        print(f"  {'📈' if improvement > 0 else '📉'} 相比原 Phase3: {improvement:+.2f}%")
+        print(f"\n  📊 MS_CAFNet_DualGeo 最佳 IoU: {dualgeo_iou:.4f}")
+        print(f"  {'📈' if improvement > 0 else '📉'} 相比 MS_CAFNet: {improvement:+.2f}%")
 
         if improvement > 2:
-            print("  🎉 DualGeo 显著优于原模型！双流几何引导有效！")
+            print("  🎉 MS_CAFNet_DualGeo 显著优于 MS_CAFNet！双流几何引导有效！")
         elif improvement > 0:
-            print("  ✅ DualGeo 略优于原模型，双流机制有正面效果")
+            print("  ✅ MS_CAFNet_DualGeo 略优于 MS_CAFNet，双流机制有正面效果")
         else:
-            print("  ⚠️  DualGeo 未带来提升，可能需要调整超参数")
+            print("  ⚠️  MS_CAFNet_DualGeo 未带来提升，可能需要调整超参数")
 
         # 添加 Recall 和 Precision 对比
         phase3_best = max(phase3_exps, key=lambda x: x['iou_data']['mean_IoU'])
@@ -692,7 +696,7 @@ def print_detailed_analysis(experiments):
         dualgeo_iou = max([exp['iou_data']['mean_IoU'] for exp in dualgeo_exps])
 
         print(f"\n  🏆 总体进化路径:")
-        print(f"    Baseline → Phase3 → DualGeo")
+        print(f"    DNANet → MS_CAFNet → MS_CAFNet_DualGeo")
         print(f"    {baseline_iou:.4f} → {phase3_iou:.4f} (+{((phase3_iou - baseline_iou) / baseline_iou) * 100:.2f}%) → {dualgeo_iou:.4f} (+{((dualgeo_iou - phase3_iou) / phase3_iou) * 100:.2f}%)")
         print(f"    总提升: {((dualgeo_iou - baseline_iou) / baseline_iou) * 100:+.2f}%")
 
