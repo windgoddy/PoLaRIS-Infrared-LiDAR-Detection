@@ -18,7 +18,7 @@ python train.py \
     --root dataset \
     --model DNANet \
     --in_channels 1 \
-    --epochs 30 \
+    --epochs 200 \
     --train_batch_size 4 \
     --test_batch_size 4 \
     --base_size 256 \
