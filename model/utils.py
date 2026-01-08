@@ -337,6 +337,12 @@ def save_model_and_result(dt_string, epoch,train_loss, test_loss, best_iou, reca
         f.write('\n')
 
 def save_model(mean_IOU, best_iou, save_dir, save_prefix, train_loss, test_loss, recall, precision, epoch, net):
+    """
+    保存最佳模型
+
+    Returns:
+        best_iou: 更新后的最佳 mIoU（如果当前 mIoU 更好则返回新值，否则返回原值）
+    """
     if mean_IOU > best_iou:
         save_mIoU_dir = 'result/' + save_dir + '/' + save_prefix + '_best_IoU_IoU.log'
         save_other_metric_dir = 'result/' + save_dir + '/' + save_prefix + '_best_IoU_other_metric.log'
@@ -352,9 +358,9 @@ def save_model(mean_IOU, best_iou, save_dir, save_prefix, train_loss, test_loss,
         for old_model in old_best_models:
             try:
                 os.remove(old_model)
-                print(f'Deleted old best model: {os.path.basename(old_model)}')
+                print(f'✅ 删除旧模型: {os.path.basename(old_model)}')
             except Exception as e:
-                print(f'Failed to delete {old_model}: {e}')
+                print(f'❌ 删除失败 {old_model}: {e}')
 
         # 保存最佳模型（包含 epoch 和 IoU 信息）
         best_model_filename = f'best_model_epoch{epoch:04d}_mIoU{mean_IOU:.4f}.pth.tar'
@@ -367,6 +373,7 @@ def save_model(mean_IOU, best_iou, save_dir, save_prefix, train_loss, test_loss,
             'precision': precision,
         }, save_path='result/' + save_dir,
             filename=best_model_filename)
+        print(f'🎉 保存新的最佳模型: {best_model_filename} (Epoch {epoch}, mIoU {mean_IOU:.4f})')
 
         # 同时保存一个 latest_best.pth.tar（方便加载）
         save_ckpt({
@@ -378,6 +385,8 @@ def save_model(mean_IOU, best_iou, save_dir, save_prefix, train_loss, test_loss,
             'precision': precision,
         }, save_path='result/' + save_dir,
             filename='latest_best_model.pth.tar')
+
+    return best_iou
 
 def save_last_epoch(save_dir, train_loss, test_loss, mean_IOU, recall, precision, epoch, net):
     """保存最后一个 epoch 的模型"""

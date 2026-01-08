@@ -193,9 +193,9 @@ class Trainer(object):
         self.last_recall = recall
         self.last_precision = precision
 
-        # save high-performance model
-        save_model(mean_IOU, self.best_iou, self.save_dir, self.save_prefix,
-                   self.train_loss, test_loss, recall, precision, epoch, self.model.state_dict())
+        # save high-performance model and update best_iou
+        self.best_iou = save_model(mean_IOU, self.best_iou, self.save_dir, self.save_prefix,
+                                    self.train_loss, test_loss, recall, precision, epoch, self.model.state_dict())
 
 def main(args):
     # 设置随机种子以确保实验可复现
