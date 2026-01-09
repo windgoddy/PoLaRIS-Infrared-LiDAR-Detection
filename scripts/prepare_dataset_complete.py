@@ -359,6 +359,12 @@ def main():
 
             if img_shape is None:
                 img_shape = normalized.shape
+        else:
+            # 文件已存在，读取以获取 img_shape
+            if img_shape is None:
+                existing_img = cv2.imread(dst_img)
+                if existing_img is not None:
+                    img_shape = existing_img.shape
 
         # B. 处理 LiDAR
         try:
