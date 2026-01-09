@@ -35,9 +35,9 @@ echo "================================================================"
 echo ""
 
 # 步骤 2: 生成 masks
-echo ">>> 步骤 2/2: 生成二值掩码"
+echo ">>> 步骤 2/2: 生成二值掩码 (YOLO 格式)"
 echo ""
-python scripts/prepare_labels_for_all.py
+python scripts/prepare_labels_yolo.py
 
 # 检查是否成功
 if [ $? -ne 0 ]; then

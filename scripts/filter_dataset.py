@@ -29,7 +29,7 @@ RAW_LABEL_DIR = '/home/b311/data2/25-zhangxizhe/Pohang Canal Dataset And PoLaRIS
 TRAIN_RATIO = 0.8
 
 # 4. 标签文件扩展名（根据实际情况修改）
-LABEL_EXT = '.json'  # 如果是 .txt 格式，改为 '.txt'
+LABEL_EXT = '.txt'  # YOLO 格式标签
 # ===========================================
 
 def get_frame_names_from_dir(directory, extension):
