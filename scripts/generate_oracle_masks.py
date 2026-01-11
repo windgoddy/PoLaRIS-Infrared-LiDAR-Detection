@@ -327,22 +327,22 @@ def process_frame(ir_path, mask_path, lidar_path, K_cam, T_cam_to_lidar, output_
 def main():
     # --- 路径配置 (请修改这里) ---
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    dataset_dir = os.path.join(project_root, 'dataset/Pohang-Canal')
+    dataset_dir = os.path.join(project_root, 'dataset/Pohang-Canal-all')
     
     images_dir = os.path.join(dataset_dir, 'images')
     masks_dir = os.path.join(dataset_dir, 'masks')
     lidar_roi_dir = os.path.join(dataset_dir, 'lidar_roi')
     
     # 标定文件路径
-    calib_dir = os.path.join(dataset_dir, '00/calibration')
+    calib_dir = os.path.join(dataset_dir, 'calibration')
     
-    # 自动回退标定路径逻辑
-    if not os.path.exists(calib_dir):
-        # 尝试备用路径
-        calib_dir = '/home/b311/data2/25-zhangxizhe/Pohang Canal Dataset And PoLaRIS/Pohang Canal Dataset/00/calibration'
-        if not os.path.exists(calib_dir):
-            print("Error: Calibration directory not found.")
-            return
+    # 自动回退标定路径逻辑 (注释掉以防止错误读取)
+    # if not os.path.exists(calib_dir):
+    #     # 尝试备用路径
+    #     calib_dir = '/home/b311/data2/25-zhangxizhe/Pohang Canal Dataset And PoLaRIS/Pohang Canal Dataset/00/calibration'
+    #     if not os.path.exists(calib_dir):
+    #         print("Error: Calibration directory not found.")
+    #         return
 
     output_dir = os.path.join(dataset_dir, 'oracle_masks')
     vis_dir = os.path.join(dataset_dir, 'oracle_vis')
