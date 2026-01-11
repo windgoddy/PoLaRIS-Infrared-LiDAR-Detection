@@ -14,15 +14,18 @@ CONFIG = {
     # 1. 预处理
     'sor_nb_neighbors': 20,       # 统计滤波邻居数
     'sor_std_ratio': 2.0,         # 统计滤波标准差倍数
-    
-    # 2. 高斯掩码参数
-    'sigma_factor': 3.0,          # 无点时：中心高斯 sigma = w / 3.0
-    'lidar_sigma_factor': 4.0,    # 有点时：LiDAR点高斯 sigma = min(w,h) / 4.0 (更紧致)
-    'lidar_dilation_radius': 3,   # 有点时：先膨胀点云的半径，使稀疏点连成片
-    'box_gaussian_weight': 0.6,   # 混合模式下，GT框中心高斯的权重 (0.0~1.0)
-                                  # 0.6 意味着没有点云覆盖的船体区域，置信度最高为 0.6
-    
-    # 3. 背景过滤
+
+    # 2. 点云形状生成参数（新逻辑）
+    'point_dilation_radius': 2,   # 点云初始膨胀半径（像素），使稀疏点连成片
+    'morphology_kernel_size': 5,  # 形态学操作核大小（用于平滑边缘）
+    'gaussian_sigma_factor': 0.15, # 高斯平滑系数：sigma = factor * min(box_w, box_h)
+    'min_gaussian_sigma': 2.0,    # 最小高斯核 sigma
+    'max_gaussian_sigma': 10.0,   # 最大高斯核 sigma
+
+    # 3. 无点云时的回退参数
+    'box_center_sigma_factor': 3.0,  # 框中心高斯 sigma = w / 3.0
+
+    # 4. 背景抑制
     'bg_neighbor_radius': 2,      # 定义邻域半径 (2对应 5x5 窗口)
     'bg_min_neighbors': 2,        # 邻域内至少要有几个邻居才算有效背景
     'bg_suppression_radius': 5    # 背景点在 Mask 上挖洞的半径 (像素)
@@ -31,6 +34,53 @@ CONFIG = {
 # ==========================================
 # 核心工具函数
 # ==========================================
+
+# LiDAR 点云过滤配置（与训练时保持一致）
+LIDAR_FILTER_CONFIG = {
+    'min_depth': 3.0,
+    'max_depth': 150.0,
+    'min_height': -160.0,
+    'max_height': 50.0,
+    'use_intensity_filter': True,
+    'min_intensity': 5.0,
+    'filter_zero_intensity': True,
+}
+
+def filter_lidar_points(points, config=LIDAR_FILTER_CONFIG):
+    """
+    过滤 LiDAR 点云以移除噪声和自车
+
+    Args:
+        points: (N, 4) numpy array [x, y, z, intensity]
+        config: 过滤配置字典
+
+    Returns:
+        filtered_points: 过滤后的点云
+    """
+    if len(points) == 0:
+        return points
+
+    x, y, z, intensity = points[:, 0], points[:, 1], points[:, 2], points[:, 3]
+
+    # 1. 深度过滤（欧式距离）
+    depth = np.sqrt(x**2 + y**2 + z**2)
+    depth_mask = (depth >= config['min_depth']) & (depth <= config['max_depth'])
+
+    # 2. 高度过滤（Z 轴）
+    height_mask = (z >= config['min_height']) & (z <= config['max_height'])
+
+    # 3. 强度过滤
+    if config['use_intensity_filter']:
+        intensity_mask = intensity >= config['min_intensity']
+        if config['filter_zero_intensity']:
+            intensity_mask = intensity_mask & (intensity > 0)
+    else:
+        intensity_mask = np.ones(len(points), dtype=bool)
+
+    # 组合所有过滤条件
+    final_mask = depth_mask & height_mask & intensity_mask
+
+    return points[final_mask]
 
 def get_transform_matrix(extrinsics):
     """从外参字典构建 4x4 变换矩阵"""
@@ -110,110 +160,117 @@ def project_lidar_to_image(lidar_points, K_cam, T_cam_to_lidar, img_shape):
 
 def generate_hybrid_confidence_map(shape, boxes, lidar_pixels):
     """
-    生成混合置信度热力图
-    - 如果框内有 LiDAR 点：以点为中心向外扩散 (Distance Transform + Gaussian)
-    - 如果框内无 LiDAR 点：以框中心为中心向外扩散 (Center Gaussian)
-    
-    shape: (H, W)
-    boxes: list of [x, y, w, h]
-    lidar_pixels: (N, 2) 全局 LiDAR 投影点
+    生成混合置信度热力图（改进版：避免凸包和掩码溢出）
+
+    改进点：
+    1. 使用点云密度图 + 形态学操作代替凸包（保留非凸形状，如 L 型）
+    2. 严格限制掩码在标注框内（与 Box Mask 相乘）
+    3. 处理超出图像边界的标注框（裁剪到有效区域）
+    4. 使用高斯平滑代替距离变换（避免溢出）
+
+    Args:
+        shape: (H, W) 图像尺寸
+        boxes: list of [x, y, w, h] 标注框列表
+        lidar_pixels: (N, 2) 全局 LiDAR 投影点坐标 [u, v]
+
+    Returns:
+        heatmap: (H, W) 置信度热力图 [0.0, 1.0]
     """
     heatmap = np.zeros(shape, dtype=np.float32)
     H, W = shape
-    
+
     for (x, y, w, h) in boxes:
-        # 确保坐标在图像内
-        x1 = max(0, x)
-        y1 = max(0, y)
-        x2 = min(W, x + w)
-        y2 = min(H, y + h)
-        
-        # 实际绘制区域的宽高
+        # ========== 步骤 1: 边界处理 ==========
+        # 原始框坐标（可能超出图像）
+        x1_orig = x
+        y1_orig = y
+        x2_orig = x + w
+        y2_orig = y + h
+
+        # 裁剪到图像边界内
+        x1 = int(np.clip(x1_orig, 0, W))
+        y1 = int(np.clip(y1_orig, 0, H))
+        x2 = int(np.clip(x2_orig, 0, W))
+        y2 = int(np.clip(y2_orig, 0, H))
+
+        # 有效区域的宽高
         roi_w = x2 - x1
         roi_h = y2 - y1
-        
+
         if roi_w <= 0 or roi_h <= 0:
             continue
-            
-        # 无论是否有 LiDAR 点，都先生成一个基础的“框中心高斯”
-        # 这代表了 GT 框提供的先验知识：框内大概率是船
-        # 网格坐标 (相对于 ROI 左上角)
-        xx, yy = np.meshgrid(np.arange(roi_w), np.arange(roi_h))
-        
-        cx = roi_w / 2.0
-        cy = roi_h / 2.0
-        
-        sigma_x = roi_w / CONFIG['sigma_factor']
-        sigma_y = roi_h / CONFIG['sigma_factor']
-        sigma_x = max(sigma_x, 1.0)
-        sigma_y = max(sigma_y, 1.0)
-        
-        base_gaussian = np.exp(-((xx - cx)**2 / (2 * sigma_x**2) + (yy - cy)**2 / (2 * sigma_y**2)))
-        
-        # 查找落入该框内的 LiDAR 点
+
+        # ========== 步骤 2: 创建基准框掩码（Box Mask）==========
+        # 这个掩码用于强制限制所有生成的掩码不超出标注框
+        box_mask = np.ones((roi_h, roi_w), dtype=np.float32)
+
+        # ========== 步骤 3: 查找框内的 LiDAR 点 ==========
         if len(lidar_pixels) > 0:
+            # 注意：使用原始框坐标判断（允许框外的点参与，但最终会被裁剪）
             in_box = (lidar_pixels[:, 0] >= x1) & (lidar_pixels[:, 0] < x2) & \
                      (lidar_pixels[:, 1] >= y1) & (lidar_pixels[:, 1] < y2)
             box_pts = lidar_pixels[in_box]
         else:
             box_pts = np.zeros((0, 2))
-            
+
+        # ========== 步骤 4: 生成置信度图 ==========
         if len(box_pts) > 0:
-            # === 策略 A: 归一化距离场插值 (Normalized Distance Field) ===
-            # 目标：从凸包(1.0) 平滑过渡到 框边缘(0.0)
-            
-            # 1. 构建“源”掩码 (Source Mask) - LiDAR 凸包
-            # 255 = 背景, 0 = 源 (凸包内部)
-            source_mask = np.ones((roi_h, roi_w), dtype=np.uint8) * 255
-            
-            # 映射到局部坐标
+            # === 策略 A: 基于点云密度的非凸形状生成 ===
+
+            # 4.1 映射到局部坐标
             loc_pts = box_pts - np.array([x1, y1])
             loc_pts = loc_pts.astype(np.int32)
             loc_pts[:, 0] = np.clip(loc_pts[:, 0], 0, roi_w - 1)
             loc_pts[:, 1] = np.clip(loc_pts[:, 1], 0, roi_h - 1)
-            
-            # 绘制凸包作为源
-            if len(loc_pts) >= 3:
-                hull = cv2.convexHull(loc_pts)
-                cv2.fillConvexPoly(source_mask, hull, 0)
-            elif len(loc_pts) == 2:
-                cv2.line(source_mask, tuple(loc_pts[0]), tuple(loc_pts[1]), 0, thickness=CONFIG['lidar_dilation_radius']*2)
-            else:
-                cv2.circle(source_mask, tuple(loc_pts[0]), CONFIG['lidar_dilation_radius'], 0, -1)
-                
-            # 2. 构建“汇”掩码 (Sink Mask) - 框边缘
-            # 255 = 背景, 0 = 汇 (框边缘)
-            sink_mask = np.ones((roi_h, roi_w), dtype=np.uint8) * 255
-            # 将边缘设为 0
-            sink_mask[0, :] = 0
-            sink_mask[-1, :] = 0
-            sink_mask[:, 0] = 0
-            sink_mask[:, -1] = 0
-            
-            # 3. 计算距离场
-            # d_source: 到最近凸包点的距离
-            d_source = cv2.distanceTransform(source_mask, cv2.DIST_L2, 5)
-            # d_sink: 到最近框边缘的距离
-            d_sink = cv2.distanceTransform(sink_mask, cv2.DIST_L2, 5)
-            
-            # 4. 归一化插值
-            # Value = d_sink / (d_source + d_sink + epsilon)
-            # 在凸包内: d_source=0 -> Value=1
-            # 在边缘上: d_sink=0 -> Value=0
-            denominator = d_source + d_sink + 1e-5
-            conf_roi = d_sink / denominator
-            
-            # 可选：对结果进行高斯平滑，消除距离变换的棱角
-            # conf_roi = cv2.GaussianBlur(conf_roi, (5, 5), 0)
-            
+
+            # 4.2 创建点云密度图（在点的位置绘制小圆）
+            point_mask = np.zeros((roi_h, roi_w), dtype=np.uint8)
+            for pt in loc_pts:
+                cv2.circle(point_mask, tuple(pt), CONFIG['point_dilation_radius'], 255, -1)
+
+            # 4.3 形态学闭运算（连接稀疏点，平滑边缘）
+            kernel_size = CONFIG['morphology_kernel_size']
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+            point_mask = cv2.morphologyEx(point_mask, cv2.MORPH_CLOSE, kernel)
+
+            # 4.4 转换为浮点 [0.0, 1.0]
+            conf_roi = point_mask.astype(np.float32) / 255.0
+
+            # 4.5 高斯平滑（生成中心高、边缘低的软掩码）
+            box_size = min(roi_w, roi_h)
+            sigma = CONFIG['gaussian_sigma_factor'] * box_size
+            sigma = np.clip(sigma, CONFIG['min_gaussian_sigma'], CONFIG['max_gaussian_sigma'])
+
+            # 高斯核大小必须是奇数
+            ksize = int(6 * sigma) | 1  # 6*sigma 覆盖 99.7% 的能量
+            ksize = max(3, min(ksize, min(roi_w, roi_h)))  # 限制核大小
+
+            conf_roi = cv2.GaussianBlur(conf_roi, (ksize, ksize), sigma)
+
+            # 4.6 归一化到 [0, 1]
+            if conf_roi.max() > 0:
+                conf_roi = conf_roi / conf_roi.max()
+
         else:
-            # === 策略 B: 纯框模式 (Box Only) ===
-            # 只有基础高斯，满权重
-            conf_roi = base_gaussian
-        
-        # 叠加 (取最大值)
+            # === 策略 B: 无点云时，使用框中心高斯 ===
+            xx, yy = np.meshgrid(np.arange(roi_w), np.arange(roi_h))
+
+            cx = roi_w / 2.0
+            cy = roi_h / 2.0
+
+            sigma_x = roi_w / CONFIG['box_center_sigma_factor']
+            sigma_y = roi_h / CONFIG['box_center_sigma_factor']
+            sigma_x = max(sigma_x, 1.0)
+            sigma_y = max(sigma_y, 1.0)
+
+            conf_roi = np.exp(-((xx - cx)**2 / (2 * sigma_x**2) + (yy - cy)**2 / (2 * sigma_y**2)))
+
+        # ========== 步骤 5: 强制约束在框内 ==========
+        conf_roi = conf_roi * box_mask
+
+        # ========== 步骤 6: 叠加到全局热力图（取最大值）==========
         heatmap[y1:y2, x1:x2] = np.maximum(heatmap[y1:y2, x1:x2], conf_roi)
-        
+
     return heatmap
 
 # ==========================================
@@ -240,9 +297,13 @@ def process_frame(ir_path, mask_path, lidar_path, K_cam, T_cam_to_lidar, output_
             points = np.zeros((0, 4), dtype=np.float32)
     else:
         points = np.zeros((0, 4), dtype=np.float32)
-        
+
     # --- 2. 预处理 ---
-    points_clean = remove_outliers(points)
+    # 2.1 应用 LiDAR 过滤（与训练时保持一致）
+    points_filtered = filter_lidar_points(points, LIDAR_FILTER_CONFIG)
+    # 2.2 统计离群点去除
+    points_clean = remove_outliers(points_filtered)
+    # 2.3 投影到图像
     pixels, _ = project_lidar_to_image(points_clean, K_cam, T_cam_to_lidar, img.shape)
     
     # --- 3. 生成高斯置信度图 (Gaussian Confidence Map) ---

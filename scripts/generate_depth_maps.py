@@ -13,9 +13,56 @@ CONFIG = {
     'save_format': '.npy', # 使用 numpy 格式保存浮点深度
 }
 
+# LiDAR 点云过滤配置（与可视化保持一致）
+FILTER_CONFIG = {
+    'min_depth': 3.0,        # 最小深度 (m) - 过滤自车
+    'max_depth': 150.0,      # 最大深度 (m) - 移除远处噪声
+    'min_height': -160.0,    # 最小高度 (m) - 保留地面点
+    'max_height': 50.0,      # 最大高度 (m) - 过滤天空伪影
+    'use_intensity_filter': True,
+    'min_intensity': 5.0,
+    'filter_zero_intensity': True,
+}
+
 # ==========================================
 # 工具函数 (复用)
 # ==========================================
+def filter_lidar_points(points, config=FILTER_CONFIG):
+    """
+    过滤 LiDAR 点云以移除噪声和自车
+
+    Args:
+        points: (N, 4) numpy array [x, y, z, intensity]
+        config: 过滤配置字典
+
+    Returns:
+        filtered_points: 过滤后的点云
+    """
+    if len(points) == 0:
+        return points
+
+    x, y, z, intensity = points[:, 0], points[:, 1], points[:, 2], points[:, 3]
+
+    # 1. 深度过滤（欧式距离）
+    depth = np.sqrt(x**2 + y**2 + z**2)
+    depth_mask = (depth >= config['min_depth']) & (depth <= config['max_depth'])
+
+    # 2. 高度过滤（Z 轴）
+    height_mask = (z >= config['min_height']) & (z <= config['max_height'])
+
+    # 3. 强度过滤
+    if config['use_intensity_filter']:
+        intensity_mask = intensity >= config['min_intensity']
+        if config['filter_zero_intensity']:
+            intensity_mask = intensity_mask & (intensity > 0)
+    else:
+        intensity_mask = np.ones(len(points), dtype=bool)
+
+    # 组合所有过滤条件
+    final_mask = depth_mask & height_mask & intensity_mask
+
+    return points[final_mask]
+
 def get_transform_matrix(extrinsics):
     q = extrinsics['quaternion']
     t = extrinsics['translation']
@@ -129,7 +176,9 @@ def main():
         
         if os.path.exists(lidar_path):
             points = np.fromfile(lidar_path, dtype=np.float32).reshape(-1, 4)
-            depth_map = project_lidar_to_image(points, K_cam, T_cam_to_lidar, (H, W))
+            # 应用点云过滤（与可视化保持一致）
+            points_filtered = filter_lidar_points(points, FILTER_CONFIG)
+            depth_map = project_lidar_to_image(points_filtered, K_cam, T_cam_to_lidar, (H, W))
         else:
             depth_map = np.zeros((H, W), dtype=np.float32)
             
