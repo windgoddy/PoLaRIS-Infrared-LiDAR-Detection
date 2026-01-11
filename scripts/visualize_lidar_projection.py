@@ -5,9 +5,15 @@
 
 功能：
 - 读取 Pohang-Canal-all 数据集
-- 将 LiDAR 点云投影到红外图像上
-- 使用深度信息为点着色
+- 应用 LiDAR 点云过滤（深度、高度、强度）
+- 将过滤后的 LiDAR 点云投影到红外图像上
+- 使用深度信息为点着色（viridis colormap）
 - 保存可视化结果
+
+过滤规则：
+- 深度范围：3.0 - 150.0 米（移除自车和远处噪声）
+- 高度范围：-160.0 - 50.0 米（保留地面点，过滤天空伪影）
+- 强度过滤：最小强度 5.0（移除弱反射噪声）
 
 数据结构：
 dataset/Pohang-Canal-all/
@@ -28,6 +34,17 @@ import argparse
 # ==================== 配置 ====================
 DATASET_ROOT = '/home/b311/data2/25-zhangxizhe/code/PoLaRIS-Infrared-LiDAR-Detection/dataset/Pohang-Canal-all'
 OUTPUT_DIR = os.path.join(DATASET_ROOT, 'vis_lidar_projection')
+
+# LiDAR 点云过滤配置
+FILTER_CONFIG = {
+    'min_depth': 3.0,        # 最小深度 (m) - 过滤自车
+    'max_depth': 150.0,      # 最大深度 (m) - 移除远处噪声
+    'min_height': -160.0,    # 最小高度 (m) - 保留地面点
+    'max_height': 50.0,      # 最大高度 (m) - 过滤天空伪影
+    'use_intensity_filter': True,
+    'min_intensity': 5.0,
+    'filter_zero_intensity': True,
+}
 # ==============================================
 
 def get_transform_matrix(extrinsics):
@@ -50,6 +67,44 @@ def get_transform_matrix(extrinsics):
     T[:3, :3] = R
     T[:3, 3] = trans
     return T
+
+def filter_lidar_points(points, config=FILTER_CONFIG):
+    """
+    过滤 LiDAR 点云以移除噪声和自车
+
+    Args:
+        points: (N, 4) numpy array [x, y, z, intensity]
+        config: 过滤配置字典
+
+    Returns:
+        filtered_points: 过滤后的点云
+    """
+    original_count = points.shape[0]
+
+    x, y, z = points[:, 0], points[:, 1], points[:, 2]
+    intensity = points[:, 3]
+
+    # 计算距离
+    distances = np.sqrt(x**2 + y**2 + z**2)
+
+    # 初始化掩码
+    mask = np.ones(original_count, dtype=bool)
+
+    # 1. 深度过滤
+    mask &= (distances >= config['min_depth']) & (distances <= config['max_depth'])
+
+    # 2. 高度过滤
+    mask &= (y >= config['min_height']) & (y <= config['max_height'])
+
+    # 3. 强度过滤
+    if config.get('use_intensity_filter', False):
+        if config.get('filter_zero_intensity', False):
+            mask &= intensity > config['min_intensity']
+        else:
+            mask &= intensity >= config['min_intensity']
+
+    filtered_points = points[mask]
+    return filtered_points
 
 def project_lidar_to_image(lidar_points, K_cam, T_cam_to_lidar, img_shape):
     """
@@ -171,8 +226,16 @@ def visualize_frames(frame_ids, dataset_root, output_dir, K_cam, T_cam_to_lidar)
             cv2.imwrite(os.path.join(output_dir, frame_id + '.png'), img)
             continue
 
+        # 过滤点云（移除噪声和自车）
+        points_filtered = filter_lidar_points(points)
+
+        if len(points_filtered) == 0:
+            # 过滤后没有点云，保存原图
+            cv2.imwrite(os.path.join(output_dir, frame_id + '.png'), img)
+            continue
+
         # 投影
-        pixels, depths = project_lidar_to_image(points, K_cam, T_cam_to_lidar, img.shape)
+        pixels, depths = project_lidar_to_image(points_filtered, K_cam, T_cam_to_lidar, img.shape)
 
         if len(pixels) == 0:
             # 没有投影点，保存原图

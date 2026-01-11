@@ -52,7 +52,14 @@ def load_split_list(split_file):
 
 def yolo_to_mask(yolo_path, img_height, img_width, target_class_ids):
     """
-    将 YOLO 格式标签转换为二值掩码
+    将 YOLO 格式标签转换为二值掩码，并执行【边缘截断过滤】
+
+    过滤策略：
+    - 内部目标：仅过滤极小噪点（有效面积 < 5 像素）
+    - 边缘截断目标：严格过滤
+      * 有效面积 < 25 像素
+      * 有效最小边 < 5 像素
+      * 有效长宽比 > 4.0
 
     Args:
         yolo_path: YOLO 标签文件路径
@@ -95,26 +102,57 @@ def yolo_to_mask(yolo_path, img_height, img_width, target_class_ids):
             if class_id not in target_class_ids:
                 continue
 
-            # 将归一化坐标转换为像素坐标
-            center_x_px = int(center_x * img_width)
-            center_y_px = int(center_y * img_height)
-            width_px = int(width * img_width)
-            height_px = int(height * img_height)
+            # 1. 计算原始坐标（浮点数，可能超出图像边界）
+            x_c = center_x * img_width
+            y_c = center_y * img_height
+            w_raw = width * img_width
+            h_raw = height * img_height
 
-            # 计算边界框的左上角和右下角
-            x1 = int(center_x_px - width_px / 2)
-            y1 = int(center_y_px - height_px / 2)
-            x2 = int(center_x_px + width_px / 2)
-            y2 = int(center_y_px + height_px / 2)
+            x1 = x_c - w_raw/2
+            y1 = y_c - h_raw/2
+            x2 = x_c + w_raw/2
+            y2 = y_c + h_raw/2
 
-            # 确保坐标在图像范围内
-            x1 = max(0, min(x1, img_width - 1))
-            y1 = max(0, min(y1, img_height - 1))
-            x2 = max(0, min(x2, img_width - 1))
-            y2 = max(0, min(y2, img_height - 1))
+            # 2. 计算裁剪后的有效坐标（Effective Coordinates）
+            # 这一步至关重要，获取实际在图像内的部分
+            x1_clip = max(0, int(x1))
+            y1_clip = max(0, int(y1))
+            x2_clip = min(img_width, int(x2))
+            y2_clip = min(img_height, int(y2))
 
-            # 在 mask 上绘制填充的矩形
-            cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
+            # 3. 计算有效尺寸
+            eff_w = x2_clip - x1_clip
+            eff_h = y2_clip - y1_clip
+            eff_area = eff_w * eff_h
+
+            if eff_area <= 0:
+                continue  # 无效区域，跳过
+
+            eff_min_side = min(eff_w, eff_h)
+            eff_ratio = max(eff_w, eff_h) / (eff_min_side + 1e-6)
+
+            # 4. 判断是否接触边缘
+            # 只要原始坐标超出了 [0, width] 或 [0, height]，就是边缘目标
+            is_boundary = (x1 < 0) or (y1 < 0) or (x2 > img_width) or (y2 > img_height)
+
+            # 5. 过滤逻辑
+            keep_it = True
+
+            if is_boundary:
+                # === 仅针对边缘目标执行严格过滤 ===
+                # 策略：如果只剩一个"角落"，删掉
+                # 阈值：有效面积 < 25 或 有效边 < 5 或 长宽比 > 4
+                if eff_area < 25 or eff_min_side < 5 or eff_ratio > 4.0:
+                    keep_it = False
+            else:
+                # === 内部目标 ===
+                # 策略：内部目标一般是好的，除非是极小的单像素噪点
+                if eff_area < 5:  # 极低阈值，仅防死像素
+                    keep_it = False
+
+            if keep_it:
+                # 绘制有效部分（使用裁剪后的坐标）
+                cv2.rectangle(mask, (x1_clip, y1_clip), (x2_clip, y2_clip), 255, -1)
 
         return mask
 
