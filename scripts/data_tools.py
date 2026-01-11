@@ -22,18 +22,19 @@ import numpy as np
 import argparse
 import shutil
 import random
+import json
 from tqdm import tqdm
 from datetime import datetime
 
 # ==================== 全局配置 ====================
 DATASET_ROOT = '/home/b311/data2/25-zhangxizhe/code/PoLaRIS-Infrared-LiDAR-Detection/dataset/Pohang-Canal-all'
 LABEL_DIR = '/home/b311/data2/25-zhangxizhe/Pohang Canal Dataset And PoLaRIS/PoLaRIS/PoLaRIS/00/all/00_inf_labels'
-LIDAR_DIR = '/home/b311/data2/25-zhangxizhe/Pohang Canal Dataset And PoLaRIS/PoLaRIS/PoLaRIS/00/lidar'
-CALIB_DIR = '/home/b311/data2/25-zhangxizhe/Pohang Canal Dataset And PoLaRIS/PoLaRIS/PoLaRIS/00/calib'
 
 IMAGES_DIR = os.path.join(DATASET_ROOT, 'images')
 MASKS_DIR = os.path.join(DATASET_ROOT, 'masks')
 SPLIT_DIR = os.path.join(DATASET_ROOT, 'split_data')
+LIDAR_DIR = os.path.join(DATASET_ROOT, 'lidar_roi')
+CALIB_DIR = os.path.join(DATASET_ROOT, 'calibration')
 
 IMG_W, IMG_H = 640, 512
 
@@ -51,6 +52,28 @@ FILTER_CONFIG = {
 
 
 # ==================== 功能1: 过滤有效激光雷达图像 ====================
+def get_transform_matrix(extrinsics):
+    """构建 4x4 变换矩阵"""
+    quat = extrinsics['quaternion']
+    trans = extrinsics['translation']
+
+    x, y, z, w = quat
+    norm = np.sqrt(x*x + y*y + z*z + w*w)
+    if norm > 0:
+        x, y, z, w = x/norm, y/norm, z/norm, w/norm
+
+    R = np.array([
+        [1 - 2*(y*y + z*z), 2*(x*y - w*z), 2*(x*z + w*y)],
+        [2*(x*y + w*z), 1 - 2*(x*x + z*z), 2*(y*z - w*x)],
+        [2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x*x + y*y)]
+    ], dtype=np.float32)
+
+    T = np.eye(4, dtype=np.float32)
+    T[:3, :3] = R
+    T[:3, 3] = trans
+    return T
+
+
 def filter_lidar_points(points, config=FILTER_CONFIG):
     """过滤LiDAR点云"""
     x, y, z = points[:, 0], points[:, 1], points[:, 2]
@@ -113,12 +136,24 @@ def filter_valid_lidar_images(min_points=2):
     print(f"最小投影点数: {min_points}")
     print("=" * 80)
 
-    # 读取标定文件
-    K_cam_path = os.path.join(CALIB_DIR, 'calib_cam_to_cam.txt')
-    T_path = os.path.join(CALIB_DIR, 'calib_lidar_to_cam.txt')
+    # 读取标定文件（JSON格式）
+    with open(os.path.join(CALIB_DIR, 'intrinsics.json')) as f:
+        ir_intrinsics = json.load(f)['infrared']
 
-    K_cam = np.loadtxt(K_cam_path)
-    T_cam_to_lidar = np.loadtxt(T_path)
+    with open(os.path.join(CALIB_DIR, 'extrinsics.json')) as f:
+        extrinsics = json.load(f)
+        ir_extrinsics = extrinsics['infrared']
+        lidar_extrinsics = extrinsics['lidar_front']
+
+    # 内参矩阵
+    fx = fy = ir_intrinsics['focal_length']
+    cx, cy = ir_intrinsics['cc_x'], ir_intrinsics['cc_y']
+    K_cam = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
+
+    # 外参变换
+    T_cam_to_base = get_transform_matrix(ir_extrinsics)
+    T_lidar_to_base = get_transform_matrix(lidar_extrinsics)
+    T_cam_to_lidar = np.linalg.inv(T_cam_to_base) @ T_lidar_to_base
 
     # 获取所有点云文件
     lidar_files = sorted([f for f in os.listdir(LIDAR_DIR) if f.endswith('.bin')])
