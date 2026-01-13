@@ -1,0 +1,378 @@
+#!/usr/bin/env python3
+"""
+单张图像 Oracle Mask 生成脚本 (优化版)
+优化目标：生成具有平滑梯度、层次分明的置信度图
+融合策略：加权求和 (Weighted Sum) 代替 最大值 (Maximum)
+
+使用方法：
+python scripts/generate_single_oracle.py --image_id 009043 --dataset dataset/Pohang-Canal-all
+"""
+
+import os
+import sys
+import json
+import cv2
+import numpy as np
+from scipy.spatial import cKDTree
+import argparse
+
+# 添加父目录到路径
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# ==========================================
+# 1. 核心配置参数 (集中管理)
+# ==========================================
+CONFIG = {
+    # --- 预处理 ---
+    'sor_nb_neighbors': 20,
+    'sor_std_ratio': 2.0,
+
+    # --- 形状先验流 (Shape Stream) ---
+    # 作用：提供物体存在的"保底"置信度
+    # 建议：0.3-0.4。太高会导致全图橙色，掩盖LiDAR特征；太低导致漏检。
+    'shape_base_weight': 0.3, 
+
+    # --- LiDAR 点云流 (LiDAR Stream) ---
+    # 作用：提供物理实锤的高置信度
+    # 建议：0.7-0.8。与 Shape 叠加后应达到 1.0。
+    'lidar_weight': 0.7,
+    
+    # LiDAR 形状生成参数
+    'point_dilation_radius': 6,   # 适度膨胀，让稀疏点连接
+    'morphology_kernel_size': 9,  # 闭运算核，填补空隙
+    'lidar_gaussian_scale': 0.25, # 高斯模糊尺度 (ROI尺寸的百分比)
+
+    # --- 渐变控制 ---
+    # 作用：控制无点云框的渐变平缓程度
+    # gradient_power: 幂指数，越小过渡区域越大
+    # - 1.0: 线性渐变
+    # - 0.5: 平方根渐变（过渡区域更大，推荐）
+    # - 0.3: 更平缓（过渡区域非常大）
+    'gradient_power': 0.8,
+
+    # --- 背景抑制 ---
+    'bg_neighbor_radius': 2,
+    'bg_min_neighbors': 2,
+    'bg_suppression_radius': 5
+}
+
+# LiDAR 点云过滤配置
+LIDAR_FILTER_CONFIG = {
+    'min_depth': 3.0,
+    'max_depth': 150.0,
+    'min_height': -160.0,
+    'max_height': 50.0,
+    'use_intensity_filter': True,
+    'min_intensity': 5.0,
+    'filter_zero_intensity': True,
+}
+
+# ==========================================
+# 2. 工具函数
+# ==========================================
+
+def filter_lidar_points(points, config=LIDAR_FILTER_CONFIG):
+    """过滤 LiDAR 点云"""
+    if len(points) == 0: return points
+    x, y, z, intensity = points[:, 0], points[:, 1], points[:, 2], points[:, 3]
+    
+    depth = np.sqrt(x**2 + y**2 + z**2)
+    depth_mask = (depth >= config['min_depth']) & (depth <= config['max_depth'])
+    height_mask = (z >= config['min_height']) & (z <= config['max_height'])
+    
+    if config['use_intensity_filter']:
+        intensity_mask = intensity >= config['min_intensity']
+        if config['filter_zero_intensity']:
+            intensity_mask = intensity_mask & (intensity > 0)
+    else:
+        intensity_mask = np.ones(len(points), dtype=bool)
+
+    return points[depth_mask & height_mask & intensity_mask]
+
+def get_transform_matrix(extrinsics):
+    """构建变换矩阵"""
+    q = extrinsics['quaternion']
+    t = extrinsics['translation']
+    x, y, z, w = q
+    norm = np.sqrt(x*x + y*y + z*z + w*w)
+    if norm > 0: x, y, z, w = x/norm, y/norm, z/norm, w/norm
+    R = np.array([
+        [1 - 2*(y*y + z*z), 2*(x*y - w*z), 2*(x*z + w*y)],
+        [2*(x*y + w*z), 1 - 2*(x*x + z*z), 2*(y*z - w*x)],
+        [2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x*x + y*y)]
+    ], dtype=np.float32)
+    T = np.eye(4, dtype=np.float32)
+    T[:3, :3] = R
+    T[:3, 3] = t
+    return T
+
+def remove_outliers(points):
+    """统计离群点去除"""
+    if len(points) < CONFIG['sor_nb_neighbors'] + 1: return points
+    xyz = points[:, :3]
+    tree = cKDTree(xyz)
+    dists, _ = tree.query(xyz, k=CONFIG['sor_nb_neighbors'] + 1)
+    mean_dists = np.mean(dists[:, 1:], axis=1)
+    threshold = np.mean(mean_dists) + CONFIG['sor_std_ratio'] * np.std(mean_dists)
+    return points[mean_dists < threshold]
+
+def project_lidar_to_image(lidar_points, K_cam, T_cam_to_lidar, img_shape):
+    """LiDAR 投影"""
+    if len(lidar_points) == 0:
+        return np.zeros((0, 2), dtype=int), np.zeros((0,), dtype=float)
+    
+    xyz_points = lidar_points[:, :3]
+    pts_homo = np.hstack([xyz_points, np.ones((xyz_points.shape[0], 1))])
+    pts_cam = (T_cam_to_lidar @ pts_homo.T).T
+    
+    valid_z = pts_cam[:, 2] >= 0.1
+    pts_cam = pts_cam[valid_z]
+    if len(pts_cam) == 0:
+        return np.zeros((0, 2), dtype=int), np.zeros((0,), dtype=float)
+
+    pts_img_homo = (K_cam @ pts_cam[:, :3].T).T
+    u = pts_img_homo[:, 0] / pts_img_homo[:, 2]
+    v = pts_img_homo[:, 1] / pts_img_homo[:, 2]
+
+    H, W = img_shape[:2]
+    valid_uv = (u >= 0) & (u < W) & (v >= 0) & (v < H)
+    
+    pixels = np.column_stack([u[valid_uv].astype(int), v[valid_uv].astype(int)])
+    return pixels, pts_cam[valid_z][valid_uv, 2]
+
+# ==========================================
+# 3. 核心生成逻辑 (优化版)
+# ==========================================
+
+def generate_hybrid_confidence_map(shape, boxes, lidar_pixels, gt_mask, verbose=False):
+    """
+    生成混合置信度热力图 - 严格按照渐变规则
+    规则：
+    1. 所有框都有从1→0的渐变
+    2. 有点云的框：点云区域=1，到框边缘逐渐→0
+    3. 无点云的框：从框中心=1，到框边缘逐渐→0
+    """
+    heatmap = np.zeros(shape, dtype=np.float32)
+    H, W = shape
+
+    for idx, (x, y, w, h) in enumerate(boxes, 1):
+        # 1. 边界处理
+        x1, y1 = int(np.clip(x, 0, W)), int(np.clip(y, 0, H))
+        x2, y2 = int(np.clip(x + w, 0, W)), int(np.clip(y + h, 0, H))
+        roi_w, roi_h = x2 - x1, y2 - y1
+        if roi_w <= 0 or roi_h <= 0: continue
+
+        # 2. 提取 ROI GT Mask
+        roi_gt_mask = gt_mask[y1:y2, x1:x2]
+        roi_gt_bool = roi_gt_mask > 0
+        if not np.any(roi_gt_bool): continue
+
+        # 3. 筛选框内点云
+        box_pts = np.array([])
+        if len(lidar_pixels) > 0:
+            in_box = (lidar_pixels[:, 0] >= x1) & (lidar_pixels[:, 0] < x2) & \
+                     (lidar_pixels[:, 1] >= y1) & (lidar_pixels[:, 1] < y2)
+            box_pts = lidar_pixels[in_box]
+
+        has_lidar = len(box_pts) > 0
+
+        # 调试输出
+        if verbose:
+            print(f"  标注框 {idx}: 位置=({x1},{y1})-({x2},{y2}), 尺寸={roi_w}×{roi_h}, 点云数={len(box_pts)}, 状态={'✅有点云' if has_lidar else '❌无点云'}")
+
+        # ===== 分支1: 有点云的框 =====
+        if has_lidar:
+            # 步骤1: 生成点云掩码（连接稀疏点）
+            loc_pts = (box_pts - np.array([x1, y1])).astype(np.int32)
+            point_mask = np.zeros((roi_h, roi_w), dtype=np.uint8)
+            
+            for pt in loc_pts:
+                px = np.clip(pt[0], 0, roi_w - 1)
+                py = np.clip(pt[1], 0, roi_h - 1)
+                cv2.circle(point_mask, (px, py), CONFIG['point_dilation_radius'], 255, -1)
+            
+            # 闭运算填补空隙
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, 
+                                             (CONFIG['morphology_kernel_size'], CONFIG['morphology_kernel_size']))
+            point_mask = cv2.morphologyEx(point_mask, cv2.MORPH_CLOSE, kernel)
+            point_mask_bool = point_mask > 0
+
+            # 步骤2: 生成渐变
+            conf_roi = np.zeros((roi_h, roi_w), dtype=np.float32)
+            
+            # 2.1 点云区域直接设为1.0
+            conf_roi[point_mask_bool] = 1.0
+            
+            # 2.2 非点云区域：计算到点云边缘的距离，做反向归一化
+            # 创建一个反向掩码（GT内但不在点云掩码内的区域）
+            non_lidar_region = roi_gt_bool & (~point_mask_bool)
+            
+            if np.any(non_lidar_region):
+                # 对点云掩码做距离变换，得到到最近点云边缘的距离
+                # 注意：这里要对整个ROI做距离变换，而不是只对GT区域
+                dist_to_lidar = cv2.distanceTransform((~point_mask_bool).astype(np.uint8), cv2.DIST_L2, 5)
+                
+                # 对非点云区域，距离越大，置信度越低
+                # 归一化：最远距离→0，紧邻点云边缘→接近1
+                if dist_to_lidar[non_lidar_region].max() > 0:
+                    max_dist = dist_to_lidar[non_lidar_region].max()
+                    # 反向映射：距离0→1.0，距离max→0.0
+                    conf_roi[non_lidar_region] = 1.0 - (dist_to_lidar[non_lidar_region] / max_dist)
+
+        # ===== 分支2: 无点云的框 =====
+        else:
+            # 策略：使用GT mask的距离变换生成渐变（形状骨架方案）
+            # 优势：自动适应mask的实际形状（圆形、L型、弓形等）
+            # 距离变换会找到到最近边缘的距离，形成自然的形状骨架
+
+            # 使用距离变换：计算每个像素到GT mask边缘的距离
+            dist_transform = cv2.distanceTransform(roi_gt_mask, cv2.DIST_L2, 5)
+            
+            # 检查距离变换是否有效（处理GT mask填满bbox的情况）
+            # 当GT mask填满整个bbox时，没有边缘，距离变换会返回异常值
+            if dist_transform.max() > 0 and dist_transform.max() < 10000:  # 正常范围
+                if verbose:
+                    print(f"    → GT mask距离变换: max={dist_transform.max():.2f}")
+                
+                # 归一化并应用幂函数调整渐变曲线
+                if dist_transform.max() > 0:
+                    # 先归一化到[0,1]：边缘=0，形状骨架=1
+                    normalized = dist_transform / dist_transform.max()
+
+                    # 应用幂函数：x^α (α < 1 使渐变更平缓)
+                    conf_roi = np.power(normalized, CONFIG['gradient_power'])
+
+                    if verbose:
+                        print(f"    → 幂函数调整(α={CONFIG['gradient_power']}): min={conf_roi.min():.2f}, max={conf_roi.max():.2f}")
+                else:
+                    conf_roi = np.ones((roi_h, roi_w), dtype=np.float32)
+            else:
+                # Fallback: GT mask填满bbox，使用bbox边缘距离
+                if verbose:
+                    print(f"    → GT mask填满bbox，使用bbox边缘距离作为fallback")
+                
+                yy, xx = np.ogrid[:roi_h, :roi_w]
+                dist_to_left = xx
+                dist_to_right = roi_w - 1 - xx
+                dist_to_top = yy
+                dist_to_bottom = roi_h - 1 - yy
+                
+                dist_to_bbox_edge = np.minimum(np.minimum(dist_to_left, dist_to_right),
+                                               np.minimum(dist_to_top, dist_to_bottom)).astype(np.float32)
+                
+                if dist_to_bbox_edge.max() > 0:
+                    normalized = dist_to_bbox_edge / dist_to_bbox_edge.max()
+                    conf_roi = np.power(normalized, CONFIG['gradient_power'])
+                else:
+                    conf_roi = np.ones((roi_h, roi_w), dtype=np.float32)
+
+        # 4. 强制约束在GT区域内
+        conf_roi = conf_roi * roi_gt_bool.astype(np.float32)
+
+        if verbose:
+            print(f"    → GT裁剪后最大值={conf_roi.max():.2f}, 平均值={conf_roi[roi_gt_bool].mean():.2f}")
+
+        # 5. 叠加到全局热力图
+        heatmap[y1:y2, x1:x2] = np.maximum(heatmap[y1:y2, x1:x2], conf_roi)
+
+    return heatmap
+
+# ==========================================
+# 4. 主流程
+# ==========================================
+
+def process_single_image(image_id, dataset_dir, output_base_dir=None):
+    if output_base_dir is None: output_base_dir = dataset_dir
+
+    # 路径构建
+    ir_path = os.path.join(dataset_dir, 'images', f'{image_id}.png')
+    mask_path = os.path.join(dataset_dir, 'masks', f'{image_id}.png')
+    lidar_path = os.path.join(dataset_dir, 'lidar_roi', f'{image_id}.bin')
+    calib_dir = os.path.join(dataset_dir, 'calibration')
+    
+    output_dir = os.path.join(output_base_dir, 'oracle_masks')
+    vis_dir = os.path.join(output_base_dir, 'oracle_vis')
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(vis_dir, exist_ok=True)
+
+    print(f"Processing: {image_id} ...")
+
+    # 1. 检查文件
+    if not os.path.exists(ir_path) or not os.path.exists(mask_path):
+        print("❌ Image or Mask not found.")
+        return False
+
+    # 2. 加载数据
+    img = cv2.imread(ir_path)
+    gt_mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+    H, W = gt_mask.shape
+    
+    # 加载点云 (容错)
+    try:
+        points = np.fromfile(lidar_path, dtype=np.float32).reshape(-1, 4)
+    except:
+        points = np.zeros((0, 4), dtype=np.float32)
+
+    # 加载标定
+    try:
+        with open(os.path.join(calib_dir, 'intrinsics.json')) as f:
+            ir_intrinsics = json.load(f)['infrared']
+        with open(os.path.join(calib_dir, 'extrinsics.json')) as f:
+            ext = json.load(f)
+            K_cam = np.array([[ir_intrinsics['focal_length'], 0, ir_intrinsics['cc_x']], 
+                              [0, ir_intrinsics['focal_length'], ir_intrinsics['cc_y']], 
+                              [0, 0, 1]], dtype=np.float32)
+            T_cam_to_lidar = np.linalg.inv(get_transform_matrix(ext['infrared'])) @ get_transform_matrix(ext['lidar_front'])
+    except:
+        print("❌ Calibration failed.")
+        return False
+
+    # 3. 处理点云
+    pts_clean = remove_outliers(filter_lidar_points(points))
+    pixels, _ = project_lidar_to_image(pts_clean, K_cam, T_cam_to_lidar, img.shape)
+
+    # 4. 生成 Oracle Mask
+    num, _, stats, _ = cv2.connectedComponentsWithStats(gt_mask, connectivity=8)
+    boxes = [stats[i][:4] for i in range(1, num)] # x,y,w,h
+
+    print(f"\n📊 图像 {image_id} 的标注框点云统计：")
+    print(f"总点云数: {len(pixels)}")
+    print(f"总标注框数: {len(boxes)}")
+
+    confidence_map = generate_hybrid_confidence_map((H, W), boxes, pixels, gt_mask, verbose=True)
+
+    # 5. 背景抑制 (挖洞)
+    if len(pixels) > 0:
+        bg_pixels = pixels[gt_mask[pixels[:, 1], pixels[:, 0]] == 0]
+        if len(bg_pixels) > 0:
+            bg_hit_map = np.zeros((H, W), dtype=np.uint8)
+            bg_hit_map[bg_pixels[:, 1], bg_pixels[:, 0]] = 1
+            kernel = np.ones((5, 5), dtype=np.uint8)
+            # 只有当周围点数足够多才视为可靠背景
+            valid_bg_y, valid_bg_x = np.where((bg_hit_map == 1) & (cv2.filter2D(bg_hit_map, -1, kernel) >= CONFIG['bg_min_neighbors'] + 1))
+            for bx, by in zip(valid_bg_x, valid_bg_y):
+                cv2.circle(confidence_map, (bx, by), CONFIG['bg_suppression_radius'], 0.0, -1)
+
+    # 6. 保存与可视化
+    cv2.imwrite(os.path.join(output_dir, f'{image_id}.png'), (confidence_map * 255).astype(np.uint8))
+    
+    vis_img = cv2.addWeighted(img, 0.6, cv2.applyColorMap((confidence_map * 255).astype(np.uint8), cv2.COLORMAP_JET), 0.4, 0)
+    cv2.drawContours(vis_img, cv2.findContours(gt_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0], -1, (0, 255, 0), 1)
+    cv2.imwrite(os.path.join(vis_dir, f'{image_id}.png'), vis_img)
+    
+    print(f"✅ Done. Vis saved to {os.path.join(vis_dir, f'{image_id}.png')}")
+    return True
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--image_id', type=str, required=True)
+    parser.add_argument('--dataset', type=str, default='dataset/Pohang-Canal-all')
+    parser.add_argument('--output', type=str, default=None)
+    args = parser.parse_args()
+    
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    dataset_dir = os.path.join(project_root, args.dataset)
+    process_single_image(args.image_id, dataset_dir, os.path.join(project_root, args.output) if args.output else dataset_dir)
+
+if __name__ == "__main__":
+    main()

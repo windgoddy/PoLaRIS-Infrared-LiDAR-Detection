@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 显卡设置
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=6
 
 # chmod +x scripts/run_Phase3_DualGeo_all_dataset.sh
 # ./scripts/run_Phase3_DualGeo_all_dataset.sh
@@ -26,10 +26,11 @@ python train_Phase3.py \
     --model MS_CAFNet_DualGeo \
     --dataset Pohang-Canal-all \
     --split_method split_data \
-    --train_batch_size 4 \
+    --train_batch_size 32 \
+    --test_batch_size 32 \
     --epochs 200 \
     --optimizer Adam \
-    --lr 0.0001 \
+    --lr 0.00001 \
     --weight_decay 5e-4 \
     --scheduler CosineAnnealingLR \
     --min_lr 1e-6 \
