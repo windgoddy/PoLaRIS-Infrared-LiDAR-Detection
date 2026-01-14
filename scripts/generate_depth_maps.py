@@ -127,13 +127,15 @@ def project_lidar_to_image(lidar_points, K_cam, T_cam_to_lidar, img_shape):
 def main():
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     dataset_dir = os.path.join(project_root, 'dataset/Pohang-Canal-all')
-
+    
     images_dir = os.path.join(dataset_dir, 'images')
     lidar_roi_dir = os.path.join(dataset_dir, 'lidar_roi')
     output_dir = os.path.join(dataset_dir, 'depth_maps')
-
-    # 标定文件路径（新数据集中 calibration 在根目录下）
-    calib_dir = os.path.join(dataset_dir, 'calibration')
+    
+    # 标定文件路径
+    calib_dir = os.path.join(dataset_dir, '00/calibration')
+    if not os.path.exists(calib_dir):
+        calib_dir = '/home/b311/data2/25-zhangxizhe/Pohang Canal Dataset And PoLaRIS/Pohang Canal Dataset/00/calibration'
         
     os.makedirs(output_dir, exist_ok=True)
     

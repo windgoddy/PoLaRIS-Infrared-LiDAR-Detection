@@ -38,6 +38,14 @@ CONFIG = {
     # - 0.5: 平方根渐变（过渡区域更大）
     'gradient_power': 0.8,  # 幂指数：越小过渡区域越大
 
+    # --- 自适应矩形分解 (Adaptive Rectangular Decomposition) ---
+    # 作用:解决不规则形状(L型、U型)的重心偏移问题
+    'use_rect_decomposition': True,  # 是否启用矩形分解算法
+    'max_rect_iterations': 5,        # 最多分解为几个矩形
+    'min_rect_area': 10,             # 忽略小于此面积的矩形碎片
+    'rect_gradient_power': 0.5,      # 每个子矩形的渐变幂指数
+    'gaussian_blur_size': 15,         # 矩形拼接后的高斯模糊核大小
+
     # 4. 背景抑制
     'bg_neighbor_radius': 2,      # 定义邻域半径 (2对应 5x5 窗口)
     'bg_min_neighbors': 2,        # 邻域内至少要有几个邻居才算有效背景
@@ -58,6 +66,114 @@ LIDAR_FILTER_CONFIG = {
     'min_intensity': 5.0,
     'filter_zero_intensity': True,
 }
+
+def get_largest_rectangle_in_mask(mask):
+    """
+    在二值掩码中找到最大的内切矩形
+    使用直方图最大矩形法 (Largest Rectangle in Histogram)
+    
+    Args:
+        mask: 二值掩码 (numpy array, 值为0或1)
+    
+    Returns:
+        (x, y, w, h): 矩形坐标和尺寸,如果未找到则返回 (0, 0, 0, 0)
+    """
+    if mask.sum() == 0:
+        return (0, 0, 0, 0)
+    
+    h, w = mask.shape
+    max_area = 0
+    best_rect = (0, 0, 0, 0)
+    
+    # 构建累积直方图
+    heights = np.zeros((h, w), dtype=int)
+    for i in range(h):
+        for j in range(w):
+            if mask[i, j] > 0:
+                heights[i, j] = heights[i-1, j] + 1 if i > 0 else 1
+    
+    # 对每一行应用直方图最大矩形算法
+    for i in range(h):
+        hist = heights[i, :]
+        area, rect_info = _largest_rectangle_in_histogram(hist)
+        if area > max_area:
+            max_area = area
+            x, width = rect_info
+            # 计算矩形的顶部y坐标
+            rect_height = hist[x]
+            y = i - rect_height + 1
+            best_rect = (x, y, width, rect_height)
+    
+    return best_rect
+
+def _largest_rectangle_in_histogram(heights):
+    """
+    直方图中的最大矩形面积(单调栈算法)
+    
+    Args:
+        heights: 一维数组,表示直方图的高度
+    
+    Returns:
+        (max_area, (x, width)): 最大面积和矩形的起始位置及宽度
+    """
+    stack = []
+    max_area = 0
+    best_pos = (0, 0)
+    
+    for i, h in enumerate(heights):
+        start = i
+        while stack and stack[-1][1] > h:
+            idx, height = stack.pop()
+            area = height * (i - idx)
+            if area > max_area:
+                max_area = area
+                best_pos = (idx, i - idx)
+            start = idx
+        stack.append((start, h))
+    
+    # 处理栈中剩余元素
+    for idx, height in stack:
+        area = height * (len(heights) - idx)
+        if area > max_area:
+            max_area = area
+            best_pos = (idx, len(heights) - idx)
+    
+    return max_area, best_pos
+
+def generate_gradient_for_rect(rect_shape, gradient_power=0.5):
+    """
+    为单个矩形生成从中心到边缘的渐变热力图
+    
+    Args:
+        rect_shape: (h, w) 矩形的高度和宽度
+        gradient_power: 幂函数指数,控制渐变平滑度
+    
+    Returns:
+        gradient_map: 渐变热力图,范围 [0, 1]
+    """
+    h, w = rect_shape
+    
+    # 创建坐标网格
+    yy, xx = np.ogrid[:h, :w]
+    
+    # 计算到各边的距离
+    dist_to_left = xx
+    dist_to_right = w - 1 - xx
+    dist_to_top = yy
+    dist_to_bottom = h - 1 - yy
+    
+    # 到最近边缘的距离
+    dist_to_edge = np.minimum(np.minimum(dist_to_left, dist_to_right),
+                              np.minimum(dist_to_top, dist_to_bottom)).astype(np.float32)
+    
+    # 归一化并应用幂函数
+    if dist_to_edge.max() > 0:
+        normalized = dist_to_edge / dist_to_edge.max()
+        gradient_map = np.power(normalized, gradient_power)
+    else:
+        gradient_map = np.ones((h, w), dtype=np.float32)
+    
+    return gradient_map
 
 def filter_lidar_points(points, config=LIDAR_FILTER_CONFIG):
     """
@@ -244,41 +360,86 @@ def generate_hybrid_confidence_map(shape, boxes, lidar_pixels, gt_mask):
 
         # ===== 分支2: 无点云的框 =====
         else:
-            # 策略：使用GT mask的距离变换生成渐变（形状骨架方案）
-            # 优势：自动适应mask的实际形状（圆形、L型、弓形等）
-            # 距离变换会找到到最近边缘的距离，形成自然的形状骨架
-
-            # 使用距离变换：计算每个像素到GT mask边缘的距离
-            dist_transform = cv2.distanceTransform(roi_gt_mask, cv2.DIST_L2, 5)
-            
-            # 检查距离变换是否有效（处理GT mask填满bbox的情况）
-            # 当GT mask填满整个bbox时，没有边缘，距离变换会返回异常值
-            if dist_transform.max() > 0 and dist_transform.max() < 10000:  # 正常范围
-                # 归一化并应用幂函数调整渐变曲线
-                if dist_transform.max() > 0:
-                    # 先归一化到[0,1]：边缘=0，形状骨架=1
-                    normalized = dist_transform / dist_transform.max()
-
-                    # 应用幂函数：x^α (α < 1 使渐变更平缓)
-                    conf_roi = np.power(normalized, CONFIG['gradient_power'])
-                else:
-                    conf_roi = np.ones((roi_h, roi_w), dtype=np.float32)
+            # 根据配置选择生成策略
+            if CONFIG['use_rect_decomposition']:
+                # 新策略: 自适应矩形分解 - 解决L型/U型等不规则形状的重心偏移问题
+                
+                # 初始化
+                conf_roi = np.zeros((roi_h, roi_w), dtype=np.float32)
+                temp_mask = roi_gt_mask.copy()
+                
+                # 迭代分解
+                for iter_idx in range(CONFIG['max_rect_iterations']):
+                    # 1. 找到当前最大的内切矩形
+                    rx, ry, rw, rh = get_largest_rectangle_in_mask(temp_mask)
+                    rect_area = rw * rh
+                    
+                    if rect_area < CONFIG['min_rect_area']:
+                        break
+                    
+                    # 2. 为该矩形生成局部渐变
+                    local_gradient = generate_gradient_for_rect((rh, rw), CONFIG['rect_gradient_power'])
+                    
+                    # 3. 融合到全局热力图 (使用Max操作保证重叠区域取最高值)
+                    conf_roi[ry:ry+rh, rx:rx+rw] = np.maximum(
+                        conf_roi[ry:ry+rh, rx:rx+rw], 
+                        local_gradient
+                    )
+                    
+                    # 4. 从临时mask中移除已处理的矩形区域
+                    temp_mask[ry:ry+rh, rx:rx+rw] = 0
+                    
+                    # 如果剩余区域为空,提前结束
+                    if temp_mask.sum() == 0:
+                        break
+                
+                # 5. 后处理: 高斯模糊消除矩形拼接处的生硬边缘
+                if CONFIG['gaussian_blur_size'] > 0:
+                    ksize = CONFIG['gaussian_blur_size']
+                    if ksize % 2 == 0:
+                        ksize += 1  # 确保是奇数
+                    conf_roi = cv2.GaussianBlur(conf_roi, (ksize, ksize), 0)
+                    
+                    # 模糊后重新归一化到[0,1]
+                    if conf_roi.max() > 0:
+                        conf_roi = conf_roi / conf_roi.max()
+                    
             else:
-                # Fallback: GT mask填满bbox，使用bbox边缘距离
-                yy, xx = np.ogrid[:roi_h, :roi_w]
-                dist_to_left = xx
-                dist_to_right = roi_w - 1 - xx
-                dist_to_top = yy
-                dist_to_bottom = roi_h - 1 - yy
+                # 原策略: 使用GT mask的距离变换生成渐变 (形状骨架方案)
+                # 优势: 自动适应mask的实际形状 (圆形、L型、弓形等)
+                # 距离变换会找到到最近边缘的距离,形成自然的形状骨架
+
+                # 使用距离变换: 计算每个像素到GT mask边缘的距离
+                dist_transform = cv2.distanceTransform(roi_gt_mask, cv2.DIST_L2, 5)
                 
-                dist_to_bbox_edge = np.minimum(np.minimum(dist_to_left, dist_to_right),
-                                               np.minimum(dist_to_top, dist_to_bottom)).astype(np.float32)
-                
-                if dist_to_bbox_edge.max() > 0:
-                    normalized = dist_to_bbox_edge / dist_to_bbox_edge.max()
-                    conf_roi = np.power(normalized, CONFIG['gradient_power'])
+                # 检查距离变换是否有效 (处理GT mask填满bbox的情况)
+                # 当GT mask填满整个bbox时,没有边缘,距离变换会返回异常值
+                if dist_transform.max() > 0 and dist_transform.max() < 10000:  # 正常范围
+                    # 归一化并应用幂函数调整渐变曲线
+                    if dist_transform.max() > 0:
+                        # 先归一化到[0,1]: 边缘=0,形状骨架=1
+                        normalized = dist_transform / dist_transform.max()
+
+                        # 应用幂函数: x^α (α < 1 使渐变更平缓)
+                        conf_roi = np.power(normalized, CONFIG['gradient_power'])
+                    else:
+                        conf_roi = np.ones((roi_h, roi_w), dtype=np.float32)
                 else:
-                    conf_roi = np.ones((roi_h, roi_w), dtype=np.float32)
+                    # Fallback: GT mask填满bbox,使用bbox边缘距离
+                    yy, xx = np.ogrid[:roi_h, :roi_w]
+                    dist_to_left = xx
+                    dist_to_right = roi_w - 1 - xx
+                    dist_to_top = yy
+                    dist_to_bottom = roi_h - 1 - yy
+                    
+                    dist_to_bbox_edge = np.minimum(np.minimum(dist_to_left, dist_to_right),
+                                                   np.minimum(dist_to_top, dist_to_bottom)).astype(np.float32)
+                    
+                    if dist_to_bbox_edge.max() > 0:
+                        normalized = dist_to_bbox_edge / dist_to_bbox_edge.max()
+                        conf_roi = np.power(normalized, CONFIG['gradient_power'])
+                    else:
+                        conf_roi = np.ones((roi_h, roi_w), dtype=np.float32)
 
         # 4. 强制约束在GT区域内
         conf_roi = conf_roi * roi_gt_bool.astype(np.float32)
