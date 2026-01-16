@@ -49,7 +49,15 @@ CONFIG = {
     # 4. 背景抑制
     'bg_neighbor_radius': 2,      # 定义邻域半径 (2对应 5x5 窗口)
     'bg_min_neighbors': 2,        # 邻域内至少要有几个邻居才算有效背景
-    'bg_suppression_radius': 5    # 背景点在 Mask 上挖洞的半径 (像素)
+    'bg_suppression_radius': 5,   # 背景点在 Mask 上挖洞的半径 (像素)
+
+    # 5. 纯视觉目标（无点云）的软标签机制
+    'visual_max_confidence': 0.6,  # 无点云框的最大置信度（建议0.5-0.7）
+
+    # 6. 纹理平滑度过滤（框内区域细化）
+    'gradient_threshold': 8,     # 纹理梯度阈值（8-bit: 3-10, 16-bit: 100-500）
+    'texture_dilation_kernel': 4,  # 形态学膨胀核大小（连接碎片纹理）
+    'min_refined_area': 20,        # 细化后的最小有效面积（像素数）
 }
 
 # ==========================================
@@ -287,16 +295,30 @@ def project_lidar_to_image(lidar_points, K_cam, T_cam_to_lidar, img_shape):
     pixels = np.column_stack([u.astype(int), v.astype(int)])
     return pixels, depths
 
-def generate_hybrid_confidence_map(shape, boxes, lidar_pixels, gt_mask):
+def generate_hybrid_confidence_map(shape, boxes, lidar_pixels, gt_mask, image):
     """
-    生成混合置信度热力图 - 严格按照渐变规则
+    生成混合置信度热力图 - 严格按照渐变规则 + 软标签机制
     规则：
-    1. 所有框都有从1→0的渐变
-    2. 有点云的框：点云区域=1，到框边缘逐渐→0
-    3. 无点云的框：从框中心=1，到框边缘逐渐→0
+    1. 有点云的框：点云区域=1.0，到框边缘逐渐→0
+    2. 无点云的框：
+       - 先进行纹理检查，过滤平滑区域（天空/海面）
+       - 通过纹理检查后，从框中心=visual_max_confidence（如0.6），到框边缘逐渐→0
+
+    Args:
+        shape: 图像尺寸 (H, W)
+        boxes: 标注框列表 [(x, y, w, h), ...]
+        lidar_pixels: 投影到图像上的点云坐标 [(u, v), ...]
+        gt_mask: Ground Truth 掩码
+        image: 红外图像，用于纹理分析 (需要灰度图或彩色图的单通道)
     """
     heatmap = np.zeros(shape, dtype=np.float32)
     H, W = shape
+
+    # 确保 image 是灰度图（用于计算纹理标准差）
+    if len(image.shape) == 3:
+        image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        image_gray = image
 
     for (x, y, w, h) in boxes:
         # 1. 边界处理
@@ -360,86 +382,125 @@ def generate_hybrid_confidence_map(shape, boxes, lidar_pixels, gt_mask):
 
         # ===== 分支2: 无点云的框 =====
         else:
-            # 根据配置选择生成策略
+            # 【新增】框内区域细化 (ROI Refinement)
+            # 目标：去除框内的平滑背景（天空/海面），只在有纹理的物体核心区域生成渐变
+
+            # 步骤1: 提取红外图像ROI并计算纹理梯度图
+            roi_ir = image_gray[y1:y2, x1:x2]
+
+            # 使用 Laplacian 算子计算梯度（对边缘和纹理敏感，对平滑区域响应为0）
+            laplacian = cv2.Laplacian(roi_ir, cv2.CV_64F)
+            grad_map = np.abs(laplacian)
+
+            # 步骤2: 二值化得到纹理掩码（有纹理=1，平滑=0）
+            _, texture_mask = cv2.threshold(
+                grad_map,
+                CONFIG['gradient_threshold'],
+                255,
+                cv2.THRESH_BINARY
+            )
+            texture_mask = texture_mask.astype(np.uint8)
+
+            # 步骤3: 形态学膨胀，连接碎片纹理并填补物体内部空洞
+            kernel_size = CONFIG['texture_dilation_kernel']
+            kernel = np.ones((kernel_size, kernel_size), np.uint8)
+            texture_mask = cv2.dilate(texture_mask, kernel, iterations=1)
+
+            # 步骤4: 将纹理掩码转为布尔型，并与GT mask求交集
+            # 这样可以精确地只保留"既在GT内，又有纹理"的区域
+            texture_mask_bool = texture_mask > 0
+            refined_mask = roi_gt_bool & texture_mask_bool  # 交集
+
+            refined_area = np.sum(refined_mask)
+
+            # 步骤5: 检查细化后的区域是否太小（可能是噪点）
+            if refined_area < CONFIG['min_refined_area']:
+                continue
+
+            if not np.any(refined_mask):
+                # 全是平滑背景，跳过该框
+                continue
+
+            # 步骤6: 在整个ROI内生成渐变，但最后用refined_mask精确裁剪
+            # 初始化整个ROI的置信度图（全0）
+            conf_roi = np.zeros((roi_h, roi_w), dtype=np.float32)
+
+            # 根据配置选择生成策略（在整个ROI内操作，但用refined_mask作为目标区域）
             if CONFIG['use_rect_decomposition']:
-                # 新策略: 自适应矩形分解 - 解决L型/U型等不规则形状的重心偏移问题
-                
-                # 初始化
-                conf_roi = np.zeros((roi_h, roi_w), dtype=np.float32)
-                temp_mask = roi_gt_mask.copy()
-                
+                # 策略1: 自适应矩形分解（在refined_mask区域内操作）
+
+                # 使用refined_mask作为输入
+                temp_mask = refined_mask.astype(np.uint8)
+
                 # 迭代分解
                 for iter_idx in range(CONFIG['max_rect_iterations']):
                     # 1. 找到当前最大的内切矩形
                     rx, ry, rw, rh = get_largest_rectangle_in_mask(temp_mask)
                     rect_area = rw * rh
-                    
+
                     if rect_area < CONFIG['min_rect_area']:
                         break
-                    
+
                     # 2. 为该矩形生成局部渐变
                     local_gradient = generate_gradient_for_rect((rh, rw), CONFIG['rect_gradient_power'])
-                    
-                    # 3. 融合到全局热力图 (使用Max操作保证重叠区域取最高值)
+
+                    # 3. 融合到全局热力图
                     conf_roi[ry:ry+rh, rx:rx+rw] = np.maximum(
-                        conf_roi[ry:ry+rh, rx:rx+rw], 
+                        conf_roi[ry:ry+rh, rx:rx+rw],
                         local_gradient
                     )
-                    
-                    # 4. 从临时mask中移除已处理的矩形区域
+
+                    # 4. 从临时mask中移除已处理的矩形
                     temp_mask[ry:ry+rh, rx:rx+rw] = 0
-                    
-                    # 如果剩余区域为空,提前结束
+
                     if temp_mask.sum() == 0:
                         break
-                
-                # 5. 后处理: 高斯模糊消除矩形拼接处的生硬边缘
+
+                # 5. 后处理: 高斯模糊
                 if CONFIG['gaussian_blur_size'] > 0:
                     ksize = CONFIG['gaussian_blur_size']
                     if ksize % 2 == 0:
-                        ksize += 1  # 确保是奇数
+                        ksize += 1
                     conf_roi = cv2.GaussianBlur(conf_roi, (ksize, ksize), 0)
-                    
-                    # 模糊后重新归一化到[0,1]
+
+                    # 重新归一化
                     if conf_roi.max() > 0:
                         conf_roi = conf_roi / conf_roi.max()
-                    
+
             else:
-                # 原策略: 使用GT mask的距离变换生成渐变 (形状骨架方案)
-                # 优势: 自动适应mask的实际形状 (圆形、L型、弓形等)
-                # 距离变换会找到到最近边缘的距离,形成自然的形状骨架
+                # 策略2: 距离变换（在refined_mask区域内操作）
 
-                # 使用距离变换: 计算每个像素到GT mask边缘的距离
-                dist_transform = cv2.distanceTransform(roi_gt_mask, cv2.DIST_L2, 5)
-                
-                # 检查距离变换是否有效 (处理GT mask填满bbox的情况)
-                # 当GT mask填满整个bbox时,没有边缘,距离变换会返回异常值
-                if dist_transform.max() > 0 and dist_transform.max() < 10000:  # 正常范围
-                    # 归一化并应用幂函数调整渐变曲线
-                    if dist_transform.max() > 0:
-                        # 先归一化到[0,1]: 边缘=0,形状骨架=1
-                        normalized = dist_transform / dist_transform.max()
+                # 对refined_mask做距离变换
+                dist_transform = cv2.distanceTransform(refined_mask.astype(np.uint8), cv2.DIST_L2, 5)
 
-                        # 应用幂函数: x^α (α < 1 使渐变更平缓)
-                        conf_roi = np.power(normalized, CONFIG['gradient_power'])
-                    else:
-                        conf_roi = np.ones((roi_h, roi_w), dtype=np.float32)
+                if dist_transform.max() > 0 and dist_transform.max() < 10000:
+                    # 归一化并应用幂函数
+                    normalized = dist_transform / dist_transform.max()
+                    conf_roi = np.power(normalized, CONFIG['gradient_power'])
                 else:
-                    # Fallback: GT mask填满bbox,使用bbox边缘距离
+                    # Fallback: 使用到边缘的距离
                     yy, xx = np.ogrid[:roi_h, :roi_w]
                     dist_to_left = xx
                     dist_to_right = roi_w - 1 - xx
                     dist_to_top = yy
                     dist_to_bottom = roi_h - 1 - yy
-                    
-                    dist_to_bbox_edge = np.minimum(np.minimum(dist_to_left, dist_to_right),
-                                                   np.minimum(dist_to_top, dist_to_bottom)).astype(np.float32)
-                    
-                    if dist_to_bbox_edge.max() > 0:
-                        normalized = dist_to_bbox_edge / dist_to_bbox_edge.max()
+
+                    dist_to_edge = np.minimum(np.minimum(dist_to_left, dist_to_right),
+                                             np.minimum(dist_to_top, dist_to_bottom)).astype(np.float32)
+
+                    if dist_to_edge.max() > 0:
+                        normalized = dist_to_edge / dist_to_edge.max()
                         conf_roi = np.power(normalized, CONFIG['gradient_power'])
                     else:
                         conf_roi = np.ones((roi_h, roi_w), dtype=np.float32)
+
+            # 【关键】步骤7: 用纹理掩码精确裁剪，去除所有平滑背景（包括侧边）
+            # 只保留refined_mask为True的区域
+            conf_roi = conf_roi * refined_mask.astype(np.float32)
+
+            # 【新增】应用软标签系数 (Soft Label)
+            # 无点云框的置信度上限降到 visual_max_confidence (如0.6)
+            conf_roi = conf_roi * CONFIG['visual_max_confidence']
 
         # 4. 强制约束在GT区域内
         conf_roi = conf_roi * roi_gt_bool.astype(np.float32)
@@ -491,8 +552,8 @@ def process_frame(ir_path, mask_path, lidar_path, K_cam, T_cam_to_lidar, output_
         boxes.append([x, y, w, h])
         
     # 生成 float32 的热力图 [0.0, 1.0]
-    # 使用新的混合生成函数，传入 pixels 和 gt_mask（用于裁剪L型等非凸形状）
-    confidence_map = generate_hybrid_confidence_map((H, W), boxes, pixels, gt_mask)
+    # 使用新的混合生成函数，传入 pixels、gt_mask 和 image（用于纹理分析和区域细化）
+    confidence_map = generate_hybrid_confidence_map((H, W), boxes, pixels, gt_mask, img)
     
     # --- 4. 背景级鲁棒抑制 (Background Suppression) ---
     # 利用 LiDAR 点作为“绝对背景”的证据
