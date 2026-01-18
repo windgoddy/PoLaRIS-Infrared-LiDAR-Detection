@@ -70,7 +70,7 @@ CONFIG = {
     # gradient_threshold: 梯度阈值，用于区分有纹理区域和平滑区域
     # - 8-bit图像(0-255): 建议 3.0-10.0
     # - 16-bit图像: 建议 100-500
-    'gradient_threshold': 8,  # 纹理梯度阈值（Laplacian响应）
+    'gradient_threshold': 0.45,  # 纹理梯度阈值（Laplacian响应）
     'texture_dilation_kernel': 4,  # 形态学膨胀核大小（连接碎片纹理）
     'min_refined_area': 20,  # 细化后的最小有效面积（像素数）
 }
@@ -285,7 +285,7 @@ def generate_hybrid_confidence_map(shape, boxes, lidar_pixels, gt_mask, image, v
         boxes: 标注框列表 [(x, y, w, h), ...]
         lidar_pixels: 投影到图像上的点云坐标 [(u, v), ...]
         gt_mask: Ground Truth 掩码
-        image: 红外图像，用于纹理分析 (需要灰度图或彩色图的单通道)
+        image: 红外图像（原始位深），用于纹理分析
         verbose: 是否输出调试信息
     """
     heatmap = np.zeros(shape, dtype=np.float32)
@@ -296,6 +296,13 @@ def generate_hybrid_confidence_map(shape, boxes, lidar_pixels, gt_mask, image, v
         image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     else:
         image_gray = image
+    
+    # 检测图像位深，为16-bit数据调整阈值
+    is_16bit = image_gray.dtype == np.uint16
+    bit_scale_factor = 64.0 if is_16bit else 1.0  # 16-bit时放大阈值
+    
+    if verbose and is_16bit:
+        print(f"  ℹ️  检测到16-bit图像，纹理阈值放大系数: {bit_scale_factor}x")
 
     for idx, (x, y, w, h) in enumerate(boxes, 1):
         # 1. 边界处理
@@ -370,16 +377,28 @@ def generate_hybrid_confidence_map(shape, boxes, lidar_pixels, gt_mask, image, v
             roi_ir = image_gray[y1:y2, x1:x2]
 
             # 使用 Laplacian 算子计算梯度（对边缘和纹理敏感，对平滑区域响应为0）
-            laplacian = cv2.Laplacian(roi_ir, cv2.CV_64F)
+            # 根据数据类型选择正确的深度参数
+            if roi_ir.dtype == np.uint16:
+                # 16-bit 图像，直接使用 CV_64F 避免溢出
+                laplacian = cv2.Laplacian(roi_ir, cv2.CV_64F)
+            else:
+                # 8-bit 图像，也使用 CV_64F 以保持一致性
+                laplacian = cv2.Laplacian(roi_ir, cv2.CV_64F)
             grad_map = np.abs(laplacian)
 
             if verbose:
                 print(f"    → 梯度计算: 最大值={grad_map.max():.2f}, 平均值={grad_map.mean():.2f}")
 
             # 步骤2: 二值化得到纹理掩码（有纹理=1，平滑=0）
+            # 自适应阈值：16-bit图像使用放大后的阈值
+            adaptive_threshold = CONFIG['gradient_threshold'] * bit_scale_factor
+            
+            if verbose:
+                print(f"    → 自适应阈值={adaptive_threshold:.2f} (原始阈值={CONFIG['gradient_threshold']} × 缩放={bit_scale_factor})")
+            
             _, texture_mask = cv2.threshold(
                 grad_map,
-                CONFIG['gradient_threshold'],
+                adaptive_threshold,
                 255,
                 cv2.THRESH_BINARY
             )
@@ -572,7 +591,26 @@ def process_single_image(image_id, dataset_dir, output_base_dir=None):
         return False
 
     # 2. 加载数据
-    img = cv2.imread(ir_path)
+    # 使用 IMREAD_UNCHANGED 读取原始位深（支持16-bit红外图像）
+    img = cv2.imread(ir_path, cv2.IMREAD_UNCHANGED)
+    if img is None:
+        print("❌ Failed to load image.")
+        return False
+    
+    # 保存原始图像用于纹理计算
+    img_raw = img.copy()
+    
+    # 为可视化生成8-bit版本
+    if img.ndim == 2:  # 单通道灰度图
+        # 归一化到8-bit用于可视化
+        img_vis = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        img_vis = cv2.cvtColor(img_vis, cv2.COLOR_GRAY2BGR)
+    else:  # 彩色图
+        img_vis = img.copy()
+        # 如果是16-bit彩色图，也需要归一化
+        if img.dtype == np.uint16:
+            img_vis = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    
     gt_mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
     H, W = gt_mask.shape
     
@@ -625,7 +663,8 @@ def process_single_image(image_id, dataset_dir, output_base_dir=None):
     # 6. 保存与可视化
     cv2.imwrite(os.path.join(output_dir, f'{image_id}.png'), (confidence_map * 255).astype(np.uint8))
     
-    vis_img = cv2.addWeighted(img, 0.6, cv2.applyColorMap((confidence_map * 255).astype(np.uint8), cv2.COLORMAP_JET), 0.4, 0)
+    # 使用8-bit版本进行可视化（img_vis已在图像加载时生成）
+    vis_img = cv2.addWeighted(img_vis, 0.6, cv2.applyColorMap((confidence_map * 255).astype(np.uint8), cv2.COLORMAP_JET), 0.4, 0)
     cv2.drawContours(vis_img, cv2.findContours(gt_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0], -1, (0, 255, 0), 1)
     cv2.imwrite(os.path.join(vis_dir, f'{image_id}.png'), vis_img)
     

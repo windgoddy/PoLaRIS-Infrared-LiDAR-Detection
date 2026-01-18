@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 显卡设置
-export CUDA_VISIBLE_DEVICES=6
+export CUDA_VISIBLE_DEVICES=3
 
 # chmod +x scripts/run_Phase3_DualGeo_all_dataset.sh
 # ./scripts/run_Phase3_DualGeo_all_dataset.sh
@@ -22,19 +22,20 @@ fi
 # - split_method: 改为 split_data (匹配您新数据集的划分文件夹名)
 # - train_batch_size: 保持 4 (或根据显存调整为 8/16)
 python train_Phase3.py \
-    --experiment_name Phase3_DualGeo_All \
+    --experiment_name Phase3_DualGeo_NUDT-SIRST \
     --model MS_CAFNet_DualGeo \
-    --dataset Pohang-Canal-all \
+    --dataset NUDT-SIRST \
     --split_method split_data \
-    --train_batch_size 32 \
-    --test_batch_size 32 \
-    --epochs 200 \
+    --train_batch_size 16 \
+    --test_batch_size 16 \
+    --epochs 2000 \
     --optimizer Adam \
-    --lr 0.00001 \
+    --lr 0.00005 \
     --weight_decay 5e-4 \
     --scheduler CosineAnnealingLR \
     --min_lr 1e-6 \
     --in_channels 2 \
     --deep_supervision False \
     --seed 42 \
+    --backbone resnet_18 \
     --workers 8  # 增加 DataLoader 线程数以加快 6000 张图的加载速度

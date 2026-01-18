@@ -290,12 +290,12 @@ def project_lidar_to_image(lidar_points, K_cam, T_cam_to_lidar, img_shape):
     
     u = u[valid_uv]
     v = v[valid_uv]
-    depths = pts_cam[valid_z][valid_uv, 2]
+    depths = pts_cam[valid_uv, 2]
     
     pixels = np.column_stack([u.astype(int), v.astype(int)])
     return pixels, depths
 
-def generate_hybrid_confidence_map(shape, boxes, lidar_pixels, gt_mask, image):
+def generate_hybrid_confidence_map(shape, boxes, lidar_pixels, gt_mask, image, verbose=False):
     """
     生成混合置信度热力图 - 严格按照渐变规则 + 软标签机制
     规则：
@@ -309,7 +309,8 @@ def generate_hybrid_confidence_map(shape, boxes, lidar_pixels, gt_mask, image):
         boxes: 标注框列表 [(x, y, w, h), ...]
         lidar_pixels: 投影到图像上的点云坐标 [(u, v), ...]
         gt_mask: Ground Truth 掩码
-        image: 红外图像，用于纹理分析 (需要灰度图或彩色图的单通道)
+        image: 红外图像（原始位深），用于纹理分析
+        verbose: 是否输出调试信息
     """
     heatmap = np.zeros(shape, dtype=np.float32)
     H, W = shape
@@ -319,8 +320,15 @@ def generate_hybrid_confidence_map(shape, boxes, lidar_pixels, gt_mask, image):
         image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     else:
         image_gray = image
+    
+    # 检测图像位深，为16-bit数据调整阈值
+    is_16bit = image_gray.dtype == np.uint16
+    bit_scale_factor = 64.0 if is_16bit else 1.0  # 16-bit时放大阈值
+    
+    if verbose and is_16bit:
+        print(f"  ℹ️  检测到16-bit图像，纹理阈值放大系数: {bit_scale_factor}x")
 
-    for (x, y, w, h) in boxes:
+    for idx, (x, y, w, h) in enumerate(boxes, 1):
         # 1. 边界处理
         x1, y1 = int(np.clip(x, 0, W)), int(np.clip(y, 0, H))
         x2, y2 = int(np.clip(x + w, 0, W)), int(np.clip(y + h, 0, H))
@@ -340,6 +348,10 @@ def generate_hybrid_confidence_map(shape, boxes, lidar_pixels, gt_mask, image):
             box_pts = lidar_pixels[in_box]
 
         has_lidar = len(box_pts) > 0
+
+        # 调试输出
+        if verbose:
+            print(f"  标注框 {idx}: 位置=({x1},{y1})-({x2},{y2}), 尺寸={roi_w}×{roi_h}, 点云数={len(box_pts)}, 状态={'✅有点云' if has_lidar else '❌无点云'}")
 
         # ===== 分支1: 有点云的框 =====
         if has_lidar:
@@ -389,22 +401,43 @@ def generate_hybrid_confidence_map(shape, boxes, lidar_pixels, gt_mask, image):
             roi_ir = image_gray[y1:y2, x1:x2]
 
             # 使用 Laplacian 算子计算梯度（对边缘和纹理敏感，对平滑区域响应为0）
-            laplacian = cv2.Laplacian(roi_ir, cv2.CV_64F)
+            # 根据数据类型选择正确的深度参数
+            if roi_ir.dtype == np.uint16:
+                # 16-bit 图像，直接使用 CV_64F 避免溢出
+                laplacian = cv2.Laplacian(roi_ir, cv2.CV_64F)
+            else:
+                # 8-bit 图像，也使用 CV_64F 以保持一致性
+                laplacian = cv2.Laplacian(roi_ir, cv2.CV_64F)
             grad_map = np.abs(laplacian)
 
+            if verbose:
+                print(f"    → 梯度计算: 最大值={grad_map.max():.2f}, 平均值={grad_map.mean():.2f}")
+
             # 步骤2: 二值化得到纹理掩码（有纹理=1，平滑=0）
+            # 自适应阈值：16-bit图像使用放大后的阈值
+            adaptive_threshold = CONFIG['gradient_threshold'] * bit_scale_factor
+            
+            if verbose:
+                print(f"    → 自适应阈值={adaptive_threshold:.2f} (原始阈值={CONFIG['gradient_threshold']} × 缩放={bit_scale_factor})")
+            
             _, texture_mask = cv2.threshold(
                 grad_map,
-                CONFIG['gradient_threshold'],
+                adaptive_threshold,
                 255,
                 cv2.THRESH_BINARY
             )
             texture_mask = texture_mask.astype(np.uint8)
 
+            if verbose:
+                print(f"    → 二值化阈值={CONFIG['gradient_threshold']}, 纹理像素数={np.sum(texture_mask > 0)}")
+
             # 步骤3: 形态学膨胀，连接碎片纹理并填补物体内部空洞
             kernel_size = CONFIG['texture_dilation_kernel']
             kernel = np.ones((kernel_size, kernel_size), np.uint8)
             texture_mask = cv2.dilate(texture_mask, kernel, iterations=1)
+
+            if verbose:
+                print(f"    → 形态学膨胀后: 纹理像素数={np.sum(texture_mask > 0)}")
 
             # 步骤4: 将纹理掩码转为布尔型，并与GT mask求交集
             # 这样可以精确地只保留"既在GT内，又有纹理"的区域
@@ -413,13 +446,23 @@ def generate_hybrid_confidence_map(shape, boxes, lidar_pixels, gt_mask, image):
 
             refined_area = np.sum(refined_mask)
 
+            if verbose:
+                print(f"    → 纹理掩码与GT交集: 有效像素数={refined_area}")
+
             # 步骤5: 检查细化后的区域是否太小（可能是噪点）
             if refined_area < CONFIG['min_refined_area']:
+                if verbose:
+                    print(f"    → ⚠️ 细化后面积{refined_area}<阈值{CONFIG['min_refined_area']}，判定为噪点，跳过该框")
                 continue
 
             if not np.any(refined_mask):
                 # 全是平滑背景，跳过该框
+                if verbose:
+                    print(f"    → ⚠️ 未检测到有效纹理区域，判定为纯背景（天空/海面），跳过该框")
                 continue
+
+            if verbose:
+                print(f"    → ✅ 区域细化完成，在细化区域内生成渐变（最大置信度={CONFIG['visual_max_confidence']}）")
 
             # 步骤6: 在整个ROI内生成渐变，但最后用refined_mask精确裁剪
             # 初始化整个ROI的置信度图（全0）
@@ -428,6 +471,8 @@ def generate_hybrid_confidence_map(shape, boxes, lidar_pixels, gt_mask, image):
             # 根据配置选择生成策略（在整个ROI内操作，但用refined_mask作为目标区域）
             if CONFIG['use_rect_decomposition']:
                 # 策略1: 自适应矩形分解（在refined_mask区域内操作）
+                if verbose:
+                    print(f"    → 使用矩形分解算法（基于纹理掩码）")
 
                 # 使用refined_mask作为输入
                 temp_mask = refined_mask.astype(np.uint8)
@@ -439,7 +484,12 @@ def generate_hybrid_confidence_map(shape, boxes, lidar_pixels, gt_mask, image):
                     rect_area = rw * rh
 
                     if rect_area < CONFIG['min_rect_area']:
+                        if verbose:
+                            print(f"       迭代{iter_idx+1}: 矩形面积{rect_area}<阈值，停止")
                         break
+
+                    if verbose:
+                        print(f"       迭代{iter_idx+1}: 发现矩形 ({rx},{ry}) 尺寸={rw}×{rh}")
 
                     # 2. 为该矩形生成局部渐变
                     local_gradient = generate_gradient_for_rect((rh, rw), CONFIG['rect_gradient_power'])
@@ -454,6 +504,8 @@ def generate_hybrid_confidence_map(shape, boxes, lidar_pixels, gt_mask, image):
                     temp_mask[ry:ry+rh, rx:rx+rw] = 0
 
                     if temp_mask.sum() == 0:
+                        if verbose:
+                            print(f"       迭代{iter_idx+1}: 所有区域已处理完毕")
                         break
 
                 # 5. 后处理: 高斯模糊
@@ -467,8 +519,13 @@ def generate_hybrid_confidence_map(shape, boxes, lidar_pixels, gt_mask, image):
                     if conf_roi.max() > 0:
                         conf_roi = conf_roi / conf_roi.max()
 
+                if verbose:
+                    print(f"    → 矩形分解完成")
+
             else:
                 # 策略2: 距离变换（在refined_mask区域内操作）
+                if verbose:
+                    print(f"    → 使用距离变换算法（基于纹理掩码）")
 
                 # 对refined_mask做距离变换
                 dist_transform = cv2.distanceTransform(refined_mask.astype(np.uint8), cv2.DIST_L2, 5)
@@ -477,8 +534,14 @@ def generate_hybrid_confidence_map(shape, boxes, lidar_pixels, gt_mask, image):
                     # 归一化并应用幂函数
                     normalized = dist_transform / dist_transform.max()
                     conf_roi = np.power(normalized, CONFIG['gradient_power'])
+
+                    if verbose:
+                        print(f"    → 距离变换: max={dist_transform.max():.2f}, 幂函数α={CONFIG['gradient_power']}")
                 else:
                     # Fallback: 使用到边缘的距离
+                    if verbose:
+                        print(f"    → 使用边缘距离作为fallback")
+
                     yy, xx = np.ogrid[:roi_h, :roi_w]
                     dist_to_left = xx
                     dist_to_right = roi_w - 1 - xx
@@ -494,16 +557,32 @@ def generate_hybrid_confidence_map(shape, boxes, lidar_pixels, gt_mask, image):
                     else:
                         conf_roi = np.ones((roi_h, roi_w), dtype=np.float32)
 
+                if verbose:
+                    print(f"    → 距离变换完成")
+
             # 【关键】步骤7: 用纹理掩码精确裁剪，去除所有平滑背景（包括侧边）
             # 只保留refined_mask为True的区域
             conf_roi = conf_roi * refined_mask.astype(np.float32)
 
+            if verbose:
+                print(f"    → 纹理掩码裁剪后: 非零像素数={np.sum(conf_roi > 0)}, 最大值={conf_roi.max():.2f}")
+
             # 【新增】应用软标签系数 (Soft Label)
             # 无点云框的置信度上限降到 visual_max_confidence (如0.6)
+            # 避免网络过拟合纯视觉目标
+            if verbose:
+                print(f"    → 应用软标签前: 最大值={conf_roi.max():.2f}")
+
             conf_roi = conf_roi * CONFIG['visual_max_confidence']
+
+            if verbose:
+                print(f"    → 应用软标签后（×{CONFIG['visual_max_confidence']}）: 最大值={conf_roi.max():.2f}")
 
         # 4. 强制约束在GT区域内
         conf_roi = conf_roi * roi_gt_bool.astype(np.float32)
+
+        if verbose:
+            print(f"    → GT裁剪后最大值={conf_roi.max():.2f}, 平均值={conf_roi[roi_gt_bool].mean():.2f}")
 
         # 5. 叠加到全局热力图
         heatmap[y1:y2, x1:x2] = np.maximum(heatmap[y1:y2, x1:x2], conf_roi)
@@ -518,10 +597,30 @@ def process_frame(ir_path, mask_path, lidar_path, K_cam, T_cam_to_lidar, output_
     fname = os.path.basename(ir_path)
     
     # --- 1. 读取数据 ---
-    img = cv2.imread(ir_path) # BGR
+    # 使用 IMREAD_UNCHANGED 读取原始位深（支持16-bit红外图像）
+    img = cv2.imread(ir_path, cv2.IMREAD_UNCHANGED)
+    
+    if img is None:
+        print(f"Failed to load: {ir_path}")
+        return
+    
+    # 保存原始图像用于纹理计算
+    img_raw = img.copy()
+    
+    # 为可视化生成8-bit版本
+    if img.ndim == 2:  # 单通道灰度图
+        # 归一化到8-bit用于可视化
+        img = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    else:  # 彩色图
+        # 如果是16-bit彩色图，也需要归一化
+        if img.dtype == np.uint16:
+            img = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    
     gt_mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
     
-    if img is None or gt_mask is None:
+    if gt_mask is None:
+        print(f"Failed to load: {mask_path}")
         return
     
     H, W = gt_mask.shape
@@ -552,8 +651,8 @@ def process_frame(ir_path, mask_path, lidar_path, K_cam, T_cam_to_lidar, output_
         boxes.append([x, y, w, h])
         
     # 生成 float32 的热力图 [0.0, 1.0]
-    # 使用新的混合生成函数，传入 pixels、gt_mask 和 image（用于纹理分析和区域细化）
-    confidence_map = generate_hybrid_confidence_map((H, W), boxes, pixels, gt_mask, img)
+    # 使用新的混合生成函数，传入 pixels、gt_mask 和 img_raw（保留16-bit信息用于纹理分析）
+    confidence_map = generate_hybrid_confidence_map((H, W), boxes, pixels, gt_mask, img_raw)
     
     # --- 4. 背景级鲁棒抑制 (Background Suppression) ---
     # 利用 LiDAR 点作为“绝对背景”的证据
@@ -625,23 +724,15 @@ def process_frame(ir_path, mask_path, lidar_path, K_cam, T_cam_to_lidar, output_
 def main():
     # --- 路径配置 (请修改这里) ---
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    dataset_dir = os.path.join(project_root, 'dataset/Pohang-Canal-all')
+    dataset_dir = os.path.join(project_root, 'dataset/select')
     
     images_dir = os.path.join(dataset_dir, 'images')
     masks_dir = os.path.join(dataset_dir, 'masks')
     lidar_roi_dir = os.path.join(dataset_dir, 'lidar_roi')
     
-    # 标定文件路径
-    calib_dir = os.path.join(dataset_dir, 'calibration')
+    # 多序列标定文件路径（根据文件名前缀选择）
+    calib_base_dir = '/home/b311/data2/25-zhangxizhe/Pohang Canal Dataset And PoLaRIS/Pohang Canal Dataset'
     
-    # 自动回退标定路径逻辑 (注释掉以防止错误读取)
-    # if not os.path.exists(calib_dir):
-    #     # 尝试备用路径
-    #     calib_dir = '/home/b311/data2/25-zhangxizhe/Pohang Canal Dataset And PoLaRIS/Pohang Canal Dataset/00/calibration'
-    #     if not os.path.exists(calib_dir):
-    #         print("Error: Calibration directory not found.")
-    #         return
-
     output_dir = os.path.join(dataset_dir, 'oracle_masks')
     vis_dir = os.path.join(dataset_dir, 'oracle_vis')
     
@@ -652,21 +743,31 @@ def main():
     print(f"Reading LiDAR from: {lidar_roi_dir}")
     print(f"Saving Output to: {output_dir}")
     
-    # --- 加载标定 ---
-    try:
-        with open(os.path.join(calib_dir, 'intrinsics.json')) as f:
-            ir_intrinsics = json.load(f)['infrared']
-        with open(os.path.join(calib_dir, 'extrinsics.json')) as f:
-            ext = json.load(f)
-            ir_ext = ext['infrared']
-            li_ext = ext['lidar_front']
+    # --- 预加载所有序列的标定文件 ---
+    calibrations = {}  # {sequence_id: (K_cam, T_cam_to_lidar)}
+    
+    for seq_id in ['00', '01', '03']:
+        calib_dir = os.path.join(calib_base_dir, seq_id, 'calibration')
+        try:
+            with open(os.path.join(calib_dir, 'intrinsics.json')) as f:
+                ir_intrinsics = json.load(f)['infrared']
+            with open(os.path.join(calib_dir, 'extrinsics.json')) as f:
+                ext = json.load(f)
+                ir_ext = ext['infrared']
+                li_ext = ext['lidar_front']
+                
+            fx, fy = ir_intrinsics['focal_length'], ir_intrinsics['focal_length']
+            cx, cy = ir_intrinsics['cc_x'], ir_intrinsics['cc_y']
+            K_cam = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
+            T_cam_to_lidar = np.linalg.inv(get_transform_matrix(ir_ext)) @ get_transform_matrix(li_ext)
             
-        fx, fy = ir_intrinsics['focal_length'], ir_intrinsics['focal_length']
-        cx, cy = ir_intrinsics['cc_x'], ir_intrinsics['cc_y']
-        K_cam = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
-        T_cam_to_lidar = np.linalg.inv(get_transform_matrix(ir_ext)) @ get_transform_matrix(li_ext)
-    except Exception as e:
-        print(f"Error loading calibration: {e}")
+            calibrations[seq_id] = (K_cam, T_cam_to_lidar)
+            print(f"✓ Loaded calibration for sequence {seq_id}")
+        except Exception as e:
+            print(f"✗ Error loading calibration for sequence {seq_id}: {e}")
+    
+    if not calibrations:
+        print("Error: No calibration files loaded!")
         return
 
     # --- 主循环 ---
@@ -674,6 +775,15 @@ def main():
     print(f"Found {len(image_files)} images.")
     
     for fname in tqdm(image_files):
+        # 从文件名提取序列ID（如 00_43.png -> 00）
+        seq_id = fname.split('_')[0]
+        
+        if seq_id not in calibrations:
+            print(f"Warning: No calibration found for sequence {seq_id}, skipping {fname}")
+            continue
+        
+        K_cam, T_cam_to_lidar = calibrations[seq_id]
+        
         ir_path = os.path.join(images_dir, fname)
         mask_path = os.path.join(masks_dir, fname)
         

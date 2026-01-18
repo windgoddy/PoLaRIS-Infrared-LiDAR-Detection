@@ -11,6 +11,7 @@ import numpy as np
 
 # metric, loss .etc
 from model.utils import *
+from model.utils_lidar import PoLaRISTrainLoader, PoLaRISTestLoader, CombinedSoftLoss
 from model.metric import *
 from model.loss import *
 from model.load_param_data import  load_dataset, load_param
@@ -59,19 +60,57 @@ class Trainer(object):
             train_img_ids, val_img_ids, test_txt = load_dataset(args.root, args.dataset, args.split_method)
 
         # Preprocess and load data
-        if args.in_channels == 1:
-            input_transform = transforms.Compose([
-                transforms.ToTensor(),
-                transforms.Normalize([0.5], [0.5])])
+        # Check if using LiDAR DataLoader (supports 16-bit, LiDAR, soft labels)
+        use_lidar_loader = args.use_lidar_dataloader == 'True'
+
+        if use_lidar_loader:
+            # Use new PoLaRIS LiDAR DataLoader (no transform needed - handled internally)
+            print(f"✅ Using PoLaRIS LiDAR DataLoader (16-bit: {args.normalize_16bit}, Soft Labels: {args.use_soft_labels})")
+            trainset = PoLaRISTrainLoader(
+                dataset_dir=dataset_dir,
+                img_id=train_img_ids,
+                base_size=args.base_size,
+                crop_size=args.crop_size,
+                transform=None,  # DataLoader handles normalization internally
+                suffix=args.suffix,
+                normalize_16bit=(args.normalize_16bit == 'True'),
+                in_channels=args.in_channels  # Pass in_channels for depth map support
+            )
+            testset = PoLaRISTestLoader(
+                dataset_dir=dataset_dir,
+                img_id=val_img_ids,
+                base_size=args.base_size,
+                crop_size=args.crop_size,
+                transform=None,
+                suffix=args.suffix,
+                normalize_16bit=(args.normalize_16bit == 'True'),
+                in_channels=args.in_channels
+            )
         else:
-            input_transform = transforms.Compose([
-                transforms.ToTensor(),
-                transforms.Normalize([.485, .456, .406], [.229, .224, .225])])
-                
-        trainset        = TrainSetLoader(dataset_dir,img_id=train_img_ids,base_size=args.base_size,crop_size=args.crop_size,transform=input_transform,suffix=args.suffix, in_channels=args.in_channels)
-        testset         = TestSetLoader (dataset_dir,img_id=val_img_ids,base_size=args.base_size, crop_size=args.crop_size, transform=input_transform,suffix=args.suffix, in_channels=args.in_channels)
+            # Use legacy DataLoader (8-bit only)
+            print("⚠️  Using legacy DataLoader (8-bit images only, no LiDAR support)")
+            if args.in_channels == 1:
+                input_transform = transforms.Compose([
+                    transforms.ToTensor(),
+                    transforms.Normalize([0.5], [0.5])])
+            else:
+                input_transform = transforms.Compose([
+                    transforms.ToTensor(),
+                    transforms.Normalize([.485, .456, .406], [.229, .224, .225])])
+
+            trainset = TrainSetLoader(dataset_dir, img_id=train_img_ids, base_size=args.base_size,
+                                     crop_size=args.crop_size, transform=input_transform,
+                                     suffix=args.suffix, in_channels=args.in_channels)
+            testset = TestSetLoader(dataset_dir, img_id=val_img_ids, base_size=args.base_size,
+                                   crop_size=args.crop_size, transform=input_transform,
+                                   suffix=args.suffix, in_channels=args.in_channels)
+
         self.train_data = DataLoader(dataset=trainset, batch_size=args.train_batch_size, shuffle=True, num_workers=args.workers,drop_last=True)
         self.test_data  = DataLoader(dataset=testset,  batch_size=args.test_batch_size, num_workers=args.workers,drop_last=False)
+
+        # Store flag for later use in training/testing loops
+        self.use_lidar_loader = use_lidar_loader
+        self.use_soft_labels = (args.use_soft_labels == 'True')
 
         # Choose and load model (this paper is finished by one GPU)
         if args.model   == 'DNANet':
@@ -118,37 +157,65 @@ class Trainer(object):
         tbar = tqdm(self.train_data)
         self.model.train()
         losses = AverageMeter()
-        for i, ( data, labels, oracle_masks) in enumerate(tbar):
-            data   = data.cuda()
-            labels = labels.cuda()
-            oracle_masks = oracle_masks.cuda()
-            
+
+        for i, batch_data in enumerate(tbar):
+            # Parse batch data based on DataLoader type
+            if self.use_lidar_loader:
+                # New PoLaRIS LiDAR DataLoader (dict format)
+                data = batch_data['image'].cuda()
+                labels = batch_data['mask'].cuda()  # GT mask (hard labels)
+                oracle_masks = batch_data['oracle_mask'].cuda()  # Soft labels
+                lidar_points = batch_data['lidar']  # List of tensors (N_i, 4)
+            else:
+                # Legacy DataLoader (tuple format)
+                data, labels, oracle_masks = batch_data
+                data = data.cuda()
+                labels = labels.cuda()
+                oracle_masks = oracle_masks.cuda()
+                lidar_points = None
+
+            # Choose training target: soft labels (oracle_masks) or hard labels (labels)
+            if self.use_soft_labels:
+                train_target = oracle_masks  # Use soft labels (0.6, 1.0, etc.)
+            else:
+                train_target = labels  # Use hard labels (0.0, 1.0)
+
+            # Forward pass
             if self.args.model == 'MS_CAFNet' or self.args.model == 'MS_CAFNet_DualGeo':
+                # MS_CAFNet models (with confidence branch)
+                # Note: Models expect 2-channel input [IR, Depth] not separate LiDAR points
                 pred, pred_conf = self.model(data)
-                loss_seg = SoftIoULoss(pred, labels)
-                loss_conf = self.conf_loss(pred_conf, oracle_masks)
+
+                # Loss calculation
+                loss_seg = SoftIoULoss(pred, train_target)  # Use train_target (soft or hard)
+                loss_conf = self.conf_loss(pred_conf, oracle_masks)  # Confidence always uses oracle_masks
                 loss = loss_seg + 0.5 * loss_conf
+
             elif self.args.deep_supervision == 'True':
-                preds= self.model(data)
+                # DNANet with deep supervision
+                preds = self.model(data)
                 loss = 0
                 for pred in preds:
-                    loss += SoftIoULoss(pred, labels)
+                    loss += SoftIoULoss(pred, train_target)
                 loss /= len(preds)
             else:
-               pred = self.model(data)
-               loss = SoftIoULoss(pred, labels)
-               
+                # Standard models (no deep supervision)
+                pred = self.model(data)
+                loss = SoftIoULoss(pred, train_target)
+
+            # Backward pass
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
-            
+
+            # Update metrics
             if self.args.model == 'MS_CAFNet' or self.args.model == 'MS_CAFNet_DualGeo':
-                 losses.update(loss.item(), pred.size(0))
+                losses.update(loss.item(), pred.size(0))
             elif self.args.deep_supervision == 'True':
-                 losses.update(loss.item(), preds[-1].size(0))
+                losses.update(loss.item(), preds[-1].size(0))
             else:
-                 losses.update(loss.item(), pred.size(0))
-                 
+                losses.update(loss.item(), pred.size(0))
+
             tbar.set_description('Epoch %d, training loss %.4f' % (epoch, losses.avg))
         self.train_loss = losses.avg
 
@@ -160,31 +227,44 @@ class Trainer(object):
         losses = AverageMeter()
 
         with torch.no_grad():
-            for i, ( data, labels) in enumerate(tbar):
-                data = data.cuda()
-                labels = labels.cuda()
-                
+            for i, batch_data in enumerate(tbar):
+                # Parse batch data based on DataLoader type
+                if self.use_lidar_loader:
+                    # New PoLaRIS LiDAR DataLoader (dict format)
+                    data = batch_data['image'].cuda()
+                    labels = batch_data['mask'].cuda()  # Always use GT mask for evaluation
+                    lidar_points = batch_data['lidar']  # List of tensors
+                else:
+                    # Legacy DataLoader (tuple format)
+                    data, labels = batch_data
+                    data = data.cuda()
+                    labels = labels.cuda()
+                    lidar_points = None
+
+                # Forward pass
                 if self.args.model == 'MS_CAFNet' or self.args.model == 'MS_CAFNet_DualGeo':
+                    # MS_CAFNet models (expect 2-channel input [IR, Depth])
                     pred, pred_conf = self.model(data)
-                    loss = SoftIoULoss(pred, labels) # Only seg loss for validation
+                    loss = SoftIoULoss(pred, labels)  # Only seg loss for validation
                 elif self.args.deep_supervision == 'True':
                     preds = self.model(data)
                     loss = 0
                     for pred in preds:
                         loss += SoftIoULoss(pred, labels)
                     loss /= len(preds)
-                    pred =preds[-1]
+                    pred = preds[-1]
                 else:
                     pred = self.model(data)
                     loss = SoftIoULoss(pred, labels)
-                    
+
+                # Update metrics (always evaluate against GT labels)
                 losses.update(loss.item(), pred.size(0))
-                self.ROC .update(pred, labels)
+                self.ROC.update(pred, labels)
                 self.mIoU.update(pred, labels)
                 ture_positive_rate, false_positive_rate, recall, precision = self.ROC.get()
                 _, mean_IOU = self.mIoU.get()
-                tbar.set_description('Epoch %d, test loss %.4f, mean_IoU: %.4f' % (epoch, losses.avg, mean_IOU ))
-            test_loss=losses.avg
+                tbar.set_description('Epoch %d, test loss %.4f, mean_IoU: %.4f' % (epoch, losses.avg, mean_IOU))
+            test_loss = losses.avg
 
         # Store last epoch metrics
         self.last_epoch = epoch

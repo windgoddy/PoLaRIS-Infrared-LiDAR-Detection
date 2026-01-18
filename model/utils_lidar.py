@@ -1,0 +1,503 @@
+"""
+Enhanced DataLoader for PoLaRIS Dataset with:
+1. 16-bit Infrared Image Support
+2. LiDAR Point Cloud Loading
+3. Soft Label Support (Oracle Masks with float values)
+"""
+
+from PIL import Image, ImageOps, ImageFilter
+import os
+from torch.utils.data.dataset import Dataset
+import random
+import numpy as np
+import torch
+
+class PoLaRISTrainLoader(Dataset):
+    """
+    Training Dataset Loader for PoLaRIS with LiDAR fusion
+    
+    Key Features:
+    - 16-bit infrared image support with proper normalization
+    - LiDAR point cloud loading (.bin files)
+    - Soft Label oracle masks (preserves float values 0.0-1.0)
+    - Data augmentation (flip, scale, crop, blur)
+    """
+    
+    NUM_CLASS = 1
+
+    def __init__(self, dataset_dir, img_id, base_size=512, crop_size=480,
+                 transform=None, suffix='.png', normalize_16bit=True, in_channels=1):
+        super(PoLaRISTrainLoader, self).__init__()
+
+        self.transform = transform
+        self._items = img_id
+        self.masks = os.path.join(dataset_dir, 'masks')
+        self.images = os.path.join(dataset_dir, 'images')
+        self.lidar_roi = os.path.join(dataset_dir, 'lidar_roi')
+        self.oracle_masks = os.path.join(dataset_dir, 'oracle_masks')
+        self.depth_maps = os.path.join(dataset_dir, 'depth_maps')
+        self.base_size = base_size
+        self.crop_size = crop_size
+        self.suffix = suffix
+        self.normalize_16bit = normalize_16bit
+        self.in_channels = in_channels
+
+        print(f"[PoLaRISTrainLoader] Initialized with {len(img_id)} samples")
+        print(f"  - Images: {self.images}")
+        print(f"  - LiDAR: {self.lidar_roi}")
+        print(f"  - Oracle Masks: {self.oracle_masks}")
+        print(f"  - Depth Maps: {self.depth_maps}")
+        print(f"  - 16-bit normalization: {normalize_16bit}")
+        print(f"  - Input channels: {in_channels}")
+
+    def _load_image(self, img_path):
+        """
+        Load infrared image with 16-bit support
+        
+        Returns:
+            img: PIL Image
+            is_16bit: bool flag
+        """
+        img = Image.open(img_path)
+        
+        # Check if 16-bit
+        is_16bit = False
+        if img.mode == 'I;16':
+            is_16bit = True
+            # Convert to float32 array for processing
+            img_array = np.array(img, dtype=np.float32)
+            
+            if self.normalize_16bit:
+                # Min-Max normalization to 0-255 range
+                # This preserves dynamic range better than direct division
+                img_min = img_array.min()
+                img_max = img_array.max()
+                if img_max > img_min:
+                    img_array = (img_array - img_min) / (img_max - img_min) * 255.0
+                else:
+                    img_array = np.zeros_like(img_array)
+            else:
+                # Simple scaling (may lose detail in dark regions)
+                img_array = img_array / 65535.0 * 255.0
+            
+            # Convert back to uint8 PIL Image for augmentation
+            img = Image.fromarray(img_array.astype(np.uint8), mode='L')
+        else:
+            # 8-bit image, convert to grayscale
+            img = img.convert('L')
+        
+        return img, is_16bit
+
+    def _load_lidar(self, lidar_path):
+        """
+        Load LiDAR point cloud from .bin file
+
+        Returns:
+            points: numpy array (N, 4) [x, y, z, intensity]
+                    Returns zeros if file not found
+        """
+        if os.path.exists(lidar_path):
+            try:
+                points = np.fromfile(lidar_path, dtype=np.float32).reshape(-1, 4)
+                return points
+            except Exception as e:
+                print(f"Warning: Failed to load LiDAR {lidar_path}: {e}")
+                return np.zeros((0, 4), dtype=np.float32)
+        else:
+            # Return empty array if no LiDAR data
+            return np.zeros((0, 4), dtype=np.float32)
+
+    def _load_depth(self, depth_path):
+        """
+        Load depth map from .npy file
+
+        Returns:
+            depth: PIL Image in 'F' mode (float32)
+        """
+        if os.path.exists(depth_path):
+            try:
+                depth_arr = np.load(depth_path)
+                return Image.fromarray(depth_arr, mode='F')
+            except Exception as e:
+                print(f"Warning: Failed to load depth map {depth_path}: {e}")
+                # Return zeros with default size (will be resized later)
+                return None
+        else:
+            return None
+
+    def _sync_transform(self, img, mask, oracle_mask, depth=None, lidar_points=None):
+        """
+        Synchronized data augmentation
+
+        Note on LiDAR flipping:
+        - LiDAR points in this implementation are NOT flipped because they're
+          already converted to depth maps (stored in depth_maps/*.npy)
+        - If you need to augment raw LiDAR points, you would need to:
+          1. Check if points are in image coordinates (x, y, z)
+          2. Flip x coordinate: x_flipped = image_width - x
+        - Current implementation uses pre-generated depth maps, so LiDAR
+          points (.bin files) are only loaded for reference, not for training
+        """
+        # Random horizontal flip
+        flip_flag = random.random() < 0.5
+        if flip_flag:
+            img = img.transpose(Image.FLIP_LEFT_RIGHT)
+            mask = mask.transpose(Image.FLIP_LEFT_RIGHT)
+            oracle_mask = oracle_mask.transpose(Image.FLIP_LEFT_RIGHT)
+            if depth is not None:
+                depth = depth.transpose(Image.FLIP_LEFT_RIGHT)
+
+            # LiDAR points: Currently not used for training (depth maps are used instead)
+            # If you need to flip LiDAR points in image coordinates, uncomment:
+            # if lidar_points is not None and len(lidar_points) > 0:
+            #     img_width = img.size[0]
+            #     lidar_points[:, 0] = img_width - lidar_points[:, 0]  # Flip x coordinate
+        
+        crop_size = self.crop_size
+        
+        # Random scale (short edge)
+        long_size = random.randint(int(self.base_size * 0.5), int(self.base_size * 2.0))
+        w, h = img.size
+        if h > w:
+            oh = long_size
+            ow = int(1.0 * w * long_size / h + 0.5)
+            short_size = ow
+        else:
+            ow = long_size
+            oh = int(1.0 * h * long_size / w + 0.5)
+            short_size = oh
+        
+        img = img.resize((ow, oh), Image.BILINEAR)
+        mask = mask.resize((ow, oh), Image.NEAREST)
+        oracle_mask = oracle_mask.resize((ow, oh), Image.BILINEAR)  # Use BILINEAR to preserve gradients
+        if depth is not None:
+            depth = depth.resize((ow, oh), Image.BILINEAR)
+
+        # Pad crop
+        if short_size < crop_size:
+            padh = crop_size - oh if oh < crop_size else 0
+            padw = crop_size - ow if ow < crop_size else 0
+            img = ImageOps.expand(img, border=(0, 0, padw, padh), fill=0)
+            mask = ImageOps.expand(mask, border=(0, 0, padw, padh), fill=0)
+            oracle_mask = ImageOps.expand(oracle_mask, border=(0, 0, padw, padh), fill=0)
+            if depth is not None:
+                # Use paste method for float images (mode 'F')
+                new_depth = Image.new('F', (ow + padw, oh + padh), 0.0)
+                new_depth.paste(depth, (0, 0))
+                depth = new_depth
+
+        # Random crop
+        w, h = img.size
+        x1 = random.randint(0, w - crop_size)
+        y1 = random.randint(0, h - crop_size)
+        img = img.crop((x1, y1, x1 + crop_size, y1 + crop_size))
+        mask = mask.crop((x1, y1, x1 + crop_size, y1 + crop_size))
+        oracle_mask = oracle_mask.crop((x1, y1, x1 + crop_size, y1 + crop_size))
+        if depth is not None:
+            depth = depth.crop((x1, y1, x1 + crop_size, y1 + crop_size))
+
+        # Gaussian blur (only on image, not masks or depth)
+        if random.random() < 0.5:
+            img = img.filter(ImageFilter.GaussianBlur(radius=random.random()))
+
+        # Convert to numpy arrays
+        img = np.array(img, dtype=np.float32)
+        mask = np.array(mask, dtype=np.float32)
+        oracle_mask = np.array(oracle_mask, dtype=np.float32)
+        if depth is not None:
+            depth = np.array(depth, dtype=np.float32)
+
+        return img, mask, oracle_mask, depth, lidar_points
+
+    def __getitem__(self, idx):
+        img_id = self._items[idx]
+        img_path = os.path.join(self.images, img_id + self.suffix)
+        label_path = os.path.join(self.masks, img_id + self.suffix)
+        oracle_path = os.path.join(self.oracle_masks, img_id + self.suffix)
+        lidar_path = os.path.join(self.lidar_roi, img_id + '.bin')
+        depth_path = os.path.join(self.depth_maps, img_id + '.npy')
+
+        # Load infrared image (with 16-bit support)
+        img, is_16bit = self._load_image(img_path)
+
+        # Load depth map if in_channels == 2
+        depth = None
+        if self.in_channels == 2:
+            depth = self._load_depth(depth_path)
+            if depth is None:
+                # Create zero depth map if not found
+                depth = Image.new('F', img.size, 0.0)
+
+        # Load GT mask
+        mask = Image.open(label_path).convert('L')
+
+        # Load Oracle Mask (Soft Label)
+        if os.path.exists(oracle_path):
+            oracle_mask = Image.open(oracle_path).convert('L')
+        else:
+            # Fallback to zeros if not generated yet
+            oracle_mask = Image.new('L', mask.size, 0)
+            print(f"Warning: Oracle mask not found for {img_id}, using zeros")
+
+        # Load LiDAR point cloud
+        lidar_points = self._load_lidar(lidar_path)
+
+        # Synchronized augmentation
+        img, mask, oracle_mask, depth, lidar_points = self._sync_transform(
+            img, mask, oracle_mask, depth, lidar_points
+        )
+
+        # Normalize and convert to tensor
+        if self.in_channels == 2:
+            # 2-channel mode: stack IR + depth
+            img = img / 255.0  # Normalize IR to [0, 1]
+            depth = depth / 80.0  # Normalize depth (approx max 80m)
+            combined = np.stack([img, depth], axis=0)  # (2, H, W)
+            img_tensor = torch.from_numpy(combined).float()
+        else:
+            # Single channel mode
+            img = img / 255.0
+            if self.transform is not None:
+                img_tensor = self.transform(img)
+            else:
+                img_tensor = torch.from_numpy(img).unsqueeze(0).float()  # (1, H, W)
+
+        # Normalize masks to [0, 1] and preserve float values
+        # CRITICAL: Do NOT binarize oracle_mask - preserve soft labels!
+        mask = mask / 255.0  # Binary: {0.0, 1.0}
+        oracle_mask = oracle_mask / 255.0  # Soft: [0.0, 1.0], e.g., 0.6 for no-LiDAR targets
+
+        # Add channel dimension
+        mask = np.expand_dims(mask, axis=0)  # (1, H, W)
+        oracle_mask = np.expand_dims(oracle_mask, axis=0)  # (1, H, W)
+
+        # Convert LiDAR to tensor
+        lidar_tensor = torch.from_numpy(lidar_points).float()  # (N, 4)
+
+        return {
+            'image': img_tensor,  # (1, H, W) or (2, H, W) depending on in_channels
+            'mask': torch.from_numpy(mask).float(),  # (1, H, W)
+            'oracle_mask': torch.from_numpy(oracle_mask).float(),  # (1, H, W) with soft labels
+            'lidar': lidar_tensor,  # (N, 4)
+            'img_id': img_id,
+            'is_16bit': is_16bit
+        }
+
+    def __len__(self):
+        return len(self._items)
+
+
+class PoLaRISTestLoader(Dataset):
+    """
+    Test Dataset Loader for PoLaRIS with LiDAR fusion
+    """
+    
+    NUM_CLASS = 1
+
+    def __init__(self, dataset_dir, img_id, base_size=512, crop_size=480,
+                 transform=None, suffix='.png', normalize_16bit=True, in_channels=1):
+        super(PoLaRISTestLoader, self).__init__()
+
+        self.transform = transform
+        self._items = img_id
+        self.masks = os.path.join(dataset_dir, 'masks')
+        self.images = os.path.join(dataset_dir, 'images')
+        self.lidar_roi = os.path.join(dataset_dir, 'lidar_roi')
+        self.depth_maps = os.path.join(dataset_dir, 'depth_maps')
+        self.base_size = base_size
+        self.crop_size = crop_size
+        self.suffix = suffix
+        self.normalize_16bit = normalize_16bit
+        self.in_channels = in_channels
+
+        print(f"[PoLaRISTestLoader] Initialized with {len(img_id)} samples")
+        print(f"  - Input channels: {in_channels}")
+
+    def _load_image(self, img_path):
+        """Load infrared image with 16-bit support"""
+        img = Image.open(img_path)
+        
+        is_16bit = False
+        if img.mode == 'I;16':
+            is_16bit = True
+            img_array = np.array(img, dtype=np.float32)
+            
+            if self.normalize_16bit:
+                img_min = img_array.min()
+                img_max = img_array.max()
+                if img_max > img_min:
+                    img_array = (img_array - img_min) / (img_max - img_min) * 255.0
+                else:
+                    img_array = np.zeros_like(img_array)
+            else:
+                img_array = img_array / 65535.0 * 255.0
+            
+            img = Image.fromarray(img_array.astype(np.uint8), mode='L')
+        else:
+            img = img.convert('L')
+        
+        return img, is_16bit
+
+    def _load_lidar(self, lidar_path):
+        """Load LiDAR point cloud"""
+        if os.path.exists(lidar_path):
+            try:
+                points = np.fromfile(lidar_path, dtype=np.float32).reshape(-1, 4)
+                return points
+            except:
+                return np.zeros((0, 4), dtype=np.float32)
+        else:
+            return np.zeros((0, 4), dtype=np.float32)
+
+    def _load_depth(self, depth_path):
+        """Load depth map from .npy file"""
+        if os.path.exists(depth_path):
+            try:
+                depth_arr = np.load(depth_path)
+                return Image.fromarray(depth_arr, mode='F')
+            except:
+                return None
+        else:
+            return None
+
+    def _testval_sync_transform(self, img, mask, depth=None):
+        """Resize to base_size for testing"""
+        base_size = self.base_size
+        img = img.resize((base_size, base_size), Image.BILINEAR)
+        mask = mask.resize((base_size, base_size), Image.NEAREST)
+        if depth is not None:
+            depth = depth.resize((base_size, base_size), Image.BILINEAR)
+
+        img = np.array(img, dtype=np.float32)
+        mask = np.array(mask, dtype=np.float32)
+        if depth is not None:
+            depth = np.array(depth, dtype=np.float32)
+
+        return img, mask, depth
+
+    def __getitem__(self, idx):
+        img_id = self._items[idx]
+        img_path = os.path.join(self.images, img_id + self.suffix)
+        label_path = os.path.join(self.masks, img_id + self.suffix)
+        lidar_path = os.path.join(self.lidar_roi, img_id + '.bin')
+        depth_path = os.path.join(self.depth_maps, img_id + '.npy')
+
+        # Load data
+        img, is_16bit = self._load_image(img_path)
+        mask = Image.open(label_path).convert('L')
+        lidar_points = self._load_lidar(lidar_path)
+
+        # Load depth map if in_channels == 2
+        depth = None
+        if self.in_channels == 2:
+            depth = self._load_depth(depth_path)
+            if depth is None:
+                depth = Image.new('F', img.size, 0.0)
+
+        # Transform
+        img, mask, depth = self._testval_sync_transform(img, mask, depth)
+
+        # Normalize and convert to tensor
+        if self.in_channels == 2:
+            # 2-channel mode: stack IR + depth
+            img = img / 255.0
+            depth = depth / 80.0
+            combined = np.stack([img, depth], axis=0)
+            img_tensor = torch.from_numpy(combined).float()
+        else:
+            # Single channel mode
+            img = img / 255.0
+            if self.transform is not None:
+                img_tensor = self.transform(img)
+            else:
+                img_tensor = torch.from_numpy(img).unsqueeze(0).float()
+
+        mask = np.expand_dims(mask / 255.0, axis=0)
+        lidar_tensor = torch.from_numpy(lidar_points).float()
+
+        return {
+            'image': img_tensor,
+            'mask': torch.from_numpy(mask).float(),
+            'lidar': lidar_tensor,
+            'img_id': img_id,
+            'is_16bit': is_16bit
+        }
+
+    def __len__(self):
+        return len(self._items)
+
+
+# ==========================================
+# Loss Functions for Soft Labels
+# ==========================================
+
+class SoftIoULoss(torch.nn.Module):
+    """
+    Soft IoU Loss that supports float targets (soft labels)
+    
+    Works with:
+    - Binary targets: {0, 1}
+    - Soft targets: [0.0, 1.0], e.g., 0.6 for uncertain regions
+    """
+    def __init__(self, smooth=1e-6):
+        super(SoftIoULoss, self).__init__()
+        self.smooth = smooth
+    
+    def forward(self, pred, target):
+        """
+        Args:
+            pred: (B, 1, H, W) - predicted logits or probabilities
+            target: (B, 1, H, W) - soft labels [0.0, 1.0]
+        """
+        # Apply sigmoid if pred is logits
+        if pred.min() < 0 or pred.max() > 1:
+            pred = torch.sigmoid(pred)
+        
+        # Flatten
+        pred = pred.view(-1)
+        target = target.view(-1)
+        
+        # Soft IoU
+        intersection = (pred * target).sum()
+        total = (pred + target).sum()
+        union = total - intersection
+        
+        iou = (intersection + self.smooth) / (union + self.smooth)
+        
+        return 1 - iou
+
+
+class SoftBCELoss(torch.nn.Module):
+    """
+    Binary Cross Entropy Loss with support for soft labels
+    """
+    def __init__(self, pos_weight=None):
+        super(SoftBCELoss, self).__init__()
+        self.pos_weight = pos_weight
+        self.bce = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    
+    def forward(self, pred, target):
+        """
+        Args:
+            pred: (B, 1, H, W) - predicted logits
+            target: (B, 1, H, W) - soft labels [0.0, 1.0]
+        """
+        return self.bce(pred, target)
+
+
+class CombinedSoftLoss(torch.nn.Module):
+    """
+    Combined loss: BCE + IoU for better convergence
+    """
+    def __init__(self, bce_weight=0.5, iou_weight=0.5, pos_weight=None):
+        super(CombinedSoftLoss, self).__init__()
+        self.bce_loss = SoftBCELoss(pos_weight=pos_weight)
+        self.iou_loss = SoftIoULoss()
+        self.bce_weight = bce_weight
+        self.iou_weight = iou_weight
+    
+    def forward(self, pred, target):
+        bce = self.bce_loss(pred, target)
+        iou = self.iou_loss(pred, target)
+        
+        return self.bce_weight * bce + self.iou_weight * iou

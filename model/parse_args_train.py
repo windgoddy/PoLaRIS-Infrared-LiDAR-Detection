@@ -65,6 +65,14 @@ def parse_args():
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed for reproducibility (default: 42)')
 
+    # PoLaRIS LiDAR DataLoader options
+    parser.add_argument('--use_lidar_dataloader', type=str, default='False',
+                        help='Use PoLaRIS LiDAR DataLoader (supports 16-bit, LiDAR, soft labels)')
+    parser.add_argument('--normalize_16bit', type=str, default='True',
+                        help='Use Min-Max normalization for 16-bit images (True) or simple scaling (False)')
+    parser.add_argument('--use_soft_labels', type=str, default='True',
+                        help='Use soft labels (oracle_masks) for training instead of hard labels')
+
     args = parser.parse_args()
     # make dir for save result
     args.save_dir = make_dir(args.deep_supervision, args.dataset, args.model, args.experiment_name)
