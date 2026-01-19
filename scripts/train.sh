@@ -64,7 +64,7 @@ case $MODE in
     baseline1)
         echo "🔹 Baseline: DNANet + 8-bit images"
         python train.py \
-            --experiment_name baseline1_Pohang_8bit \
+            --experiment_name DNANet_baseline_8bit \
             --model DNANet \
             --dataset Pohang-Canal-3k \
             --image_folder images-8bit \
@@ -77,7 +77,27 @@ case $MODE in
             --channel_size three \
             --seed 42 \
             --suffix .png \
-            --split_method split_data \
+            --split_method 50_50 \
+            --workers 4
+        ;;
+    
+    baseline2)
+        echo "🔹 Baseline: MS_CAFNet_DualGeo + 8-bit images"
+        python train.py \
+            --experiment_name MS_CAFNet_baseline_8bit \
+            --model MS_CAFNet_DualGeo \
+            --dataset Pohang-Canal-3k \
+            --image_folder images-8bit \
+            --train_batch_size 8 \
+            --epochs $EPOCHS \
+            --optimizer Adagrad \
+            --lr 0.05 \
+            --deep_supervision True \
+            --backbone resnet_18 \
+            --channel_size three \
+            --seed 42 \
+            --suffix .png \
+            --split_method 50_50 \
             --workers 4
         ;;
 

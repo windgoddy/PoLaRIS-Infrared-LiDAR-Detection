@@ -55,7 +55,7 @@ CONFIG = {
     'visual_max_confidence': 0.6,  # 无点云框的最大置信度（建议0.5-0.7）
 
     # 6. 纹理平滑度过滤（框内区域细化）
-    'gradient_threshold': 8,     # 纹理梯度阈值（8-bit: 3-10, 16-bit: 100-500）
+    'gradient_threshold': 0.45,     # 纹理梯度阈值（8-bit: 3-10, 16-bit: 100-500）
     'texture_dilation_kernel': 4,  # 形态学膨胀核大小（连接碎片纹理）
     'min_refined_area': 20,        # 细化后的最小有效面积（像素数）
 }
@@ -724,7 +724,7 @@ def process_frame(ir_path, mask_path, lidar_path, K_cam, T_cam_to_lidar, output_
 def main():
     # --- 路径配置 (请修改这里) ---
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    dataset_dir = os.path.join(project_root, 'dataset/select')
+    dataset_dir = os.path.join(project_root, 'dataset/Pohang-Canal-3k')
     
     images_dir = os.path.join(dataset_dir, 'images')
     masks_dir = os.path.join(dataset_dir, 'masks')

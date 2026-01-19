@@ -74,7 +74,8 @@ class Trainer(object):
                 transform=None,  # DataLoader handles normalization internally
                 suffix=args.suffix,
                 normalize_16bit=(args.normalize_16bit == 'True'),
-                in_channels=args.in_channels  # Pass in_channels for depth map support
+                in_channels=args.in_channels,  # Pass in_channels for depth map support
+                image_folder=args.image_folder
             )
             testset = PoLaRISTestLoader(
                 dataset_dir=dataset_dir,
@@ -84,7 +85,8 @@ class Trainer(object):
                 transform=None,
                 suffix=args.suffix,
                 normalize_16bit=(args.normalize_16bit == 'True'),
-                in_channels=args.in_channels
+                in_channels=args.in_channels,
+                image_folder=args.image_folder
             )
         else:
             # Use legacy DataLoader (8-bit only)
