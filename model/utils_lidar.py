@@ -510,6 +510,8 @@ def polaris_collate_fn(batch):
     Handles variable-length LiDAR point clouds by keeping them as a list
     instead of trying to stack them into a single tensor.
 
+    Works for both training (with oracle_mask) and testing (without oracle_mask).
+
     Args:
         batch: List of dicts from __getitem__
 
@@ -517,7 +519,7 @@ def polaris_collate_fn(batch):
         Collated batch with:
         - image: (B, C, H, W) - stacked tensor
         - mask: (B, 1, H, W) - stacked tensor
-        - oracle_mask: (B, 1, H, W) - stacked tensor
+        - oracle_mask: (B, 1, H, W) - stacked tensor (only for training)
         - lidar: List[Tensor] - variable-length point clouds
         - img_id: List[str] - image IDs
         - is_16bit: List[bool] - 16-bit flags
@@ -525,18 +527,24 @@ def polaris_collate_fn(batch):
     # Stack fixed-size tensors
     images = torch.stack([item['image'] for item in batch])
     masks = torch.stack([item['mask'] for item in batch])
-    oracle_masks = torch.stack([item['oracle_mask'] for item in batch])
 
     # Keep variable-size data as lists
     lidar = [item['lidar'] for item in batch]
     img_id = [item['img_id'] for item in batch]
     is_16bit = [item['is_16bit'] for item in batch]
 
-    return {
+    # Build return dict
+    result = {
         'image': images,
         'mask': masks,
-        'oracle_mask': oracle_masks,
         'lidar': lidar,
         'img_id': img_id,
         'is_16bit': is_16bit
     }
+
+    # Add oracle_mask only if present (training mode)
+    if 'oracle_mask' in batch[0]:
+        oracle_masks = torch.stack([item['oracle_mask'] for item in batch])
+        result['oracle_mask'] = oracle_masks
+
+    return result

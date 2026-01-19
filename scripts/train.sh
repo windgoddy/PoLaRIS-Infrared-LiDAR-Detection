@@ -7,27 +7,24 @@
 #   ./scripts/train.sh <mode> [options]
 #
 # 模式:
-#   auto         - 自动选择（根据数据集：Pohang-Canal-3k 用 16bit，其他用 8bit）
-#   8bit         - 8-bit 图像训练（旧版 DataLoader）
-#   16bit        - 16-bit 图像训练（新版 DataLoader + 软标签）
-#   16bit-ir     - 16-bit 仅红外（无深度图）
-#   baseline1    - DNANet 原始论文配置（对比基准）
+#   baseline1    - DNANet + 8-bit images（对比基准）
+#   16bit-ir     - PoLaRIS + 16-bit + 仅红外（无深度图）
+#   16bit        - PoLaRIS + 16-bit + 深度图（完整模型）
 #
 # 示例:
-#   ./scripts/train.sh auto                      # 自动选择模式（推荐）
-#   ./scripts/train.sh auto --dataset Pohang-Canal-3k  # 16-bit 模式
-#   ./scripts/train.sh auto --dataset Pohang-Canal     # 8-bit 模式
-#   ./scripts/train.sh 16bit --gpu 0             # 手动指定 16-bit
+#   ./scripts/train.sh baseline1 --gpu 0         # DNANet baseline (8-bit)
+#   ./scripts/train.sh 16bit-ir --gpu 1          # PoLaRIS 16-bit 无深度图
+#   ./scripts/train.sh 16bit --gpu 2             # PoLaRIS 完整模型
 # ============================================================
 
 # 默认参数
-MODE="auto"
+MODE="16bit"
 GPU=5
-DATASET="Pohang-Canal"
+DATASET="Pohang-Canal-3k"
 EPOCHS=2000
 
 # 解析第一个参数作为模式（如果提供）
-if [[ $# -gt 0 && $1 =~ ^(auto|8bit|16bit|16bit-ir|baseline1)$ ]]; then
+if [[ $# -gt 0 && $1 =~ ^(baseline1|16bit-ir|16bit)$ ]]; then
     MODE="$1"
     shift
 fi
@@ -54,17 +51,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# 自动选择模式（根据数据集）
-if [[ "$MODE" == "auto" ]]; then
-    if [[ "$DATASET" == *"3k"* ]]; then
-        MODE="16bit"
-        echo "🤖 自动选择: 16-bit 模式（检测到数据集包含 '3k'）"
-    else
-        MODE="8bit"
-        echo "🤖 自动选择: 8-bit 模式（数据集: $DATASET）"
-    fi
-fi
-
 # 设置 GPU
 export CUDA_VISIBLE_DEVICES=$GPU
 
@@ -75,36 +61,33 @@ echo "============================================================"
 
 # 根据模式选择配置
 case $MODE in
-    8bit)
-        echo "🔹 8-bit 模式（旧版 DataLoader）"
-        python train_Phase3.py \
-            --experiment_name Phase3_DualGeo_8bit \
-            --model MS_CAFNet_DualGeo \
-            --dataset Pohang-Canal \
-            --train_batch_size 4 \
-            --epochs 2000 \
-            --optimizer Adam \
-            --lr 0.0001 \
-            --weight_decay 5e-4 \
-            --scheduler CosineAnnealingLR \
-            --min_lr 1e-6 \
-            --in_channels 2 \
-            --deep_supervision False \
-            --seed 42 \
-            --use_lidar_dataloader False \
-            --use_soft_labels False \
-            --train_batch_size 16 \
-            --test_batch_size 16 \
+    baseline1)
+        echo "🔹 Baseline: DNANet + 8-bit images"
+        python train.py \
+            --experiment_name baseline1_Pohang_8bit \
+            --model DNANet \
+            --dataset Pohang-Canal-3k \
+            --image_folder images-8bit \
+            --train_batch_size 8 \
+            --epochs $EPOCHS \
+            --optimizer Adagrad \
+            --lr 0.05 \
+            --deep_supervision True \
             --backbone resnet_18 \
+            --channel_size three \
+            --seed 42 \
+            --suffix .png \
+            --split_method split_data \
+            --workers 4
         ;;
 
     16bit)
-        echo "🔸 16-bit 模式（推荐）"
+        echo "🔸 PoLaRIS: 16-bit + 深度图（完整模型）"
         python train_Phase3.py \
-            --experiment_name Phase3_DualGeo_16bit \
+            --experiment_name PoLaRIS_16bit_full \
             --model MS_CAFNet_DualGeo \
             --dataset Pohang-Canal-3k \
-            --epochs 2000 \
+            --epochs $EPOCHS \
             --optimizer Adam \
             --lr 0.0001 \
             --weight_decay 5e-4 \
@@ -118,13 +101,16 @@ case $MODE in
             --use_soft_labels True \
             --train_batch_size 16 \
             --test_batch_size 16 \
-            --backbone resnet_18 \
+            --backbone resnet_34 \
+            --suffix .png \
+            --split_method 50_50 \
+            --workers 4
         ;;
 
     16bit-ir)
-        echo "🔹 16-bit 仅红外模式（无深度图）"
+        echo "🔹 PoLaRIS: 16-bit + 仅红外（无深度图）"
         python train_Phase3.py \
-            --experiment_name Phase3_DualGeo_16bit_IR_only \
+            --experiment_name PoLaRIS_16bit_IR_only \
             --model MS_CAFNet_DualGeo \
             --dataset Pohang-Canal-3k \
             --epochs $EPOCHS \
@@ -139,28 +125,22 @@ case $MODE in
             --use_lidar_dataloader True \
             --normalize_16bit True \
             --use_soft_labels True \
-            --backbone resnet_18 \
+            --backbone resnet_34 \
             --train_batch_size 16 \
             --test_batch_size 16 \
-        ;;
-
-    baseline1)
-        echo "🔹 Baseline1 (DNANet)"
-        python train.py \
-            --experiment_name baseline1 \
-            --model DNANet \
-            --dataset $DATASET \
-            --train_batch_size 8 \
-            --epochs $EPOCHS \
-            --optimizer Adagrad \
-            --lr 0.05 \
-            --deep_supervision True \
-            --seed 42
+            --suffix .png \
+            --split_method 50_50 \
+            --workers 4
         ;;
 
     *)
         echo "❌ 未知模式: $MODE"
-        echo "支持的模式: auto, 8bit, 16bit, 16bit-ir, baseline1"
+        echo "支持的模式: baseline1, 16bit-ir, 16bit"
+        echo ""
+        echo "实验设计："
+        echo "  baseline1  - DNANet + 8-bit images (Pohang-Canal-3k-8bit)"
+        echo "  16bit-ir   - PoLaRIS + 16-bit + 仅红外（无深度图）"
+        echo "  16bit      - PoLaRIS + 16-bit + 深度图（完整模型）"
         exit 1
         ;;
 esac

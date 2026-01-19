@@ -17,13 +17,13 @@ class TrainSetLoader(Dataset):
     """Iceberg Segmentation dataset."""
     NUM_CLASS = 1
 
-    def __init__(self, dataset_dir, img_id ,base_size=512,crop_size=480,transform=None,suffix='.png', in_channels=3):
+    def __init__(self, dataset_dir, img_id ,base_size=512,crop_size=480,transform=None,suffix='.png', in_channels=3, image_folder='images'):
         super(TrainSetLoader, self).__init__()
 
         self.transform = transform
         self._items = img_id
         self.masks = dataset_dir+'/'+'masks'
-        self.images = dataset_dir+'/'+'images'
+        self.images = dataset_dir+'/'+image_folder
         self.depth_maps = dataset_dir+'/'+'depth_maps'
         self.oracle_masks = dataset_dir+'/'+'oracle_masks'
         self.base_size = base_size
@@ -168,12 +168,12 @@ class TestSetLoader(Dataset):
     """Iceberg Segmentation dataset."""
     NUM_CLASS = 1
 
-    def __init__(self, dataset_dir, img_id,transform=None,base_size=512,crop_size=480,suffix='.png', in_channels=3):
+    def __init__(self, dataset_dir, img_id,transform=None,base_size=512,crop_size=480,suffix='.png', in_channels=3, image_folder='images'):
         super(TestSetLoader, self).__init__()
         self.transform = transform
         self._items    = img_id
         self.masks     = dataset_dir+'/'+'masks'
-        self.images    = dataset_dir+'/'+'images'
+        self.images    = dataset_dir+'/'+image_folder
         self.depth_maps = dataset_dir+'/'+'depth_maps'
         self.base_size = base_size
         self.crop_size = crop_size

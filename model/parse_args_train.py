@@ -31,6 +31,8 @@ def parse_args():
                         help='base image size')
     parser.add_argument('--crop_size', type=int, default=256,
                         help='crop image size')
+    parser.add_argument('--image_folder', type=str, default='images',
+                        help='name of the image folder (default: images, use images-8bit for 8-bit images)')
 
     #  hyper params for training
     parser.add_argument('--epochs', type=int, default=1500, metavar='N',
