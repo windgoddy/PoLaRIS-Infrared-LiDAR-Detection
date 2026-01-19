@@ -495,9 +495,48 @@ class CombinedSoftLoss(torch.nn.Module):
         self.iou_loss = SoftIoULoss()
         self.bce_weight = bce_weight
         self.iou_weight = iou_weight
-    
+
     def forward(self, pred, target):
         bce = self.bce_loss(pred, target)
         iou = self.iou_loss(pred, target)
-        
+
         return self.bce_weight * bce + self.iou_weight * iou
+
+
+def polaris_collate_fn(batch):
+    """
+    Custom collate function for PoLaRIS DataLoader.
+
+    Handles variable-length LiDAR point clouds by keeping them as a list
+    instead of trying to stack them into a single tensor.
+
+    Args:
+        batch: List of dicts from __getitem__
+
+    Returns:
+        Collated batch with:
+        - image: (B, C, H, W) - stacked tensor
+        - mask: (B, 1, H, W) - stacked tensor
+        - oracle_mask: (B, 1, H, W) - stacked tensor
+        - lidar: List[Tensor] - variable-length point clouds
+        - img_id: List[str] - image IDs
+        - is_16bit: List[bool] - 16-bit flags
+    """
+    # Stack fixed-size tensors
+    images = torch.stack([item['image'] for item in batch])
+    masks = torch.stack([item['mask'] for item in batch])
+    oracle_masks = torch.stack([item['oracle_mask'] for item in batch])
+
+    # Keep variable-size data as lists
+    lidar = [item['lidar'] for item in batch]
+    img_id = [item['img_id'] for item in batch]
+    is_16bit = [item['is_16bit'] for item in batch]
+
+    return {
+        'image': images,
+        'mask': masks,
+        'oracle_mask': oracle_masks,
+        'lidar': lidar,
+        'img_id': img_id,
+        'is_16bit': is_16bit
+    }

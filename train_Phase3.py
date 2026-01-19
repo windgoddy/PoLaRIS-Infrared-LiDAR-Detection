@@ -11,7 +11,7 @@ import numpy as np
 
 # metric, loss .etc
 from model.utils import *
-from model.utils_lidar import PoLaRISTrainLoader, PoLaRISTestLoader, CombinedSoftLoss
+from model.utils_lidar import PoLaRISTrainLoader, PoLaRISTestLoader, CombinedSoftLoss, polaris_collate_fn
 from model.metric import *
 from model.loss import *
 from model.load_param_data import  load_dataset, load_param
@@ -105,8 +105,17 @@ class Trainer(object):
                                    crop_size=args.crop_size, transform=input_transform,
                                    suffix=args.suffix, in_channels=args.in_channels)
 
-        self.train_data = DataLoader(dataset=trainset, batch_size=args.train_batch_size, shuffle=True, num_workers=args.workers,drop_last=True)
-        self.test_data  = DataLoader(dataset=testset,  batch_size=args.test_batch_size, num_workers=args.workers,drop_last=False)
+        # Use custom collate function for PoLaRIS loader to handle variable-length LiDAR point clouds
+        if use_lidar_loader:
+            self.train_data = DataLoader(dataset=trainset, batch_size=args.train_batch_size, shuffle=True,
+                                        num_workers=args.workers, drop_last=True, collate_fn=polaris_collate_fn)
+            self.test_data = DataLoader(dataset=testset, batch_size=args.test_batch_size,
+                                       num_workers=args.workers, drop_last=False, collate_fn=polaris_collate_fn)
+        else:
+            self.train_data = DataLoader(dataset=trainset, batch_size=args.train_batch_size, shuffle=True,
+                                        num_workers=args.workers, drop_last=True)
+            self.test_data = DataLoader(dataset=testset, batch_size=args.test_batch_size,
+                                       num_workers=args.workers, drop_last=False)
 
         # Store flag for later use in training/testing loops
         self.use_lidar_loader = use_lidar_loader
