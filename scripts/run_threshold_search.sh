@@ -6,13 +6,15 @@
 # 配置参数（请根据实际情况修改）
 # ============================================================================
 
-# 模型路径（请修改为您训练好的模型路径）
-MODEL_PATH="results/Phase3_DualGeo/best_model.pth"
+# 模型路径
+MODEL_PATH="result/PoLaRIS_16bit_full_Pohang-Canal-3k_MS_CAFNet_DualGeo_19_01_2026_17_16_02_wDS/best_model_epoch0287_mIoU0.6674.pth.tar"
 
 # 数据集路径
-DATASET_DIR="dataset/select"
+# 注意：脚本会在 dataset_dir/split_data/test.txt 或 dataset_dir/50_50/test.txt 中查找
+DATASET_DIR="dataset/Pohang-Canal"
 
 # 数据划分（train/test/val）
+# 如果使用 50_50 分组，脚本会自动在 dataset/Pohang-Canal/50_50/test.txt 中查找
 SPLIT="test"
 
 # 输出目录

@@ -624,11 +624,27 @@ def main():
     # 2. 准备数据
     print(f"\n📂 准备数据集...")
     
-    # 读取数据集划分文件
-    split_file = os.path.join(args.dataset_dir, 'split_data', f'{args.split}.txt')
-    if not os.path.exists(split_file):
-        # Fallback: 尝试旧路径
-        split_file = os.path.join(args.dataset_dir, f'{args.split}.txt')
+    # 读取数据集划分文件（支持多种目录结构）
+    split_file_candidates = [
+        os.path.join(args.dataset_dir, 'split_data', f'{args.split}.txt'),  # dataset/select格式
+        os.path.join(args.dataset_dir, '50_50', f'{args.split}.txt'),       # dataset/Pohang-Canal格式
+        os.path.join(args.dataset_dir, f'{args.split}.txt'),                # 根目录
+    ]
+    
+    split_file = None
+    for candidate in split_file_candidates:
+        if os.path.exists(candidate):
+            split_file = candidate
+            break
+    
+    if split_file is None:
+        print(f"❌ 错误: 找不到数据集划分文件!")
+        print(f"   尝试的路径:")
+        for candidate in split_file_candidates:
+            print(f"   - {candidate}")
+        return
+    
+    print(f"✓ 使用划分文件: {split_file}")
     
     with open(split_file, 'r') as f:
         img_ids = [line.strip().replace('.png', '') for line in f.readlines()]
