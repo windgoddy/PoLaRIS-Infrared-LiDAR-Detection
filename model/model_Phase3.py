@@ -275,6 +275,9 @@ class MS_CAFNet_DualGeo(nn.Module):
     def __init__(self, num_classes=1, input_channels=2):
         super(MS_CAFNet_DualGeo, self).__init__()
 
+        # 保存输入通道数（1=仅IR，2=IR+Depth）
+        self.input_channels = input_channels
+
         # 滤波器通道数配置 (与 DNANet 保持一致)
         nb_filter = [16, 32, 64, 128, 256]
 
@@ -288,7 +291,8 @@ class MS_CAFNet_DualGeo(nn.Module):
         self.pool = nn.MaxPool2d(2, 2)
 
         # 使用 Res_CBAM_block 构建骨干网络
-        self.conv0_0 = Res_CBAM_block(2, nb_filter[0])
+        # 编码器第一层的输入通道数根据 input_channels 设置
+        self.conv0_0 = Res_CBAM_block(input_channels, nb_filter[0])
         self.conv1_0 = Res_CBAM_block(nb_filter[0], nb_filter[1])
         self.conv2_0 = Res_CBAM_block(nb_filter[1], nb_filter[2])
         self.conv3_0 = Res_CBAM_block(nb_filter[2], nb_filter[3])
@@ -320,17 +324,31 @@ class MS_CAFNet_DualGeo(nn.Module):
         self.final = nn.Conv2d(nb_filter[0], num_classes, kernel_size=1)
 
     def forward(self, input):
-        # input shape: [Batch, 2, H, W]
-        # 假设通道 0 是红外(IR), 通道 1 是深度(Depth)
-        x_ir = input[:, 0:1, :, :]
-        x_depth = input[:, 1:2, :, :]
+        # input shape: [Batch, 1 or 2, H, W]
+        # - 1 channel: 仅红外 (IR only)
+        # - 2 channels: 红外 + 深度 (IR + Depth)
+
+        if self.input_channels == 1:
+            # 单通道模式：仅使用红外图像
+            x_ir = input  # [B, 1, H, W]
+            # 创建全零深度图（用于置信度网络）
+            x_depth = torch.zeros_like(x_ir)
+        else:
+            # 双通道模式：红外 + 深度
+            x_ir = input[:, 0:1, :, :]     # 通道 0: 红外
+            x_depth = input[:, 1:2, :, :]  # 通道 1: 深度
 
         # === Step A: 置信度生成 ===
         pred_conf = self.conf_net(x_depth)
 
         # === Step B: 门控融合 (Input Gating) ===
-        x_gated_depth = x_depth * pred_conf
-        x_fused = torch.cat([x_ir, x_gated_depth], dim=1)
+        if self.input_channels == 1:
+            # 单通道模式：直接使用红外（不融合深度）
+            x_fused = x_ir
+        else:
+            # 双通道模式：融合红外和门控深度
+            x_gated_depth = x_depth * pred_conf
+            x_fused = torch.cat([x_ir, x_gated_depth], dim=1)
 
         # === Step C: 编码 (Encoding) ===
         x0_0 = self.conv0_0(x_fused)
