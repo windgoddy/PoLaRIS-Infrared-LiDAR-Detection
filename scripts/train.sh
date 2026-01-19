@@ -11,10 +11,17 @@
 #   16bit-ir     - PoLaRIS + 16-bit + 仅红外（无深度图）
 #   16bit        - PoLaRIS + 16-bit + 深度图（完整模型）
 #
+# 选项:
+#   --gpu <N>              指定GPU编号（默认：5）
+#   --dataset <name>       指定数据集（默认：Pohang-Canal-3k）
+#   --epochs <N>           训练轮数（默认：2000）
+#   --oracle-masks <name>  Oracle masks文件夹名称（默认：oracle_masks，可选：oracle_masks2, oracle_masks3）
+#
 # 示例:
-#   ./scripts/train.sh baseline1 --gpu 0         # DNANet baseline (8-bit)
-#   ./scripts/train.sh 16bit-ir --gpu 1          # PoLaRIS 16-bit 无深度图
-#   ./scripts/train.sh 16bit --gpu 2             # PoLaRIS 完整模型
+#   ./scripts/train.sh baseline1 --gpu 0                                # DNANet baseline (8-bit)
+#   ./scripts/train.sh 16bit-ir --gpu 1                                 # PoLaRIS 16-bit 无深度图
+#   ./scripts/train.sh 16bit --gpu 2 --oracle-masks oracle_masks2       # PoLaRIS 完整模型使用oracle_masks2
+#   ./scripts/train.sh 16bit --oracle-masks oracle_masks3 --epochs 1000 # 使用oracle_masks3训练1000轮
 # ============================================================
 
 # 默认参数
@@ -22,6 +29,7 @@ MODE="16bit"
 GPU=5
 DATASET="Pohang-Canal-3k"
 EPOCHS=2000
+ORACLE_MASKS="oracle_masks"
 
 # 解析第一个参数作为模式（如果提供）
 if [[ $# -gt 0 && $1 =~ ^(baseline1|16bit-ir|16bit)$ ]]; then
@@ -42,6 +50,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --epochs)
             EPOCHS="$2"
+            shift 2
+            ;;
+        --oracle-masks)
+            ORACLE_MASKS="$2"
             shift 2
             ;;
         *)
@@ -119,6 +131,7 @@ case $MODE in
             --use_lidar_dataloader True \
             --normalize_16bit True \
             --use_soft_labels True \
+            --oracle_masks_folder $ORACLE_MASKS \
             --train_batch_size 16 \
             --test_batch_size 16 \
             --backbone resnet_34 \
@@ -145,6 +158,7 @@ case $MODE in
             --use_lidar_dataloader True \
             --normalize_16bit True \
             --use_soft_labels True \
+            --oracle_masks_folder $ORACLE_MASKS \
             --backbone resnet_34 \
             --train_batch_size 16 \
             --test_batch_size 16 \

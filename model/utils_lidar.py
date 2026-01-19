@@ -26,7 +26,7 @@ class PoLaRISTrainLoader(Dataset):
     NUM_CLASS = 1
 
     def __init__(self, dataset_dir, img_id, base_size=512, crop_size=480,
-                 transform=None, suffix='.png', normalize_16bit=True, in_channels=1, image_folder='images'):
+                 transform=None, suffix='.png', normalize_16bit=True, in_channels=1, image_folder='images', oracle_masks_folder='oracle_masks'):
         super(PoLaRISTrainLoader, self).__init__()
 
         self.transform = transform
@@ -34,7 +34,7 @@ class PoLaRISTrainLoader(Dataset):
         self.masks = os.path.join(dataset_dir, 'masks')
         self.images = os.path.join(dataset_dir, image_folder)
         self.lidar_roi = os.path.join(dataset_dir, 'lidar_roi')
-        self.oracle_masks = os.path.join(dataset_dir, 'oracle_masks')
+        self.oracle_masks = os.path.join(dataset_dir, oracle_masks_folder)
         self.depth_maps = os.path.join(dataset_dir, 'depth_maps')
         self.base_size = base_size
         self.crop_size = crop_size

@@ -74,6 +74,8 @@ def parse_args():
                         help='Use Min-Max normalization for 16-bit images (True) or simple scaling (False)')
     parser.add_argument('--use_soft_labels', type=str, default='True',
                         help='Use soft labels (oracle_masks) for training instead of hard labels')
+    parser.add_argument('--oracle_masks_folder', type=str, default='oracle_masks',
+                        help='Name of oracle masks folder (default: oracle_masks, options: oracle_masks2, oracle_masks3)')
 
     args = parser.parse_args()
     # make dir for save result

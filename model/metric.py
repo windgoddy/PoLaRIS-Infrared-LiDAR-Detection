@@ -3,6 +3,52 @@ import torch.nn as nn
 import torch
 from skimage import measure
 import  numpy
+
+def adaptive_threshold_binarization(output, depth_map=None, threshold_with_lidar=0.5, threshold_without_lidar=0.35):
+    """
+    动态自适应阈值二值化
+    
+    Args:
+        output: (B, 1, H, W) 模型输出概率图
+        depth_map: (B, 1, H, W) 深度图，None表示无LiDAR数据
+        threshold_with_lidar: float 有LiDAR区域的阈值（默认0.5）
+        threshold_without_lidar: float 无LiDAR区域的阈值（默认0.35）
+    
+    Returns:
+        binary_mask: (B, 1, H, W) 二值化结果
+    
+    逻辑：
+        - 有LiDAR覆盖的像素（depth > 0）→ 使用threshold_with_lidar=0.5
+        - 无LiDAR覆盖的像素（depth == 0）→ 使用threshold_without_lidar=0.35
+    """
+    # 确保output经过sigmoid
+    if output.min() < 0 or output.max() > 1:
+        prob = torch.sigmoid(output)
+    else:
+        prob = output
+    
+    # 如果没有depth map，使用统一阈值（保守：使用较高阈值）
+    if depth_map is None:
+        return (prob > threshold_with_lidar).float()
+    
+    # 创建LiDAR掩码：depth > 0 的区域有LiDAR
+    if isinstance(depth_map, np.ndarray):
+        depth_map = torch.from_numpy(depth_map).to(output.device)
+    
+    if depth_map.dim() == 3:  # (B, H, W)
+        depth_map = depth_map.unsqueeze(1)  # (B, 1, H, W)
+    
+    lidar_mask = (depth_map > 0).float()  # 1=有LiDAR, 0=无LiDAR
+    
+    # 动态阈值：有LiDAR用高阈值，无LiDAR用低阈值
+    binary_with_lidar = (prob > threshold_with_lidar).float()
+    binary_without_lidar = (prob > threshold_without_lidar).float()
+    
+    # 组合结果
+    binary_mask = lidar_mask * binary_with_lidar + (1 - lidar_mask) * binary_without_lidar
+    
+    return binary_mask
+
 class ROCMetric():
     """Computes pixAcc and mIoU metric scores
     """
@@ -119,11 +165,16 @@ class mIoU():
         self.nclass = nclass
         self.reset()
 
-    def update(self, preds, labels):
-        # print('come_ininin')
-
-        correct, labeled = batch_pix_accuracy(preds, labels)
-        inter, union = batch_intersection_union(preds, labels, self.nclass)
+    def update(self, preds, labels, depth_map=None, use_adaptive_threshold=True):
+        """
+        Args:
+            preds: 模型预测
+            labels: Ground Truth
+            depth_map: 深度图（可选，用于动态阈值）
+            use_adaptive_threshold: 是否使用动态自适应阈值
+        """
+        correct, labeled = batch_pix_accuracy(preds, labels, depth_map, use_adaptive_threshold)
+        inter, union = batch_intersection_union(preds, labels, self.nclass, depth_map, use_adaptive_threshold)
         self.total_correct += correct
         self.total_label += labeled
         self.total_inter += inter
@@ -169,8 +220,14 @@ def cal_tp_pos_fp_neg(output, target, nclass, score_thresh):
 
     return tp, pos, fp, neg, class_pos
 
-def batch_pix_accuracy(output, target):
-
+def batch_pix_accuracy(output, target, depth_map=None, use_adaptive_threshold=True):
+    """
+    Args:
+        output: 模型输出
+        target: Ground Truth
+        depth_map: 深度图（可选）
+        use_adaptive_threshold: 是否使用动态自适应阈值
+    """
     if len(target.shape) == 3:
         target = np.expand_dims(target.float(), axis=1)
     elif len(target.shape) == 4:
@@ -179,22 +236,45 @@ def batch_pix_accuracy(output, target):
         raise ValueError("Unknown target dimension")
 
     assert output.shape == target.shape, "Predict and Label Shape Don't Match"
-    predict = (output > 0).float()
+    
+    # 使用动态自适应阈值
+    if use_adaptive_threshold and depth_map is not None:
+        predict = adaptive_threshold_binarization(output, depth_map, 
+                                                   threshold_with_lidar=0.5,
+                                                   threshold_without_lidar=0.35)
+    else:
+        # 传统固定阈值
+        predict = (output > 0).float()
+    
     pixel_labeled = (target > 0).float().sum()
     pixel_correct = (((predict == target).float())*((target > 0)).float()).sum()
-
-
 
     assert pixel_correct <= pixel_labeled, "Correct area should be smaller than Labeled"
     return pixel_correct, pixel_labeled
 
 
-def batch_intersection_union(output, target, nclass):
-
+def batch_intersection_union(output, target, nclass, depth_map=None, use_adaptive_threshold=True):
+    """
+    Args:
+        output: 模型输出
+        target: Ground Truth
+        nclass: 类别数
+        depth_map: 深度图（可选）
+        use_adaptive_threshold: 是否使用动态自适应阈值
+    """
     mini = 1
     maxi = 1
     nbins = 1
-    predict = (output > 0).float()
+    
+    # 使用动态自适应阈值
+    if use_adaptive_threshold and depth_map is not None:
+        predict = adaptive_threshold_binarization(output, depth_map,
+                                                   threshold_with_lidar=0.5,
+                                                   threshold_without_lidar=0.35)
+    else:
+        # 传统固定阈值
+        predict = (output > 0).float()
+    
     if len(target.shape) == 3:
         target = np.expand_dims(target.float(), axis=1)
     elif len(target.shape) == 4:
