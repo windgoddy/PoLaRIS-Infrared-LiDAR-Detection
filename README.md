@@ -77,11 +77,10 @@ dataset/Pohang-Canal-3k/
 | 模式 | 说明 | 适用场景 |
 | ---- | ---- | -------- |
 | **auto** | 自动选择模式 | 推荐使用，自动根据数据集选择 8bit/16bit |
-| **16bit** | 16-bit + 软标签 | Pohang-Canal-3k 数据集 |
+| **16bit** | 16-bit + 软标签 | Pohang-Canal-3k 数据集（完整 PoLaRIS） |
 | **8bit** | 8-bit + 硬标签 | 其他数据集或兼容旧版 |
-| **16bit-ir** | 仅红外（无深度） | 只有红外图像，没有 LiDAR |
-| **baseline1** | DNANet 基准 | 对比实验 |
-| **baseline2** | DNANet 变体 | 对比实验 |
+| **16bit-ir** | 仅红外（无深度） | 消融实验：移除深度图 |
+| **baseline1** | DNANet 原始 | 对比基准（DNANet 论文配置） |
 
 ---
 

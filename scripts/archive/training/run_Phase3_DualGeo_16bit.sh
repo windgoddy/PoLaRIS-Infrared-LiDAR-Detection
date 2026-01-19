@@ -3,8 +3,8 @@
 # 显卡设置
 export CUDA_VISIBLE_DEVICES=5
 
-# chmod +x scripts/run_Phase3_DualGeo_16bit.sh
-# ./scripts/run_Phase3_DualGeo_16bit.sh
+# chmod +x scripts/archive/training/run_Phase3_DualGeo_16bit.sh
+# ./scripts/archive/training/run_Phase3_DualGeo_16bit.sh
 
 # ============================================================
 # Enhanced Mode: 使用 PoLaRIS LiDAR DataLoader（新版）
@@ -22,9 +22,10 @@ export CUDA_VISIBLE_DEVICES=5
 python train_Phase3.py \
     --experiment_name Phase3_DualGeo_16bit \
     --model MS_CAFNet_DualGeo \
-    --dataset Pohang-Canal \
-    --train_batch_size 4 \
-    --epochs 200 \
+    --dataset Pohang-Canal-3k \
+    --train_batch_size 16 \
+    --test_batch_size 16 \
+    --epochs 2000 \
     --optimizer Adam \
     --lr 0.0001 \
     --weight_decay 5e-4 \
@@ -35,7 +36,8 @@ python train_Phase3.py \
     --seed 42 \
     --use_lidar_dataloader True \
     --normalize_16bit True \
-    --use_soft_labels True
+    --use_soft_labels True\
+    --backbone resnet_18 \
 
 # ============================================================
 # 参数说明:

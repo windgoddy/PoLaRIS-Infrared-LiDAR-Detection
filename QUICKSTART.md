@@ -62,11 +62,10 @@ python scripts/verify_dataset.py --dataset Pohang-Canal
 | 模式 | 适用场景 | 命令 |
 |------|---------|------|
 | **auto** | 自动选择（推荐）：Pohang-Canal-3k 用 16bit，其他用 8bit | `./scripts/train.sh auto --dataset <数据集>` |
-| **16bit** | 手动强制 16-bit 红外 + 深度图 + 软标签 | `./scripts/train.sh 16bit` |
-| **8bit** | 手动强制 8-bit 红外 + 深度图（旧版） | `./scripts/train.sh 8bit` |
-| **16bit-ir** | 仅 16-bit 红外（无深度图） | `./scripts/train.sh 16bit-ir` |
-| **baseline1** | DNANet 基准对比 | `./scripts/train.sh baseline1` |
-| **baseline2** | DNANet 变体对比 | `./scripts/train.sh baseline2` |
+| **16bit** | 完整 PoLaRIS：16-bit + 深度图 + 软标签 | `./scripts/train.sh 16bit` |
+| **8bit** | 8-bit 模式（旧版 DataLoader） | `./scripts/train.sh 8bit` |
+| **16bit-ir** | 消融实验：仅 16-bit 红外（无深度图） | `./scripts/train.sh 16bit-ir` |
+| **baseline1** | 对比基准：DNANet 原始论文配置 | `./scripts/train.sh baseline1` |
 
 ### 步骤 3: 训练模型
 

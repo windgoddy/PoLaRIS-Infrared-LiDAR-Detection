@@ -11,8 +11,7 @@
 #   8bit         - 8-bit 图像训练（旧版 DataLoader）
 #   16bit        - 16-bit 图像训练（新版 DataLoader + 软标签）
 #   16bit-ir     - 16-bit 仅红外（无深度图）
-#   baseline1    - Baseline1（DNANet）
-#   baseline2    - Baseline2（另一个基准）
+#   baseline1    - DNANet 原始论文配置（对比基准）
 #
 # 示例:
 #   ./scripts/train.sh auto                      # 自动选择模式（推荐）
@@ -25,10 +24,10 @@
 MODE="auto"
 GPU=5
 DATASET="Pohang-Canal"
-EPOCHS=200
+EPOCHS=2000
 
 # 解析第一个参数作为模式（如果提供）
-if [[ $# -gt 0 && $1 =~ ^(auto|8bit|16bit|16bit-ir|baseline1|baseline2)$ ]]; then
+if [[ $# -gt 0 && $1 =~ ^(auto|8bit|16bit|16bit-ir|baseline1)$ ]]; then
     MODE="$1"
     shift
 fi
@@ -72,8 +71,6 @@ export CUDA_VISIBLE_DEVICES=$GPU
 echo "============================================================"
 echo "训练模式: $MODE"
 echo "GPU: $GPU"
-echo "数据集: $DATASET"
-echo "Epochs: $EPOCHS"
 echo "============================================================"
 
 # 根据模式选择配置
@@ -83,9 +80,9 @@ case $MODE in
         python train_Phase3.py \
             --experiment_name Phase3_DualGeo_8bit \
             --model MS_CAFNet_DualGeo \
-            --dataset $DATASET \
+            --dataset Pohang-Canal \
             --train_batch_size 4 \
-            --epochs $EPOCHS \
+            --epochs 2000 \
             --optimizer Adam \
             --lr 0.0001 \
             --weight_decay 5e-4 \
@@ -95,7 +92,10 @@ case $MODE in
             --deep_supervision False \
             --seed 42 \
             --use_lidar_dataloader False \
-            --use_soft_labels False
+            --use_soft_labels False \
+            --train_batch_size 16 \
+            --test_batch_size 16 \
+            --backbone resnet_18 \
         ;;
 
     16bit)
@@ -103,9 +103,8 @@ case $MODE in
         python train_Phase3.py \
             --experiment_name Phase3_DualGeo_16bit \
             --model MS_CAFNet_DualGeo \
-            --dataset $DATASET \
-            --train_batch_size 4 \
-            --epochs $EPOCHS \
+            --dataset Pohang-Canal-3k \
+            --epochs 2000 \
             --optimizer Adam \
             --lr 0.0001 \
             --weight_decay 5e-4 \
@@ -116,7 +115,10 @@ case $MODE in
             --seed 42 \
             --use_lidar_dataloader True \
             --normalize_16bit True \
-            --use_soft_labels True
+            --use_soft_labels True \
+            --train_batch_size 16 \
+            --test_batch_size 16 \
+            --backbone resnet_18 \
         ;;
 
     16bit-ir)
@@ -124,8 +126,7 @@ case $MODE in
         python train_Phase3.py \
             --experiment_name Phase3_DualGeo_16bit_IR_only \
             --model MS_CAFNet_DualGeo \
-            --dataset $DATASET \
-            --train_batch_size 4 \
+            --dataset Pohang-Canal-3k \
             --epochs $EPOCHS \
             --optimizer Adam \
             --lr 0.0001 \
@@ -137,7 +138,10 @@ case $MODE in
             --seed 42 \
             --use_lidar_dataloader True \
             --normalize_16bit True \
-            --use_soft_labels True
+            --use_soft_labels True \
+            --backbone resnet_18 \
+            --train_batch_size 16 \
+            --test_batch_size 16 \
         ;;
 
     baseline1)
@@ -154,24 +158,9 @@ case $MODE in
             --seed 42
         ;;
 
-    baseline2)
-        echo "🔹 Baseline2"
-        python train.py \
-            --experiment_name baseline2 \
-            --model DNANet \
-            --dataset $DATASET \
-            --train_batch_size 8 \
-            --epochs $EPOCHS \
-            --optimizer Adagrad \
-            --lr 0.05 \
-            --channel_size one \
-            --deep_supervision False \
-            --seed 42
-        ;;
-
     *)
         echo "❌ 未知模式: $MODE"
-        echo "支持的模式: 8bit, 16bit, 16bit-ir, baseline1, baseline2"
+        echo "支持的模式: auto, 8bit, 16bit, 16bit-ir, baseline1"
         exit 1
         ;;
 esac
