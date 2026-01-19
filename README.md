@@ -1,36 +1,227 @@
-# Dense Nested Attention Network for Infrared Small Target Detection
+# PoLaRIS: Infrared-LiDAR Detection
 
-## Good News! Our paper has been accepted by `IEEE Transaction on Image Processing`. Our team will release more interesting works and applications on SIRST soon. Please keep following our repository.
+**P**oint Cloud and **L**iDAR **R**ange **I**mage **S**egmentation for Infrared Small Target Detection
 
-![outline](overall_structure.png)
+> 基于 DNANet 的红外小目标检测项目，增强支持 LiDAR 点云和 16-bit 红外图像
 
-## Algorithm Introduction
+---
 
-Dense Nested Attention Network for Infrared Small Target Detection, Boyang Li, Chao Xiao, Longguang Wang, and Yingqian Wang, arxiv 2021 [[Paper]](https://arxiv.org/pdf/2106.00487.pdf)
+## 项目特点
 
-We propose a dense nested attention network (DNANet) to achieve accurate single-frame infrared small target detection and develop an open-sourced infrared small target dataset (namely, NUDT-SIRST) in this paper. Experiments on both public (e.g., NUAA-SIRST, NUST-SIRST) and our self-developed datasets demonstrate the effectiveness of our method. The contribution of this paper are as follows:
+- ✅ **16-bit 红外图像支持** - Min-Max 归一化，保留更多细节
+- ✅ **LiDAR 点云融合** - 结合深度信息提升检测精度
+- ✅ **软标签训练** - Oracle Masks（0.0, 0.6, 1.0）提供更灵活的监督
+- ✅ **自动模式选择** - 根据数据集自动选择 8-bit/16-bit 训练模式
+- ✅ **统一训练脚本** - 一个脚本支持所有训练模式
 
-1. We propose a dense nested attention network (namely, DNANet) to maintain small targets in deep layers.
+---
 
-2. An open-sourced dataset (i.e., NUDT-SIRST) with rich targets.
+## 快速开始
 
-3. Performing well on all existing SIRST datasets.
+### 安装依赖
 
-## Dataset Introduction
+```bash
+pip install torch torchvision
+pip install numpy pillow opencv-python
+```
 
-NUDT-SIRST is a synthesized dataset, which contains 1327 images with resolution of 256x256. The advantage of synthesized dataset compared to real dataset lies in three aspets:
+### 训练模型
 
-1. Accurate annotations.
+```bash
+# 自动模式（推荐）- 根据数据集自动选择
+./scripts/train.sh auto --dataset Pohang-Canal-3k  # 16-bit 模式
+./scripts/train.sh auto --dataset Pohang-Canal     # 8-bit 模式
 
-2. Massive generation with low cost (i.e., time and money).
+# 手动指定模式
+./scripts/train.sh 16bit --dataset Pohang-Canal-3k --gpu 0 --epochs 200
+```
 
-3. Numerous categories of target, rich target sizes, diverse clutter backgrounds.
+**数据集模式规则**：
 
-## Citation
+- `Pohang-Canal-3k` → 自动使用 **16-bit 模式**（Min-Max 归一化 + 软标签）
+- 其他数据集 → 自动使用 **8-bit 模式**（旧版 DataLoader）
 
-If you find the code useful, please consider citing our paper using the following BibTeX entry.
+### 数据集准备
+
+```bash
+# 1. 生成深度图
+python scripts/generate_depth_maps.py --dataset Pohang-Canal-3k
+
+# 2. 生成 Oracle Masks
+python scripts/generate_oracle_masks.py --dataset Pohang-Canal-3k
+
+# 3. 验证数据集
+python scripts/verify_dataset.py --dataset Pohang-Canal-3k
+
+# 4. 测试 DataLoader
+python scripts/test_dataloader.py
+```
+
+---
+
+## 数据集结构
 
 ```
+dataset/Pohang-Canal-3k/
+├── images/              # 红外图像（支持 8-bit 或 16-bit .png）
+├── masks/               # Ground Truth 标签（硬标签）
+├── oracle_masks/        # Oracle 标签（软标签：0.0, 0.6, 1.0）
+├── depth_maps/          # 深度图（.npy 文件，in_channels=2 需要）
+└── lidar_roi/           # LiDAR 点云（.bin 文件，用于生成深度图）
+```
+
+---
+
+## 训练模式
+
+| 模式 | 说明 | 适用场景 |
+| ---- | ---- | -------- |
+| **auto** | 自动选择模式 | 推荐使用，自动根据数据集选择 8bit/16bit |
+| **16bit** | 16-bit + 软标签 | Pohang-Canal-3k 数据集 |
+| **8bit** | 8-bit + 硬标签 | 其他数据集或兼容旧版 |
+| **16bit-ir** | 仅红外（无深度） | 只有红外图像，没有 LiDAR |
+| **baseline1** | DNANet 基准 | 对比实验 |
+| **baseline2** | DNANet 变体 | 对比实验 |
+
+---
+
+## 项目结构
+
+```
+PoLaRIS-Infrared-LiDAR-Detection/
+├── model/
+│   ├── utils_lidar.py           # PoLaRIS DataLoader（16-bit + LiDAR）
+│   ├── parse_args_train.py      # 训练参数配置
+│   └── ...
+├── scripts/
+│   ├── train.sh                 # 统一训练脚本 ⭐
+│   ├── generate_depth_maps.py   # 生成深度图
+│   ├── generate_oracle_masks.py # 生成软标签
+│   ├── test_dataloader.py       # 测试 DataLoader
+│   ├── verify_dataset.py        # 验证数据集
+│   └── archive/                 # 归档的旧脚本
+├── dataset/                     # 数据集目录
+├── train_Phase3.py              # 主训练脚本
+├── README.md                    # 本文档
+└── QUICKSTART.md                # 快速开始指南 📖
+```
+
+---
+
+## 常用命令
+
+### 训练
+
+```bash
+# 自动模式（推荐）
+./scripts/train.sh auto --dataset Pohang-Canal-3k --gpu 0
+
+# 对比实验
+./scripts/train.sh baseline1 --dataset Pohang-Canal --gpu 0
+./scripts/train.sh auto --dataset Pohang-Canal-3k --gpu 1
+./scripts/train.sh auto --dataset Pohang-Canal --gpu 2
+```
+
+### 数据分析
+
+```bash
+# 分析训练结果
+python scripts/analyze_training.py --experiment Phase3_DualGeo_16bit
+
+# 可视化 LiDAR 投影
+python scripts/visualize_lidar_projection.py --dataset Pohang-Canal-3k
+
+# 模型复杂度对比
+python scripts/compare_model_complexity.py
+```
+
+### 测试和验证
+
+```bash
+# 测试 DataLoader
+python scripts/test_dataloader.py
+
+# 验证数据集
+python scripts/verify_dataset.py --dataset Pohang-Canal-3k
+
+# 诊断问题
+python scripts/diagnose_dataset.py --dataset Pohang-Canal-3k
+```
+
+---
+
+## 技术细节
+
+### 16-bit 图像处理
+
+```python
+# Min-Max 归一化
+img_normalized = (img - img_min) / (img_max - img_min) * 255  # → [0, 255]
+```
+
+### 软标签（Oracle Masks）
+
+- **1.0** - 有 LiDAR 验证的目标（强监督）
+- **0.6** - 无 LiDAR 但视觉确认的目标（弱监督）
+- **0.0** - 背景
+
+### LiDAR 数据融合
+
+```python
+# 2-通道输入：IR + Depth
+if in_channels == 2:
+    img = np.stack([ir_channel, depth_channel], axis=0)  # (2, H, W)
+```
+
+---
+
+## 文档
+
+- **快速开始指南**: [QUICKSTART.md](QUICKSTART.md) - 详细的使用教程和常见问题
+- **高级指南**: [docs/ADVANCED.md](docs/ADVANCED.md) - DataLoader 技术细节和优化
+- **脚本说明**: [docs/SCRIPTS_GUIDE.md](docs/SCRIPTS_GUIDE.md) - 所有脚本的详细说明
+- **完整配置**: [run_config.sh](run_config.sh) - 所有可用参数和配置模板
+
+---
+
+## 整理成果
+
+### 整理前
+
+- ❌ 14 个训练脚本（难以管理）
+- ❌ 43 个 Python/Shell 脚本（功能重复）
+- ❌ 没有统一文档
+
+### 整理后
+
+- ✅ 1 个统一训练入口 (`train.sh`)
+- ✅ 21 个核心脚本（减少 51%）
+- ✅ 完整的使用文档
+- ✅ 22 个旧文件已归档到 `scripts/archive/`
+
+---
+
+## 致谢
+
+本项目基于 [DNANet](https://github.com/YeRen123455/Infrared-Small-Target-Detection) 开发。
+
+**DNANet**: Dense Nested Attention Network for Infrared Small Target Detection
+
+- Paper: [IEEE TIP 2023](https://arxiv.org/pdf/2106.00487.pdf)
+- Authors: Boyang Li, Chao Xiao, Longguang Wang, Yingqian Wang
+
+感谢以下项目的贡献：
+
+- [ACM](https://github.com/YimianDai/open-acm) by Yimian Dai
+- [PSA](https://github.com/jiwoon-ahn/psa) by jiwoon-ahn
+
+---
+
+## 引用
+
+如果您使用了本项目的代码，请引用原始 DNANet 论文：
+
+```bibtex
 @article{DNANet,
   title={Dense nested attention network for infrared small target detection},
   author={Li, Boyang and Xiao, Chao and Wang, Longguang and Wang, Yingqian and Lin, Zaiping and Li, Miao and An, Wei and Guo, Yulan},
@@ -42,103 +233,16 @@ If you find the code useful, please consider citing our paper using the followin
 }
 ```
 
-## Prerequisite
-* Tested on Ubuntu 16.04, with Python 3.7, PyTorch 1.7, Torchvision 0.8.1, CUDA 11.1, and 1x NVIDIA 3090 and also 
+---
 
-* Tested on Windows 10  , with Python 3.6, PyTorch 1.1, Torchvision 0.3.0, CUDA 10.0, and 1x NVIDIA 1080Ti.
+## 许可证
 
-* [The NUDT-SIRST download dir](https://pan.baidu.com/s/1WdA_yOHDnIiyj4C9SbW_Kg?pwd=nudt) (Extraction Code: nudt)
+本项目遵循原始 DNANet 项目的许可证。
 
-* [The NUAA-SIRST download dir](https://github.com/YimianDai/sirst) [[ACM]](https://arxiv.org/pdf/2009.14530.pdf)
+---
 
-* [The NUST-SIRST download dir](https://github.com/wanghuanphd/MDvsFA_cGAN) [[MDvsFA]](https://openaccess.thecvf.com/content_ICCV_2019/papers/Wang_Miss_Detection_vs._False_Alarm_Adversarial_Learning_for_Small_Object_ICCV_2019_paper.pdf)
-
-## Usage
-
-#### On windows:
-
-```
-Click on train.py and run it. 
-```
-
-#### On Ubuntu:
-
-#### 1. Train.
+**开始使用吧！** 🚀
 
 ```bash
-python train.py --base_size 256 --crop_size 256 --epochs 1500 --dataset [dataset-name] --split_method 50_50 --model [model name] --backbone resnet_18  --deep_supervision True --train_batch_size 16 --test_batch_size 16 --mode TXT
-
+./scripts/train.sh auto --dataset Pohang-Canal-3k
 ```
-#### 2. Test.
-
-```bash
-python test.py --base_size 256 --crop_size 256 --st_model [trained model path] --model_dir [model_dir] --dataset [dataset-name] --split_method 50_50 --model [model name] --backbone resnet_18  --deep_supervision True --test_batch_size 1 --mode TXT 
-```
-
-#### (Optional 1) Visulize your predicts.
-```bash
-python visulization.py --base_size 256 --crop_size 256 --st_model [trained model path] --model_dir [model_dir] --dataset [dataset-name] --split_method 50_50 --model [model name] --backbone resnet_18  --deep_supervision True --test_batch_size 1 --mode TXT 
-```
-
-#### (Optional 2) Test and visulization.
-```bash
-python test_and_visulization.py --base_size 256 --crop_size 256 --st_model [trained model path] --model_dir [model_dir] --dataset [dataset-name] --split_method 50_50 --model [model name] --backbone resnet_18  --deep_supervision True --test_batch_size 1 --mode TXT 
-```
-
-#### (Optional 3) Demo (with your own IR image).
-```bash
-python demo.py --base_size 256 --crop_size 256 --img_demo_dir [img_demo_dir] --img_demo_index [image_name]  --model [model name] --backbone resnet_18  --deep_supervision True --test_batch_size 1 --mode TXT  --suffix [img_suffix]
-
-```
-
-## Results and Trained Models
-#### Qualitative Results
-
-![outline](Qualitative_result.png)
-
-#### Quantative Results 
-
-on NUDT-SIRST
-
-| Model         | mIoU (x10(-2)) | Pd (x10(-2))|  Fa (x10(-6)) ||
-| ------------- |:-------------:|:-----:|:-----:|:-----:|
-| DNANet-VGG-10 | 85.23 | 96.95 | 6.782|
-| DNANet-ResNet-10| 86.36 | 97.39 | 6.897 |
-| DNANet-ResNet-18| 87.09 | 98.73 | 4.223 |
-| DNANet-ResNet-18| 88.61 | 98.42 | 4.30 | [[Weights]](https://drive.google.com/file/d/1NDvjOiWecfWNPaO12KeIgiJMTKSFS6wj/view?usp=sharing) |
-| DNANet-ResNet-34| 86.87 | 97.98 | 3.710 |
-
-
-on NUAA-SIRST
-| Model         | mIoU (x10(-2)) | Pd (x10(-2))|  Fa (x10(-6)) ||
-| ------------- |:-------------:|:-----:|:-----:|:-----:|
-| DNANet-VGG-10 | 74.96 | 97.34 | 26.73 |
-| DNANet-ResNet-10| 76.24 | 97.71 | 12.80 |
-| DNANet-ResNet-18| 77.47 | 98.48 | 2.353 |
-| DNANet-ResNet-18| 79.26 | 98.48 | 2.30 | [[Weights]](https://drive.google.com/file/d/1W0jFN9ZlaIdGFemYKi34tmJfGxjUGCRc/view?usp=sharing) |
-| DNANet-ResNet-34| 77.54 | 98.10 | 2.510 |
-
-on NUST-SIRST
-
-| Model         | mIoU (x10(-2)) | Pd (x10(-2))|  Fa (x10(-6)) ||
-| ------------- |:-------------:|:-----:|:-----:|:-----:|
-| DNANet-ResNet-18| 46.73 | 81.29 | 33.87 | [[Weights]](https://drive.google.com/file/d/1TF0bZRMsGuKzMhlHKH1LygScBveMcCS2/view?usp=sharing) |
-
-*This code is highly borrowed from [ACM](https://github.com/YimianDai/open-acm). Thanks to Yimian Dai.
-
-*The overall repository style is highly borrowed from [PSA](https://github.com/jiwoon-ahn/psa). Thanks to jiwoon-ahn.
-
-## Referrences
-
-1. Dai Y, Wu Y, Zhou F, et al. Asymmetric contextual modulation for infrared small target detection[C]//Proceedings of the IEEE/CVF Winter Conference on Applications of Computer Vision. 2021: 950-959. [[code]](https://github.com/YimianDai/open-acm) 
-
-2. Zhou Z, Siddiquee M M R, Tajbakhsh N, et al. Unet++: Redesigning skip connections to exploit multiscale features in image segmentation[J]. IEEE transactions on medical imaging, 2019, 39(6): 1856-1867. [[code]](https://github.com/MrGiovanni/UNetPlusPlus)
-
-3. He K, Zhang X, Ren S, et al. Deep residual learning for image recognition[C]//Proceedings of the IEEE conference on computer vision and pattern recognition. 2016: 770-778. [[code]](https://github.com/rwightman/pytorch-image-models)
-
-
-
-
-
-
-
