@@ -49,7 +49,7 @@ class Trainer(object):
         # Initial
         self.args = args
         self.ROC  = ROCMetric(1, 10)
-        self.mIoU = mIoU(1)
+        self.mIoU = mIoU(1, threshold=getattr(args, 'thres', 0.3))  # Use threshold from args, default 0.3
         self.save_prefix = '_'.join([args.model, args.dataset])
         self.save_dir    = args.save_dir
         nb_filter, num_blocks = load_param(args.channel_size, args.backbone)
@@ -75,7 +75,8 @@ class Trainer(object):
                 suffix=args.suffix,
                 normalize_16bit=(args.normalize_16bit == 'True'),
                 in_channels=args.in_channels,  # Pass in_channels for depth map support
-                image_folder=args.image_folder
+                image_folder=args.image_folder,
+                oracle_masks_folder=args.oracle_masks_folder
             )
             testset = PoLaRISTestLoader(
                 dataset_dir=dataset_dir,
@@ -195,12 +196,22 @@ class Trainer(object):
             if self.args.model == 'MS_CAFNet' or self.args.model == 'MS_CAFNet_DualGeo':
                 # MS_CAFNet models (with confidence branch)
                 # Note: Models expect 2-channel input [IR, Depth] not separate LiDAR points
-                pred, pred_conf = self.model(data)
+                outputs, pred_conf = self.model(data)
 
-                # Loss calculation
-                loss_seg = SoftIoULoss(pred, train_target)  # Use train_target (soft or hard)
+                # Handle both single output and list of outputs (deep supervision)
+                if not isinstance(outputs, list):
+                    outputs = [outputs]
+
+                # Loss calculation with deep supervision
+                loss_seg = 0
+                for pred in outputs:
+                    loss_seg += SoftIoULoss(pred, train_target)  # Use train_target (soft or hard)
+                loss_seg /= len(outputs)
                 loss_conf = self.conf_loss(pred_conf, oracle_masks)  # Confidence always uses oracle_masks
                 loss = loss_seg + 0.5 * loss_conf
+
+                # Use final output for batch size
+                pred = outputs[-1]
 
             elif self.args.deep_supervision == 'True':
                 # DNANet with deep supervision
@@ -255,8 +266,20 @@ class Trainer(object):
                 # Forward pass
                 if self.args.model == 'MS_CAFNet' or self.args.model == 'MS_CAFNet_DualGeo':
                     # MS_CAFNet models (expect 2-channel input [IR, Depth])
-                    pred, pred_conf = self.model(data)
-                    loss = SoftIoULoss(pred, labels)  # Only seg loss for validation
+                    outputs, pred_conf = self.model(data)
+
+                    # Handle both single output and list of outputs (deep supervision)
+                    if not isinstance(outputs, list):
+                        outputs = [outputs]
+
+                    # Loss calculation with deep supervision
+                    loss = 0
+                    for pred in outputs:
+                        loss += SoftIoULoss(pred, labels)  # Only seg loss for validation
+                    loss /= len(outputs)
+
+                    # Use final output for evaluation
+                    pred = outputs[-1]
                 elif self.args.deep_supervision == 'True':
                     preds = self.model(data)
                     loss = 0

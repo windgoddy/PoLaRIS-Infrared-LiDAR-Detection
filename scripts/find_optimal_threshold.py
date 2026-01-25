@@ -137,20 +137,51 @@ def compute_mean_metrics(all_metrics):
 # 分组评估辅助函数
 # ============================================================================
 
-def check_has_lidar(lidar_data):
+def check_has_lidar(lidar_data, gt_mask, depth_map=None, debug=False):
     """
-    检查样本是否有LiDAR数据
+    检查目标区域（GT mask）内是否有LiDAR点击中
     
     Args:
         lidar_data: LiDAR tensor 或 None
+        gt_mask: (H, W) Ground Truth掩码，值为0或1
+        depth_map: (H, W) 深度图 (可选，如果有的话更精确)
+        debug: bool 是否输出调试信息
     
     Returns:
-        bool: True if has valid LiDAR points
+        bool: True if 目标区域内有LiDAR点击中
     """
-    if lidar_data is None:
+    # 1. 检查是否有LiDAR数据
+    if lidar_data is None and depth_map is None:
         return False
+    
+    # 2. 如果有depth map，直接检查目标区域的深度值
+    if depth_map is not None:
+        if isinstance(depth_map, torch.Tensor):
+            depth_map = depth_map.cpu().numpy()
+        
+        # 提取目标区域的深度值
+        target_mask = (gt_mask > 0).astype(bool)
+        target_depths = depth_map[target_mask]
+        
+        # 如果目标区域内有非零深度值，说明有LiDAR点击中
+        has_lidar_points = len(target_depths) > 0 and np.any(target_depths > 0)
+        
+        if debug:
+            target_area = np.sum(target_mask)
+            nonzero_depths = np.sum(target_depths > 0) if len(target_depths) > 0 else 0
+            coverage = nonzero_depths / target_area if target_area > 0 else 0
+            print(f"      目标面积: {target_area} pixels")
+            print(f"      有深度值的像素: {nonzero_depths} ({coverage*100:.1f}%)")
+            print(f"      结果: {'有LiDAR' if has_lidar_points else '无LiDAR'}")
+        
+        return has_lidar_points
+    
+    # 3. 如果只有LiDAR点云数据（没有depth map）
+    # 这种情况比较复杂，需要投影点云到图像坐标
+    # 简化处理：检查是否有LiDAR数据存在
     if isinstance(lidar_data, torch.Tensor):
         return lidar_data.numel() > 0 and torch.any(lidar_data != 0)
+    
     return False
 
 
@@ -206,6 +237,9 @@ def predict_probability_maps(model, dataloader, device='cuda'):
     model.eval()
     predictions = []
     
+    # 统计信息
+    lidar_stats = {'with_lidar': 0, 'without_lidar': 0}
+    
     print("🔮 生成预测概率图...")
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="预测进度"):
@@ -240,10 +274,36 @@ def predict_probability_maps(model, dataloader, device='cuda'):
                 gt_mask = gt_masks[i, 0]  # (H, W)
                 img_id = img_ids[i]
                 
-                # 检查是否有LiDAR
+                # 调试：前5个样本显示详细信息
+                debug_mode = len(predictions) < 5
+                if debug_mode:
+                    print(f"\n  样本 #{len(predictions)+1}: {img_id}")
+                
+                # 检查目标区域内是否有LiDAR点击中
                 has_lidar = False
-                if 'lidar' in batch:
-                    has_lidar = check_has_lidar(batch['lidar'][i])
+                depth_map = None
+                
+                if 'depth' in batch:
+                    # 提取depth map
+                    depth_tensor = batch['depth'][i]  # 可能是 (1, H, W) 或 (H, W)
+                    if depth_tensor.dim() == 3:
+                        depth_map = depth_tensor[0].cpu().numpy()
+                    else:
+                        depth_map = depth_tensor.cpu().numpy()
+                    
+                    if debug_mode:
+                        print(f"      Depth map shape: {depth_map.shape}")
+                        print(f"      Depth range: [{depth_map.min():.3f}, {depth_map.max():.3f}]")
+                        print(f"      Non-zero depths: {np.sum(depth_map > 0)} pixels")
+                
+                lidar_data = batch.get('lidar', [None])[i] if 'lidar' in batch else None
+                has_lidar = check_has_lidar(lidar_data, gt_mask, depth_map, debug=debug_mode)
+                
+                # 统计
+                if has_lidar:
+                    lidar_stats['with_lidar'] += 1
+                else:
+                    lidar_stats['without_lidar'] += 1
                 
                 # 计算目标大小
                 target_size = get_target_size(gt_mask)
@@ -259,6 +319,10 @@ def predict_probability_maps(model, dataloader, device='cuda'):
                 })
     
     print(f"✓ 完成 {len(predictions)} 个样本的预测")
+    print(f"\n📊 LiDAR覆盖统计:")
+    print(f"   - 目标内有LiDAR:  {lidar_stats['with_lidar']} 个 ({lidar_stats['with_lidar']/len(predictions)*100:.1f}%)")
+    print(f"   - 目标内无LiDAR:  {lidar_stats['without_lidar']} 个 ({lidar_stats['without_lidar']/len(predictions)*100:.1f}%)")
+    
     return predictions
 
 
@@ -538,7 +602,8 @@ def load_model(model_path, device='cuda', input_channels=2):
     print(f"   输出格式: (检测图, 置信度图)")
     
     # 加载权重
-    checkpoint = torch.load(model_path, map_location=device)
+    # PyTorch 2.6+ 需要设置 weights_only=False 以支持包含numpy对象的checkpoint
+    checkpoint = torch.load(model_path, map_location=device, weights_only=False)
     
     # 处理不同的checkpoint格式
     if isinstance(checkpoint, dict):
@@ -655,15 +720,52 @@ def main():
     dataset = PoLaRISTestLoader(
         dataset_dir=args.dataset_dir,
         img_id=img_ids,
-        mode='test'
+        in_channels=args.input_channels
     )
+    
+    # 自定义 collate 函数，处理不同大小的 LiDAR 数据
+    def custom_collate(batch):
+        """
+        自定义批处理函数，处理可变长度的 LiDAR 点云
+        """
+        # 分离不同的字段
+        images = []
+        masks = []
+        img_ids = []
+        lidars = []
+        depths = []
+        
+        for sample in batch:
+            images.append(sample['image'])
+            masks.append(sample['mask'])
+            img_ids.append(sample['img_id'])
+            if 'lidar' in sample:
+                lidars.append(sample['lidar'])
+            if 'depth' in sample:
+                depths.append(sample['depth'])
+        
+        # 批处理固定大小的张量
+        batch_dict = {
+            'image': torch.stack(images, dim=0),
+            'mask': torch.stack(masks, dim=0),
+            'img_id': img_ids,
+        }
+        
+        # LiDAR 和 depth 保持为列表（因为大小可能不同）
+        if lidars:
+            batch_dict['lidar'] = lidars
+        if depths:
+            batch_dict['depth'] = torch.stack(depths, dim=0)
+        
+        return batch_dict
     
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=4,
-        pin_memory=True
+        num_workers=0,  # 使用单进程避免序列化问题
+        pin_memory=True,
+        collate_fn=custom_collate
     )
     
     # 3. 生成预测概率图

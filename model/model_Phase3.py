@@ -321,7 +321,12 @@ class MS_CAFNet_DualGeo(nn.Module):
         self.gate_lidar = nn.Parameter(torch.tensor(0.5))   # alpha: 电子锁权重
         self.gate_visual = nn.Parameter(torch.tensor(0.5))  # beta: 机械锁权重
 
-        self.final = nn.Conv2d(nb_filter[0], num_classes, kernel_size=1)
+        # --- 6. [NEW] 深度监督输出头 (Deep Supervision Heads) ---
+        # 为中间解码层添加额外的输出头，解决极小目标在深层消失的问题
+        self.final1 = nn.Conv2d(nb_filter[3], num_classes, kernel_size=1)  # 从 x3_1 输出
+        self.final2 = nn.Conv2d(nb_filter[2], num_classes, kernel_size=1)  # 从 x2_2 输出
+        self.final3 = nn.Conv2d(nb_filter[1], num_classes, kernel_size=1)  # 从 x1_3 输出
+        self.final = nn.Conv2d(nb_filter[0], num_classes, kernel_size=1)   # 从 x0_4 输出（最终）
 
     def forward(self, input):
         # input shape: [Batch, 1 or 2, H, W]
@@ -402,11 +407,24 @@ class MS_CAFNet_DualGeo(nn.Module):
         # F6. 完成最后一层解码
         x0_4 = self.conv0_4(torch.cat([x0_0, self.up(x1_3_fused)], 1))
 
-        # F7. 最终分割输出
-        output = self.final(x0_4)
+        # === Step G: [NEW] 深度监督输出 (Deep Supervision Outputs) ===
+        # 从不同解码层生成多尺度预测，提升极小目标的召回率
 
-        # 返回两个结果：[检测图, 置信度图]
-        return output, pred_conf
+        # 上采样中间层特征到原始分辨率
+        out1 = self.final1(x3_1)  # 1/8 分辨率
+        out1 = F.interpolate(out1, scale_factor=8, mode='bilinear', align_corners=True)
+
+        out2 = self.final2(x2_2)  # 1/4 分辨率
+        out2 = F.interpolate(out2, scale_factor=4, mode='bilinear', align_corners=True)
+
+        out3 = self.final3(x1_3_fused)  # 1/2 分辨率
+        out3 = F.interpolate(out3, scale_factor=2, mode='bilinear', align_corners=True)
+
+        out_final = self.final(x0_4)  # 原始分辨率
+
+        # 返回：[多尺度预测列表, 置信度图]
+        # 列表从粗到细：[1/8, 1/4, 1/2, 1/1]
+        return [out1, out2, out3, out_final], pred_conf
 
     def up(self, x):
         return F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=True)

@@ -118,6 +118,12 @@ USE_SOFT_LABELS="True"                     # 使用软标签
 #   - True: 使用 Oracle Masks（软标签：0.0, 0.6, 1.0）
 #   - False: 使用硬标签（0.0, 1.0）
 
+THRESHOLD=0.3                              # 推理阈值（Phase 3 新增）
+# 说明：
+#   - 用于验证阶段的二值化阈值
+#   - 默认 0.3 适配 Soft Label max=0.6
+#   - 传统 Hard Label 使用 0.5
+
 # ============================================================
 # 实验管理
 # ============================================================
@@ -172,6 +178,7 @@ run_16bit_mode() {
         --use_lidar_dataloader True \
         --normalize_16bit True \
         --use_soft_labels True \
+        --thres 0.3 \
         --suffix .png \
         --split_method split_data \
         --workers 4
@@ -199,6 +206,7 @@ run_8bit_mode() {
         --seed 42 \
         --use_lidar_dataloader False \
         --use_soft_labels False \
+        --thres 0.5 \
         --suffix .png \
         --split_method split_data \
         --workers 4
@@ -227,6 +235,7 @@ run_ir_only_mode() {
         --use_lidar_dataloader True \
         --normalize_16bit True \
         --use_soft_labels True \
+        --thres 0.3 \
         --suffix .png \
         --split_method split_data \
         --workers 4
@@ -314,6 +323,7 @@ run_custom() {
         --use_lidar_dataloader "$USE_LIDAR_DATALOADER" \
         --normalize_16bit "$NORMALIZE_16BIT" \
         --use_soft_labels "$USE_SOFT_LABELS" \
+        --thres $THRESHOLD \
         --suffix "$SUFFIX" \
         --split_method "$SPLIT_METHOD" \
         --workers $WORKERS
@@ -400,5 +410,6 @@ main
 #   --use_lidar_dataloader  使用新版 DataLoader
 #   --normalize_16bit       16-bit 归一化方式
 #   --use_soft_labels       使用软标签
+#   --thres                 推理阈值（0.3 for Soft Labels, 0.5 for Hard Labels）
 #
 # ============================================================

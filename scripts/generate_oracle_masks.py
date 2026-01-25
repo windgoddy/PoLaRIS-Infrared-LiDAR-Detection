@@ -55,9 +55,15 @@ CONFIG = {
     'visual_max_confidence': 0.6,  # 无点云框的最大置信度（建议0.5-0.7）
 
     # 6. 纹理平滑度过滤（框内区域细化）
-    'gradient_threshold': 0.45,     # 纹理梯度阈值（8-bit: 3-10, 16-bit: 100-500）
+    'gradient_threshold': 0.2,     # 纹理梯度阈值（8-bit: 3-10, 16-bit: 100-500）
     'texture_dilation_kernel': 4,  # 形态学膨胀核大小（连接碎片纹理）
     'min_refined_area': 20,        # 细化后的最小有效面积（像素数）
+
+    # 7. 点云密集度控制（防止 Mask 溢出）
+    # 作用：当点云过于密集时（如船身高反射率、近距离目标），固定半径膨胀会导致Mask溢出
+    # 解决：超过阈值的框当作无点云框处理，依赖纹理信息而非密集点云
+    # 判断标准：点云膨胀后的面积占标注框面积的比例
+    'max_lidar_coverage_ratio': 0.6,  # 点云覆盖面积比例上限（超过则视为过密，建议0.5-0.7）
 }
 
 # ==========================================
@@ -347,11 +353,53 @@ def generate_hybrid_confidence_map(shape, boxes, lidar_pixels, gt_mask, image, v
                      (lidar_pixels[:, 1] >= y1) & (lidar_pixels[:, 1] < y2)
             box_pts = lidar_pixels[in_box]
 
-        has_lidar = len(box_pts) > 0
+        # 【新增】点云密集度检测：防止 Mask 溢出
+        # 当点云过于密集时（如船身高反射率、近距离目标），
+        # 固定半径膨胀会导致 Mask 变成一个毫无形状的"光斑"，
+        # 此时依赖纹理信息比依赖密集点云更可靠
+        # 判断标准：点云膨胀后的面积占标注框的比例
+        num_points = len(box_pts)
+        is_too_dense = False
+        lidar_coverage_ratio = 0.0
+
+        if num_points > 0:
+            # 生成点云mask（使用与后续处理相同的膨胀参数）
+            loc_pts = (box_pts - np.array([x1, y1])).astype(np.int32)
+            temp_point_mask = np.zeros((roi_h, roi_w), dtype=np.uint8)
+
+            for pt in loc_pts:
+                px = np.clip(pt[0], 0, roi_w - 1)
+                py = np.clip(pt[1], 0, roi_h - 1)
+                cv2.circle(temp_point_mask, (px, py), CONFIG['point_dilation_radius'], 255, -1)
+
+            # 闭运算填补空隙
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                             (CONFIG['morphology_kernel_size'], CONFIG['morphology_kernel_size']))
+            temp_point_mask = cv2.morphologyEx(temp_point_mask, cv2.MORPH_CLOSE, kernel)
+
+            # 计算点云mask在GT框内的覆盖面积
+            lidar_area = np.sum((temp_point_mask > 0) & roi_gt_bool)
+            gt_area = np.sum(roi_gt_bool)
+
+            if gt_area > 0:
+                lidar_coverage_ratio = lidar_area / gt_area
+                is_too_dense = lidar_coverage_ratio > CONFIG['max_lidar_coverage_ratio']
+
+        # 根据密集度判断是否使用点云
+        if is_too_dense:
+            # 超过覆盖率阈值，强制当作无点云框处理
+            has_lidar = False
+        else:
+            has_lidar = num_points > 0
 
         # 调试输出
         if verbose:
-            print(f"  标注框 {idx}: 位置=({x1},{y1})-({x2},{y2}), 尺寸={roi_w}×{roi_h}, 点云数={len(box_pts)}, 状态={'✅有点云' if has_lidar else '❌无点云'}")
+            status_emoji = '⚠️点云过密' if is_too_dense else ('✅有点云' if has_lidar else '❌无点云')
+            print(f"  标注框 {idx}: 位置=({x1},{y1})-({x2},{y2}), 尺寸={roi_w}×{roi_h}, 点云数={num_points}, 状态={status_emoji}")
+            if num_points > 0:
+                print(f"    → 点云覆盖率={lidar_coverage_ratio:.1%} (阈值={CONFIG['max_lidar_coverage_ratio']:.0%})")
+            if is_too_dense:
+                print(f"    → 检测到点云过密（覆盖率{lidar_coverage_ratio:.1%} > {CONFIG['max_lidar_coverage_ratio']:.0%}），切换到无点云分支处理")
 
         # ===== 分支1: 有点云的框 =====
         if has_lidar:

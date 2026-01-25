@@ -77,6 +77,10 @@ def parse_args():
     parser.add_argument('--oracle_masks_folder', type=str, default='oracle_masks',
                         help='Name of oracle masks folder (default: oracle_masks, options: oracle_masks2, oracle_masks3)')
 
+    # Inference threshold (adapted for Soft Labels with max=0.6)
+    parser.add_argument('--thres', type=float, default=0.3,
+                        help='binary threshold for inference (default: 0.3 for Soft Label max=0.6)')
+
     args = parser.parse_args()
     # make dir for save result
     args.save_dir = make_dir(args.deep_supervision, args.dataset, args.model, args.experiment_name)

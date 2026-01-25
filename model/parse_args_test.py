@@ -55,6 +55,10 @@ def parse_args():
     parser.add_argument('--ROC_thr', type=int, default=10,
                         help='crop image size')
 
+    # Inference threshold (adapted for Soft Labels with max=0.6)
+    parser.add_argument('--thres', type=float, default=0.3,
+                        help='binary threshold for inference (default: 0.3 for Soft Label max=0.6)')
+
 
     args = parser.parse_args()
 

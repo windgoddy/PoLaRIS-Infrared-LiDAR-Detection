@@ -160,9 +160,10 @@ class PD_FA():
 
 class mIoU():
 
-    def __init__(self, nclass):
+    def __init__(self, nclass, threshold=0.3):
         super(mIoU, self).__init__()
         self.nclass = nclass
+        self.threshold = threshold  # Inference threshold (default 0.3 for Soft Labels)
         self.reset()
 
     def update(self, preds, labels, depth_map=None, use_adaptive_threshold=True):
@@ -173,8 +174,8 @@ class mIoU():
             depth_map: 深度图（可选，用于动态阈值）
             use_adaptive_threshold: 是否使用动态自适应阈值
         """
-        correct, labeled = batch_pix_accuracy(preds, labels, depth_map, use_adaptive_threshold)
-        inter, union = batch_intersection_union(preds, labels, self.nclass, depth_map, use_adaptive_threshold)
+        correct, labeled = batch_pix_accuracy(preds, labels, depth_map, use_adaptive_threshold, self.threshold)
+        inter, union = batch_intersection_union(preds, labels, self.nclass, depth_map, use_adaptive_threshold, self.threshold)
         self.total_correct += correct
         self.total_label += labeled
         self.total_inter += inter
@@ -220,13 +221,14 @@ def cal_tp_pos_fp_neg(output, target, nclass, score_thresh):
 
     return tp, pos, fp, neg, class_pos
 
-def batch_pix_accuracy(output, target, depth_map=None, use_adaptive_threshold=True):
+def batch_pix_accuracy(output, target, depth_map=None, use_adaptive_threshold=True, threshold=0.3):
     """
     Args:
         output: 模型输出
         target: Ground Truth
         depth_map: 深度图（可选）
         use_adaptive_threshold: 是否使用动态自适应阈值
+        threshold: 推理阈值（默认0.3，适配Soft Label max=0.6）
     """
     if len(target.shape) == 3:
         target = np.expand_dims(target.float(), axis=1)
@@ -236,16 +238,16 @@ def batch_pix_accuracy(output, target, depth_map=None, use_adaptive_threshold=Tr
         raise ValueError("Unknown target dimension")
 
     assert output.shape == target.shape, "Predict and Label Shape Don't Match"
-    
+
     # 使用动态自适应阈值
     if use_adaptive_threshold and depth_map is not None:
-        predict = adaptive_threshold_binarization(output, depth_map, 
-                                                   threshold_with_lidar=0.5,
-                                                   threshold_without_lidar=0.35)
+        predict = adaptive_threshold_binarization(output, depth_map,
+                                                   threshold_with_lidar=threshold,
+                                                   threshold_without_lidar=threshold * 0.7)
     else:
         # 传统固定阈值
-        predict = (output > 0).float()
-    
+        predict = (output > threshold).float()
+
     pixel_labeled = (target > 0).float().sum()
     pixel_correct = (((predict == target).float())*((target > 0)).float()).sum()
 
@@ -253,7 +255,7 @@ def batch_pix_accuracy(output, target, depth_map=None, use_adaptive_threshold=Tr
     return pixel_correct, pixel_labeled
 
 
-def batch_intersection_union(output, target, nclass, depth_map=None, use_adaptive_threshold=True):
+def batch_intersection_union(output, target, nclass, depth_map=None, use_adaptive_threshold=True, threshold=0.3):
     """
     Args:
         output: 模型输出
@@ -261,20 +263,21 @@ def batch_intersection_union(output, target, nclass, depth_map=None, use_adaptiv
         nclass: 类别数
         depth_map: 深度图（可选）
         use_adaptive_threshold: 是否使用动态自适应阈值
+        threshold: 推理阈值（默认0.3，适配Soft Label max=0.6）
     """
     mini = 1
     maxi = 1
     nbins = 1
-    
+
     # 使用动态自适应阈值
     if use_adaptive_threshold and depth_map is not None:
         predict = adaptive_threshold_binarization(output, depth_map,
-                                                   threshold_with_lidar=0.5,
-                                                   threshold_without_lidar=0.35)
+                                                   threshold_with_lidar=threshold,
+                                                   threshold_without_lidar=threshold * 0.7)
     else:
         # 传统固定阈值
-        predict = (output > 0).float()
-    
+        predict = (output > threshold).float()
+
     if len(target.shape) == 3:
         target = np.expand_dims(target.float(), axis=1)
     elif len(target.shape) == 4:
