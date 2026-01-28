@@ -544,9 +544,18 @@ def polaris_collate_fn(batch):
         'is_16bit': is_16bit
     }
 
-    # Add oracle_mask only if present (training mode)
+    # Add optional fields if present (training mode)
     if 'oracle_mask' in batch[0]:
         oracle_masks = torch.stack([item['oracle_mask'] for item in batch])
         result['oracle_mask'] = oracle_masks
+
+    # Add dual-supervision labels if present (for training with hard+soft labels)
+    if 'mask_hard' in batch[0]:
+        mask_hard = torch.stack([item['mask_hard'] for item in batch])
+        result['mask_hard'] = mask_hard
+
+    if 'mask_soft' in batch[0]:
+        mask_soft = torch.stack([item['mask_soft'] for item in batch])
+        result['mask_soft'] = mask_soft
 
     return result
