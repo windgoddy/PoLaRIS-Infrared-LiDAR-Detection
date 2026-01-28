@@ -80,7 +80,7 @@ if [[ -z "$THRESHOLD" ]]; then
             THRESHOLD="0.5"  # Hard Labels 使用 0.5
             ;;
         16bit|16bit-ir)
-            THRESHOLD="0.3"  # Soft Labels 使用 0.3
+            THRESHOLD="0.5"  # Soft Labels 使用 0.5
             ;;
         *)
             THRESHOLD="0.3"  # 默认 0.3
@@ -113,7 +113,7 @@ case $MODE in
             --seed 42 \
             --thres $THRESHOLD \
             --suffix .png \
-            --split_method 50_50_3k \
+            --split_method 50_50_2k \
             --workers 4
         ;;
     
@@ -134,7 +134,7 @@ case $MODE in
             --seed 42 \
             --thres $THRESHOLD \
             --suffix .png \
-            --split_method 50_50 \
+            --split_method 50_50_2k \
             --workers 4
         ;;
 
@@ -159,11 +159,11 @@ case $MODE in
             --thres $THRESHOLD \
             --train_batch_size 16 \
             --test_batch_size 4 \
-            --backbone resnet_34 \
+            --backbone resnet_18 \
             --suffix .png \
-            --split_method 50_50_3k \
+            --split_method 50_50_2k \
             --workers 4 \
-            --oracle_masks_folder oracle_masks3
+            --oracle_masks_folder oracle_masks2
         ;;
 
     16bit-ir)
@@ -190,7 +190,7 @@ case $MODE in
             --train_batch_size 16 \
             --test_batch_size 16 \
             --suffix .png \
-            --split_method 50_50_1800 \
+            --split_method 50_50_2k \
             --workers 4
         ;;
 
