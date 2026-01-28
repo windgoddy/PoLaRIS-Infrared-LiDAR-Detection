@@ -1,10 +1,106 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 
 # 从现有的 model_DNANet 导入基础模块
 # 注意：这里我们统一使用 Res_CBAM_block，因为它是 DNANet 的核心模块
 from model.model_DNANet import Res_CBAM_block
+
+
+class TransformerBottleneck(nn.Module):
+    """
+    Transformer Bottleneck (方案 B)
+
+    设计理念：在 ResNet 最高层插入全局自注意力模块，使模型能够理解全图的空间关系
+    核心优势：
+    1. 全局感受野：Self-Attention 可以"看到"整张图的所有位置
+    2. 语义理解：可以判断"这块亮区是否和陆地连在一起"
+    3. 关系建模：区分"船在水面"vs"建筑在岸边"
+
+    参考架构：TransUNet, ViT
+    参数量：约 2-3M (相比 ResNet 整体 11M 可控)
+    """
+    def __init__(self, in_channels, num_heads=8, num_layers=3, dropout=0.1):
+        """
+        Args:
+            in_channels: 输入特征通道数 (例如 256)
+            num_heads: 多头注意力的头数 (默认 8)
+            num_layers: Transformer 层数 (2-4 层，默认 3)
+            dropout: Dropout 比率
+        """
+        super(TransformerBottleneck, self).__init__()
+
+        self.in_channels = in_channels
+        self.num_heads = num_heads
+        self.num_layers = num_layers
+
+        # 位置编码：为每个空间位置添加可学习的位置信息
+        # 假设最大特征图尺寸为 32x32 (对于 512x512 输入，bottleneck 为 32x32)
+        max_seq_len = 32 * 32  # 1024
+        self.pos_embedding = nn.Parameter(torch.randn(1, max_seq_len, in_channels))
+
+        # Transformer Encoder 层
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=in_channels,
+            nhead=num_heads,
+            dim_feedforward=in_channels * 4,  # FFN hidden dim = 4x
+            dropout=dropout,
+            activation='gelu',
+            batch_first=True,  # 输入格式: [B, N, C]
+            norm_first=False   # Post-LN (更稳定)
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+        # Layer Normalization
+        self.norm = nn.LayerNorm(in_channels)
+
+    def forward(self, x):
+        """
+        Args:
+            x: 输入特征图 [B, C, H, W]
+        Returns:
+            out: 输出特征图 [B, C, H, W] (经过全局注意力增强)
+        """
+        B, C, H, W = x.shape
+
+        # Step 1: 空间展平 (Spatial Flatten)
+        # [B, C, H, W] -> [B, C, H*W] -> [B, H*W, C]
+        x_flat = x.flatten(2).transpose(1, 2)  # [B, N, C], N = H*W
+        N = x_flat.shape[1]
+
+        # Step 2: 添加位置编码
+        # 注意：如果输入尺寸变化，需要裁剪或插值位置编码
+        if N <= self.pos_embedding.shape[1]:
+            pos_emb = self.pos_embedding[:, :N, :]
+        else:
+            # 如果输入尺寸超过预定义，进行线性插值
+            pos_emb = F.interpolate(
+                self.pos_embedding.transpose(1, 2),  # [1, C, max_N]
+                size=N,
+                mode='linear',
+                align_corners=True
+            ).transpose(1, 2)  # [1, N, C]
+
+        x_with_pos = x_flat + pos_emb
+
+        # Step 3: Transformer 自注意力
+        # 核心操作：每个位置都会"看"到其他所有位置
+        # Q @ K^T 计算相似度 → Softmax 得到注意力权重 → 加权求和 V
+        x_trans = self.transformer(x_with_pos)  # [B, N, C]
+
+        # Step 4: Layer Norm
+        x_trans = self.norm(x_trans)
+
+        # Step 5: 恢复空间形状 + 残差连接
+        # [B, N, C] -> [B, C, N] -> [B, C, H, W]
+        x_trans = x_trans.transpose(1, 2).reshape(B, C, H, W)
+
+        # 残差连接：保留原始特征 + 增加全局上下文
+        out = x + x_trans
+
+        return out
+
 
 class MSBlock(nn.Module):
     """
@@ -162,9 +258,14 @@ class MS_CAFNet(nn.Module):
         x3_0 = self.conv3_0(self.pool(x2_0))
         x4_0 = self.conv4_0(self.pool(x3_0))
 
-        # === Step D: 多尺度增强 (MSBlock) ===
-        # 这里让网络"看"得更广，同时保留细节
-        x4_0_enhanced = self.ms_context(x4_0)
+        # === Step D: [NEW] Transformer 全局注意力 (Global Attention) ===
+        # 方案 B 核心：在 bottleneck 插入 Transformer，使模型能"看到"全图
+        # 目标：理解"这块点云是否和陆地连在一起" -> 区分船和岸边建筑
+        x4_0_global = self.transformer_bottleneck(x4_0)
+
+        # === Step E: 多尺度增强 (MSBlock) ===
+        # 在全局上下文基础上，进一步提取多尺度特征
+        x4_0_enhanced = self.ms_context(x4_0_global)
 
         # === Step E: 解码 (Decoding) ===
         # 注意：这里上采样使用的是 MSBlock 增强后的特征
@@ -298,16 +399,27 @@ class MS_CAFNet_DualGeo(nn.Module):
         self.conv3_0 = Res_CBAM_block(nb_filter[2], nb_filter[3])
         self.conv4_0 = Res_CBAM_block(nb_filter[3], nb_filter[4])
 
-        # --- 3. MSBlock 模块 (核心改进：适配大目标) ---
+        # --- 3. [NEW] Transformer Bottleneck (方案 B: 全局注意力) ---
+        # 插入在 ResNet 最高层，提供全局感受野
+        # 参数：256 通道, 8 头, 3 层 Transformer
+        self.transformer_bottleneck = TransformerBottleneck(
+            in_channels=nb_filter[4],  # 256
+            num_heads=8,
+            num_layers=3,
+            dropout=0.1
+        )
+
+        # --- 4. MSBlock 模块 (核心改进：适配大目标) ---
+        # 注意：Transformer 后再接 MSBlock，结合全局和多尺度特征
         self.ms_context = MSBlock(nb_filter[4], nb_filter[4])
 
-        # --- 4. 解码器 (Decoder) ---
+        # --- 5. 解码器 (Decoder) ---
         self.conv3_1 = Res_CBAM_block(nb_filter[3] + nb_filter[4], nb_filter[3])
         self.conv2_2 = Res_CBAM_block(nb_filter[2] + nb_filter[3], nb_filter[2])
         self.conv1_3 = Res_CBAM_block(nb_filter[1] + nb_filter[2], nb_filter[1])
         self.conv0_4 = Res_CBAM_block(nb_filter[0] + nb_filter[1], nb_filter[0])
 
-        # --- 5. [NEW] 自适应双流融合 FPN 模块 ---
+        # --- 6. [NEW] 自适应双流融合 FPN 模块 ---
         self.shallow_reducer = nn.Sequential(
             nn.Conv2d(nb_filter[1], nb_filter[1], kernel_size=1, bias=False),
             nn.BatchNorm2d(nb_filter[1]),
@@ -321,7 +433,7 @@ class MS_CAFNet_DualGeo(nn.Module):
         self.gate_lidar = nn.Parameter(torch.tensor(0.5))   # alpha: 电子锁权重
         self.gate_visual = nn.Parameter(torch.tensor(0.5))  # beta: 机械锁权重
 
-        # --- 6. [NEW] 深度监督输出头 (Deep Supervision Heads) ---
+        # --- 7. [NEW] 深度监督输出头 (Deep Supervision Heads) ---
         # 为中间解码层添加额外的输出头，解决极小目标在深层消失的问题
         self.final1 = nn.Conv2d(nb_filter[3], num_classes, kernel_size=1)  # 从 x3_1 输出
         self.final2 = nn.Conv2d(nb_filter[2], num_classes, kernel_size=1)  # 从 x2_2 输出
@@ -362,30 +474,36 @@ class MS_CAFNet_DualGeo(nn.Module):
         x3_0 = self.conv3_0(self.pool(x2_0))
         x4_0 = self.conv4_0(self.pool(x3_0))
 
-        # === Step D: 多尺度增强 (MSBlock) ===
-        x4_0_enhanced = self.ms_context(x4_0)
+        # === Step D: [NEW] Transformer 全局注意力 (Global Attention) ===
+        # 方案 B 核心：在 bottleneck 插入 Transformer，使模型能"看到"全图
+        # 目标：理解"这块点云是否和陆地连在一起" -> 区分船和岸边建筑
+        x4_0_global = self.transformer_bottleneck(x4_0)
 
-        # === Step E: 解码 (Decoding) ===
+        # === Step E: 多尺度增强 (MSBlock) ===
+        # 在全局上下文基础上，进一步提取多尺度特征
+        x4_0_enhanced = self.ms_context(x4_0_global)
+
+        # === Step F: 解码 (Decoding) ===
         x3_1 = self.conv3_1(torch.cat([x3_0, self.up(x4_0_enhanced)], 1))
         x2_2 = self.conv2_2(torch.cat([x2_0, self.up(x3_1)], 1))
 
-        # === Step F: [NEW] 自适应双流几何融合 FPN ===
+        # === Step G: [NEW] 自适应双流几何融合 FPN ===
         # 升级：从单流 LiDAR 增强 → 双流自适应几何引导
         # 核心理念：LiDAR (电子锁) + Visual (机械锁) = 双保险
 
-        # F1. 提取浅层高分辨率特征
+        # G1. 提取浅层高分辨率特征
         feat_shallow = x1_0  # shape: [B, nb_filter[1]=32, H/2, W/2]
 
-        # F2. 第一流：LiDAR 几何引导 (Geometry from LiDAR)
+        # G2. 第一流：LiDAR 几何引导 (Geometry from LiDAR)
         lidar_guidance = F.interpolate(pred_conf, size=feat_shallow.shape[2:],
                                        mode='bilinear', align_corners=True)
 
-        # F2b. [NEW] 第二流：视觉结构引导 (Geometry from Visual)
+        # G2b. [NEW] 第二流：视觉结构引导 (Geometry from Visual)
         visual_structure = self.visual_extractor(x_ir)  # [B, 1, H, W]
         visual_guidance = F.interpolate(visual_structure, size=feat_shallow.shape[2:],
                                         mode='bilinear', align_corners=True)
 
-        # F3. [NEW] 自适应双流残差增强
+        # G3. [NEW] 自适应双流残差增强
         # 新公式: feat_enhanced = feat_shallow × (1 + alpha*lidar + beta*visual)
         #
         # 工作模式：
@@ -397,17 +515,17 @@ class MS_CAFNet_DualGeo(nn.Module):
             self.gate_visual * visual_guidance     # 机械锁分支
         )
 
-        # F4. 通过 1x1 卷积进一步提炼增强后的特征
+        # G4. 通过 1x1 卷积进一步提炼增强后的特征
         feat_enhanced_processed = self.shallow_reducer(feat_enhanced)
 
-        # F5. 继续解码（在 x1_3 处融合增强特征）
+        # G5. 继续解码（在 x1_3 处融合增强特征）
         x1_3_base = self.conv1_3(torch.cat([x1_0, self.up(x2_2)], 1))
         x1_3_fused = x1_3_base + feat_enhanced_processed
 
-        # F6. 完成最后一层解码
+        # G6. 完成最后一层解码
         x0_4 = self.conv0_4(torch.cat([x0_0, self.up(x1_3_fused)], 1))
 
-        # === Step G: [NEW] 深度监督输出 (Deep Supervision Outputs) ===
+        # === Step H: [NEW] 深度监督输出 (Deep Supervision Outputs) ===
         # 从不同解码层生成多尺度预测，提升极小目标的召回率
 
         # 上采样中间层特征到原始分辨率
