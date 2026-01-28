@@ -113,7 +113,7 @@ case $MODE in
             --seed 42 \
             --thres $THRESHOLD \
             --suffix .png \
-            --split_method 50_50_2k \
+            --split_method 50_50_2k_new \
             --workers 4
         ;;
     
@@ -161,7 +161,7 @@ case $MODE in
             --test_batch_size 4 \
             --backbone resnet_18 \
             --suffix .png \
-            --split_method 50_50_2k \
+            --split_method 50_50_2k_new \
             --workers 4 \
             --oracle_masks_folder oracle_masks2
         ;;
