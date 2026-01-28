@@ -264,20 +264,22 @@ class PoLaRISTrainLoader(Dataset):
 
         # Normalize masks to [0, 1] and preserve float values
         # CRITICAL: Do NOT binarize oracle_mask - preserve soft labels!
-        mask = mask / 255.0  # Binary: {0.0, 1.0}
-        oracle_mask = oracle_mask / 255.0  # Soft: [0.0, 1.0], e.g., 0.6 for no-LiDAR targets
+        mask_hard = mask / 255.0  # Binary GT: {0.0, 1.0}
+        mask_soft = oracle_mask / 255.0  # Soft: [0.0, 1.0], e.g., 0.6 for no-LiDAR targets
 
         # Add channel dimension
-        mask = np.expand_dims(mask, axis=0)  # (1, H, W)
-        oracle_mask = np.expand_dims(oracle_mask, axis=0)  # (1, H, W)
+        mask_hard = np.expand_dims(mask_hard, axis=0)  # (1, H, W)
+        mask_soft = np.expand_dims(mask_soft, axis=0)  # (1, H, W)
 
         # Convert LiDAR to tensor
         lidar_tensor = torch.from_numpy(lidar_points).float()  # (N, 4)
 
         return {
             'image': img_tensor,  # (1, H, W) or (2, H, W) depending on in_channels
-            'mask': torch.from_numpy(mask).float(),  # (1, H, W)
-            'oracle_mask': torch.from_numpy(oracle_mask).float(),  # (1, H, W) with soft labels
+            'mask': torch.from_numpy(mask_hard).float(),  # (1, H, W) - Hard GT for evaluation
+            'mask_hard': torch.from_numpy(mask_hard).float(),  # (1, H, W) - Hard Label for seg loss
+            'mask_soft': torch.from_numpy(mask_soft).float(),  # (1, H, W) - Soft Label for conf loss
+            'oracle_mask': torch.from_numpy(mask_soft).float(),  # (1, H, W) - Backward compatibility
             'lidar': lidar_tensor,  # (N, 4)
             'img_id': img_id,
             'is_16bit': is_16bit

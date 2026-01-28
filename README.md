@@ -74,13 +74,11 @@ dataset/Pohang-Canal-3k/
 
 ## 训练模式
 
-| 模式 | 说明 | 适用场景 |
-| ---- | ---- | -------- |
-| **auto** | 自动选择模式 | 推荐使用，自动根据数据集选择 8bit/16bit |
-| **16bit** | 16-bit + 软标签 | Pohang-Canal-3k 数据集（完整 PoLaRIS） |
-| **8bit** | 8-bit + 硬标签 | 其他数据集或兼容旧版 |
-| **16bit-ir** | 仅红外（无深度） | 消融实验：移除深度图 |
-| **baseline1** | DNANet 原始 | 对比基准（DNANet 论文配置） |
+| 模式 | 模型 | 图像精度 | 深度图 | 说明 |
+| ---- | ---- | -------- | ------ | ---- |
+| **baseline1** | DNANet | 8-bit | ❌ | DNANet 在 8-bit 图像上的性能（对比基准） |
+| **16bit-ir** | PoLaRIS | 16-bit | ❌ | PoLaRIS + 16-bit（测试模型+数据改进） |
+| **16bit** | PoLaRIS | 16-bit | ✅ | 完整 PoLaRIS（测试深度图贡献） |
 
 ---
 
