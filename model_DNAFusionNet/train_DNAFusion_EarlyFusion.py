@@ -226,17 +226,17 @@ class Trainer:
         for batch in tbar:
             images = batch['image'].to(self.device)
             masks = batch['mask'].to(self.device)
-            oracle_masks = batch['oracle_mask'].to(self.device)
+            # oracle_masks = batch['oracle_mask'].to(self.device)  # 不需要用于损失计算
 
             # 前向传播
             outputs = self.model(images)
 
-            # 计算损失
+            # 计算损失（CombinedSoftLoss 只接受 2 个参数：pred 和 target）
             if self.args.deep_supervision:
                 # 深度监督：所有输出都参与损失计算
-                loss = sum([self.criterion(out, masks, oracle_masks) for out in outputs]) / len(outputs)
+                loss = sum([self.criterion(out, masks) for out in outputs]) / len(outputs)
             else:
-                loss = self.criterion(outputs, masks, oracle_masks)
+                loss = self.criterion(outputs, masks)
 
             # 反向传播
             self.optimizer.zero_grad()
