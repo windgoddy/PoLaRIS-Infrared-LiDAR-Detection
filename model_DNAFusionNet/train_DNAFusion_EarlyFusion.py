@@ -105,14 +105,16 @@ class Trainer:
         self.mIoU = mIoU(1, threshold=args.threshold)
         self.ROC = ROCMetric(1, 10)
 
-        # 设置保存目录
+        # 设置保存目录（注意：save_model 函数会自动添加 'result/' 前缀）
         if args.save_dir is None:
             timestamp = datetime.now().strftime('%d_%m_%Y_%H_%M_%S')
-            self.save_dir = f'result/DNAFusion_EarlyFusion_{args.dataset}_{args.split_method}_{timestamp}'
+            self.save_dir = f'DNAFusion_EarlyFusion_{args.dataset}_{args.split_method}_{timestamp}'
         else:
             self.save_dir = args.save_dir
 
-        os.makedirs(self.save_dir, exist_ok=True)
+        # 创建完整路径用于日志显示
+        self.full_save_dir = f'result/{self.save_dir}'
+        os.makedirs(self.full_save_dir, exist_ok=True)
         self.save_prefix = f'DNAFusion_EarlyFusion_{args.dataset}'
 
         # 初始化最佳指标
@@ -125,7 +127,7 @@ class Trainer:
         print(f"初始化训练器")
         print(f"{'='*80}")
         print(f"设备: {self.device}")
-        print(f"保存目录: {self.save_dir}")
+        print(f"保存目录: {self.full_save_dir}")
         print(f"深度监督: {args.deep_supervision}")
         print(f"学习率: {args.lr}")
         print(f"阈值: {args.threshold}")
@@ -328,7 +330,7 @@ class Trainer:
         print(f"训练完成！")
         print(f"{'='*80}")
         print(f"最佳 mIoU: {self.best_iou:.4f}")
-        print(f"模型保存路径: {self.save_dir}")
+        print(f"模型保存路径: {self.full_save_dir}")
 
 
 def main():
