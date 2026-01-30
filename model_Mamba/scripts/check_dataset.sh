@@ -24,7 +24,8 @@ fi
 echo "✓ Dataset root: $DATASET_ROOT"
 
 # Check required directories
-REQUIRED_DIRS=("images" "masks" "lidar_roi" "labels" "depth_maps" "oracle_masks")
+REQUIRED_DIRS=("images" "masks" "labels")
+OPTIONAL_DIRS=("lidar_roi" "depth_maps" "oracle_masks")
 MISSING_DIRS=()
 
 for dir in "${REQUIRED_DIRS[@]}"; do
@@ -32,8 +33,17 @@ for dir in "${REQUIRED_DIRS[@]}"; do
         count=$(ls -1 "$DATASET_ROOT/$dir" 2>/dev/null | wc -l)
         echo "✓ $DATASET_ROOT/$dir/ ($count files)"
     else
-        echo "⚠️  $DATASET_ROOT/$dir/ (NOT FOUND)"
+        echo "❌ $DATASET_ROOT/$dir/ (NOT FOUND)"
         MISSING_DIRS+=("$dir")
+    fi
+done
+
+for dir in "${OPTIONAL_DIRS[@]}"; do
+    if [ -d "$DATASET_ROOT/$dir" ]; then
+        count=$(ls -1 "$DATASET_ROOT/$dir" 2>/dev/null | wc -l)
+        echo "✓ $DATASET_ROOT/$dir/ ($count files, optional)"
+    else
+        echo "⚠️  $DATASET_ROOT/$dir/ (optional, not found)"
     fi
 done
 

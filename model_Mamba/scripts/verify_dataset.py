@@ -22,9 +22,19 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from model.utils_lidar import PoLaRISTrainLoader, get_img_ids_from_dir
+from model.utils_lidar import PoLaRISTrainLoader
 from model.load_param_data import load_dataset
 from model_Mamba.dataset.gaussian_utils import load_yolo_labels, generate_gaussian_target
+
+
+def get_img_ids_from_dir(images_dir, suffix='.png'):
+    """Auto-scan images directory and return list of image IDs."""
+    if not os.path.exists(images_dir):
+        raise FileNotFoundError(f"Images directory not found: {images_dir}")
+    
+    img_files = [f for f in os.listdir(images_dir) if f.endswith(suffix)]
+    img_ids = [f.replace(suffix, '') for f in img_files]
+    return sorted(img_ids)
 
 
 def verify_dataset(args):
@@ -39,7 +49,8 @@ def verify_dataset(args):
     print(f"\n1️⃣  Checking directory structure...")
     print(f"   Dataset dir: {dataset_dir}")
     
-    required_dirs = ['images', 'masks', 'lidar_roi', 'labels']
+    required_dirs = ['images', 'masks', 'labels']  # depth_maps optional for in_channels=1
+    optional_dirs = ['lidar_roi', 'depth_maps', 'oracle_masks']
     missing_dirs = []
     for dir_name in required_dirs:
         dir_path = os.path.join(dataset_dir, dir_name)
@@ -49,6 +60,15 @@ def verify_dataset(args):
         else:
             print(f"   ✗ {dir_name}/  (MISSING)")
             missing_dirs.append(dir_name)
+    
+    # Check optional directories
+    for dir_name in optional_dirs:
+        dir_path = os.path.join(dataset_dir, dir_name)
+        if os.path.exists(dir_path):
+            file_count = len([f for f in os.listdir(dir_path) if not f.startswith('.')])
+            print(f"   ✓ {dir_name}/  ({file_count} files, optional)")
+        else:
+            print(f"   ⚠️  {dir_name}/  (optional, not found)")
     
     if missing_dirs:
         print(f"\n   ⚠️  Missing directories: {missing_dirs}")
