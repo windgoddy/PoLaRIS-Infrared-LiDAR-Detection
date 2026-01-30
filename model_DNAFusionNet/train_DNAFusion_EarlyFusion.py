@@ -105,23 +105,29 @@ class Trainer:
         self.mIoU = mIoU(1, threshold=args.threshold)
         self.ROC = ROCMetric(1, 10)
 
-        # 设置保存目录（注意：save_model 函数会自动添加 'result/' 前缀）
+        # 设置保存目录
+        # save_model 函数会自动添加 'result/' 前缀
+        # 使用 '../result_DNAFusion/' 让最终路径变成 'result_DNAFusion/'
         if args.save_dir is None:
             timestamp = datetime.now().strftime('%d_%m_%Y_%H_%M_%S')
-            self.save_dir = f'DNAFusion_EarlyFusion_{args.dataset}_{args.split_method}_{timestamp}'
+            dir_name = f'DNAFusion_EarlyFusion_{args.dataset}_{args.split_method}_{timestamp}'
+            self.save_dir = f'../result_DNAFusion/{dir_name}'
+            self.full_save_dir = f'result_DNAFusion/{dir_name}'
         else:
             self.save_dir = args.save_dir
+            self.full_save_dir = f'result/{args.save_dir}'
 
-        # 创建完整路径用于日志显示
-        self.full_save_dir = f'result/{self.save_dir}'
+        # 创建完整路径
         os.makedirs(self.full_save_dir, exist_ok=True)
         self.save_prefix = f'DNAFusion_EarlyFusion_{args.dataset}'
 
         # 初始化最佳指标
         self.best_iou = 0
         self.last_mean_IOU = 0
-        self.last_recall = 0
-        self.last_precision = 0
+        self.last_recall = np.zeros(11)  # 11 个阈值的 recall
+        self.last_precision = np.zeros(11)  # 11 个阈值的 precision
+        self.last_recall_display = 0  # 用于显示的单个值
+        self.last_precision_display = 0  # 用于显示的单个值
 
         print(f"\n{'='*80}")
         print(f"初始化训练器")
@@ -282,9 +288,12 @@ class Trainer:
         _, mean_IOU = self.mIoU.get()
         _, _, recall, precision = self.ROC.get()
 
+        # 保存完整数组（用于日志）和单个值（用于显示）
         self.last_mean_IOU = mean_IOU
-        self.last_recall = recall[5]  # threshold=0.5 的 recall
-        self.last_precision = precision[5]
+        self.last_recall = recall  # 完整数组（11 个阈值）
+        self.last_precision = precision  # 完整数组（11 个阈值）
+        self.last_recall_display = float(recall[5])  # threshold=0.5 的 recall（用于显示）
+        self.last_precision_display = float(precision[5])  # threshold=0.5 的 precision（用于显示）
 
         return mean_IOU
 
@@ -308,8 +317,8 @@ class Trainer:
             print(f"Epoch {epoch}/{self.args.epochs} - "
                   f"Loss: {train_loss:.4f}, "
                   f"mIoU: {mean_IOU:.4f}, "
-                  f"Recall: {self.last_recall:.4f}, "
-                  f"Precision: {self.last_precision:.4f}")
+                  f"Recall: {self.last_recall_display:.4f}, "
+                  f"Precision: {self.last_precision_display:.4f}")
 
             # 保存模型
             old_best_iou = self.best_iou

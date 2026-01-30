@@ -326,7 +326,7 @@ class Trainer(object):
                 if self.use_lidar_loader:
                     data = batch_data['image'].cuda()
                     labels = batch_data['mask'].cuda()
-                    sample_ids = batch_data['id']
+                    sample_ids = batch_data['img_id']  # ✅ 修正：PoLaRISTestLoader 返回 'img_id' 而不是 'id'
                 else:
                     data, labels = batch_data
                     data = data.cuda()
