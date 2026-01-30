@@ -162,7 +162,7 @@ class MambaDataset(Dataset):
         self.dataset_dir = dataset_dir
         self.gaussian_iou = gaussian_iou
         self.downscale = downscale
-        self.img_ids = base_loader.img_id
+        self.img_ids = base_loader._items
 
     def __len__(self):
         return len(self.base_loader)
