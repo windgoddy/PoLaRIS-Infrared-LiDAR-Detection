@@ -399,15 +399,29 @@ class Trainer:
         precision_sum = 0.0
         recall_sum = 0.0
         count = 0
+        
+        # Debug: track prediction statistics
+        pred_stats = {'min': [], 'max': [], 'mean': []}
+        gt_stats = {'min': [], 'max': [], 'mean': [], 'num_pos': []}
 
         with torch.no_grad():
-            for batch in tqdm(self.test_loader, desc='Testing'):
+            for batch_idx, batch in enumerate(tqdm(self.test_loader, desc='Testing')):
                 ir_img = batch['ir_img'].to(self.device)
                 lidar_img = batch['lidar_img'].to(self.device)
                 heatmap_gt = batch['heatmap'].to(self.device)
 
                 # Forward
                 heatmap_pred = self.net(ir_img, lidar_img)
+
+                # Collect statistics (first epoch only)
+                if epoch == 0 and batch_idx < 5:
+                    pred_stats['min'].append(heatmap_pred.min().item())
+                    pred_stats['max'].append(heatmap_pred.max().item())
+                    pred_stats['mean'].append(heatmap_pred.mean().item())
+                    gt_stats['min'].append(heatmap_gt.min().item())
+                    gt_stats['max'].append(heatmap_gt.max().item())
+                    gt_stats['mean'].append(heatmap_gt.mean().item())
+                    gt_stats['num_pos'].append((heatmap_gt > 0.5).sum().item())
 
                 # Loss
                 loss = self.criterion(heatmap_pred, heatmap_gt)
@@ -426,6 +440,14 @@ class Trainer:
                 fp = (pred_binary * (1 - gt_binary)).sum().item()
                 fn = ((1 - pred_binary) * gt_binary).sum().item()
 
+        
+        # Print debug stats for first epoch
+        if epoch == 0 and pred_stats['min']:
+            print(f"\n  📊 Debug Statistics (first 5 batches):")
+            print(f"     Pred: min={min(pred_stats['min']):.6f}, max={max(pred_stats['max']):.6f}, mean={sum(pred_stats['mean'])/len(pred_stats['mean']):.6f}")
+            print(f"     GT:   min={min(gt_stats['min']):.6f}, max={max(gt_stats['max']):.6f}, mean={sum(gt_stats['mean'])/len(gt_stats['mean']):.6f}")
+            print(f"     GT positive pixels: {sum(gt_stats['num_pos'])/len(gt_stats['num_pos']):.1f} per batch")
+            print(f"     Threshold: {self.args.peak_threshold}")
                 precision = tp / (tp + fp + 1e-7)
                 recall = tp / (tp + fn + 1e-7)
 

@@ -12,6 +12,24 @@ import random
 import numpy as np
 import torch
 
+def get_img_ids_from_dir(images_dir, suffix='.png'):
+    """
+    Auto-scan images directory and return list of image IDs (filenames without suffix)
+    
+    Args:
+        images_dir: Path to images directory
+        suffix: Image file suffix (default: '.png')
+    
+    Returns:
+        List of image IDs sorted alphabetically
+    """
+    if not os.path.exists(images_dir):
+        raise FileNotFoundError(f"Images directory not found: {images_dir}")
+    
+    img_files = [f for f in os.listdir(images_dir) if f.endswith(suffix)]
+    img_ids = [f.replace(suffix, '') for f in img_files]
+    return sorted(img_ids)
+
 class PoLaRISTrainLoader(Dataset):
     """
     Training Dataset Loader for PoLaRIS with LiDAR fusion
@@ -25,15 +43,21 @@ class PoLaRISTrainLoader(Dataset):
     
     NUM_CLASS = 1
 
-    def __init__(self, dataset_dir, img_id, base_size=512, crop_size=480,
+    def __init__(self, dataset_dir, img_id=None, base_size=512, crop_size=480,
                  transform=None, suffix='.png', normalize_16bit=True, in_channels=1, image_folder='images', oracle_masks_folder='oracle_masks'):
         super(PoLaRISTrainLoader, self).__init__()
 
         self.transform = transform
+        self.images = os.path.join(dataset_dir, image_folder)
+        
+        # Auto-scan images directory if img_id not provided
+        if img_id is None:
+            img_id = get_img_ids_from_dir(self.images, suffix)
+            print(f"[PoLaRISTrainLoader] Auto-scanned {len(img_id)} images from {self.images}")
+        
         # Normalize all item ids to strings to avoid type errors when building paths
         self._items = [str(i) for i in img_id]
         self.masks = os.path.join(dataset_dir, 'masks')
-        self.images = os.path.join(dataset_dir, image_folder)
         self.lidar_roi = os.path.join(dataset_dir, 'lidar_roi')
         self.oracle_masks = os.path.join(dataset_dir, oracle_masks_folder)
         self.depth_maps = os.path.join(dataset_dir, 'depth_maps')
@@ -43,7 +67,7 @@ class PoLaRISTrainLoader(Dataset):
         self.normalize_16bit = normalize_16bit
         self.in_channels = in_channels
 
-        print(f"[PoLaRISTrainLoader] Initialized with {len(img_id)} samples")
+        print(f"[PoLaRISTrainLoader] Initialized with {len(self._items)} samples")
         print(f"  - Images: {self.images}")
         print(f"  - LiDAR: {self.lidar_roi}")
         print(f"  - Oracle Masks: {self.oracle_masks}")
@@ -297,15 +321,21 @@ class PoLaRISTestLoader(Dataset):
     
     NUM_CLASS = 1
 
-    def __init__(self, dataset_dir, img_id, base_size=512, crop_size=480,
+    def __init__(self, dataset_dir, img_id=None, base_size=512, crop_size=480,
                  transform=None, suffix='.png', normalize_16bit=True, in_channels=1, image_folder='images'):
         super(PoLaRISTestLoader, self).__init__()
 
         self.transform = transform
+        self.images = os.path.join(dataset_dir, image_folder)
+        
+        # Auto-scan images directory if img_id not provided
+        if img_id is None:
+            img_id = get_img_ids_from_dir(self.images, suffix)
+            print(f"[PoLaRISTestLoader] Auto-scanned {len(img_id)} images from {self.images}")
+        
         # Normalize all item ids to strings to avoid type errors when building paths
         self._items = [str(i) for i in img_id]
         self.masks = os.path.join(dataset_dir, 'masks')
-        self.images = os.path.join(dataset_dir, image_folder)
         self.lidar_roi = os.path.join(dataset_dir, 'lidar_roi')
         self.depth_maps = os.path.join(dataset_dir, 'depth_maps')
         self.base_size = base_size
@@ -314,7 +344,7 @@ class PoLaRISTestLoader(Dataset):
         self.normalize_16bit = normalize_16bit
         self.in_channels = in_channels
 
-        print(f"[PoLaRISTestLoader] Initialized with {len(img_id)} samples")
+        print(f"[PoLaRISTestLoader] Initialized with {len(self._items)} samples")
         print(f"  - Input channels: {in_channels}")
 
     def _load_image(self, img_path):

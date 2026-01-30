@@ -86,13 +86,18 @@ class GaussianFocalLoss(nn.Module):
         # Total loss
         loss = pos_loss + neg_loss
 
-        # Normalize by number of positive samples
+        # Normalize by number of positive samples (avoid too large loss values)
         num_pos = pos_mask.sum() + 1  # Avoid division by zero
+        
+        # CRITICAL FIX: Also consider total pixels to avoid extreme loss values
+        total_pixels = pred.numel()
 
         if self.reduction == 'sum':
             return loss.sum()
         elif self.reduction == 'mean':
-            return loss.sum() / num_pos
+            # Normalize by positive samples but clamp to avoid extreme values
+            # This gives more stable gradients
+            return loss.sum() / torch.clamp(num_pos, min=total_pixels * 0.001)
         else:
             raise ValueError(f"Unsupported reduction: {self.reduction}")
 
