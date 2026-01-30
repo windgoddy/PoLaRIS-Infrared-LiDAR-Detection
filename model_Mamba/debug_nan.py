@@ -159,7 +159,7 @@ def check_data_loading(args):
             check_tensor("ir_img", ir_img, "单通道")
 
         # Check label path
-        img_id = sample['id']
+        img_id = sample['img_id']
         print(f"\n  图像 ID: {img_id}")
 
         # Try to find label file
@@ -477,7 +477,7 @@ def check_full_training_step(args):
 
     # Generate Gaussian target
     print(f"\n📊 生成 Gaussian target...")
-    img_id = sample['id']
+    img_id = sample['img_id']
 
     # Try to find label
     label_path = os.path.join(dataset_dir, 'labels', f'{img_id}.txt')
