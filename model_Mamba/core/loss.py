@@ -102,6 +102,48 @@ class GaussianFocalLoss(nn.Module):
             raise ValueError(f"Unsupported reduction: {self.reduction}")
 
 
+class DiceLoss(nn.Module):
+    """
+    Dice Loss for better precision-recall balance.
+    Especially useful when facing class imbalance.
+    """
+    def __init__(self, smooth=1.0):
+        super(DiceLoss, self).__init__()
+        self.smooth = smooth
+    
+    def forward(self, pred, target):
+        """
+        Args:
+            pred: (B, 1, H, W) predicted heatmap
+            target: (B, 1, H, W) ground truth heatmap
+        """
+        pred = pred.contiguous().view(-1)
+        target = target.contiguous().view(-1)
+        
+        intersection = (pred * target).sum()
+        dice = (2. * intersection + self.smooth) / (pred.sum() + target.sum() + self.smooth)
+        
+        return 1 - dice
+
+
+class CombinedLoss(nn.Module):
+    """
+    Combined Gaussian Focal Loss + Dice Loss
+    Better balance between pixel-wise accuracy and region overlap
+    """
+    def __init__(self, focal_weight=0.7, dice_weight=0.3, alpha=1, beta=4):
+        super(CombinedLoss, self).__init__()
+        self.focal_loss = GaussianFocalLoss(alpha=alpha, beta=beta, reduction='mean')
+        self.dice_loss = DiceLoss(smooth=1.0)
+        self.focal_weight = focal_weight
+        self.dice_weight = dice_weight
+    
+    def forward(self, pred, target):
+        focal = self.focal_loss(pred, target)
+        dice = self.dice_loss(pred, target)
+        return self.focal_weight * focal + self.dice_weight * dice
+
+
 class AdaptiveGaussianFocalLoss(nn.Module):
     """
     Adaptive Gaussian Focal Loss with dynamic weighting.

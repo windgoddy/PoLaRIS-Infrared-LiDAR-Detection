@@ -43,7 +43,7 @@ from model.load_param_data import load_dataset
 
 # Mamba model and loss (from model_Mamba/)
 from model_Mamba.core.polaris_mamba import PoLaRIS_Mamba, polaris_mamba_tiny, polaris_mamba_small, polaris_mamba_base
-from model_Mamba.core.loss import GaussianFocalLoss, AverageMeter
+from model_Mamba.core.loss import GaussianFocalLoss, CombinedLoss, AverageMeter
 from model_Mamba.dataset.gaussian_utils import generate_gaussian_target, load_yolo_labels
 
 
@@ -120,6 +120,9 @@ def parse_args():
                         help='Learning rate scheduler')
 
     # Loss function
+    parser.add_argument('--loss_type', type=str, default='combined',
+                        choices=['focal', 'combined'],
+                        help='Loss function type')
     parser.add_argument('--loss_alpha', type=float, default=2.0,
                         help='Focal loss alpha parameter')
     parser.add_argument('--loss_beta', type=float, default=4.0,
@@ -138,8 +141,10 @@ def parse_args():
                         help='Save checkpoint every N epochs')
 
     # Evaluation
-    parser.add_argument('--peak_threshold', type=float, default=0.01,
-                        help='Threshold for peak detection (lowered for training)')
+    parser.add_argument('--peak_threshold', type=float, default=0.05,
+                        help='Threshold for peak detection (balanced for precision/recall)')
+    parser.add_argument('--adaptive_threshold', type=str, default='False',
+                        help='Use adaptive threshold based on prediction distribution')
 
     args = parser.parse_args()
 
@@ -323,12 +328,24 @@ class Trainer:
             self.net = torch.nn.DataParallel(self.net, device_ids=self.gpu_ids)
 
         # Count parameters
-        num_params = sum(p.numel() for p in self.net.parameters())
-        print(f"✅ Model: {args.model}, Parameters: {num_params / 1e6:.2f}M")
-
-        # Loss function (alpha=1 for easier training, lower than default 2)
-        self.criterion = GaussianFocalLoss(
-            alpha=1,  # Reduced from 2 to make training easier
+        num_params = su
+        if args.loss_type == 'combined':
+            # Combined loss balances pixel accuracy and region overlap
+            self.criterion = CombinedLoss(
+                focal_weight=0.7,
+                dice_weight=0.3,
+                alpha=1,  # Reduced from 2 to make training easier
+                beta=args.loss_beta,
+            )
+            print("✅ Using Combined Loss (Focal + Dice)")
+        else:
+            # Pure Gaussian Focal Loss
+            self.criterion = GaussianFocalLoss(
+                alpha=1,
+                beta=args.loss_beta,
+                reduction='mean',
+            )
+            print("✅ Using Gaussian Focal Loss only"    alpha=1,  # Reduced from 2 to make training easier
             beta=args.loss_beta,
             reduction='mean',
         )
@@ -363,7 +380,7 @@ class Trainer:
         self.train_log_path = os.path.join(args.save_dir, 'train_log.csv')
         with open(self.train_log_path, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['Epoch', 'Train_Loss', 'Test_Loss', 'IoU', 'Precision', 'Recall', 'LR'])
+            writer.writerow(['Epoch', 'Train_Loss', 'Test_Loss', 'IoU', 'Precision', 'Recall', 'F1', 'LR'])
 
     def training(self, epoch):
         """Training loop for one epoch."""
@@ -429,8 +446,8 @@ class Trainer:
                 # Forward
                 heatmap_pred = self.net(ir_img, lidar_img)
 
-                # Collect statistics (first 10 epochs)
-                if epoch < 10 and batch_idx < 5:
+                # Collect statistics (first 5 batches of every 10th epoch)
+                if epoch % 10 == 0 and batch_idx < 5:
                     pred_stats['min'].append(heatmap_pred.min().item())
                     pred_stats['max'].append(heatmap_pred.max().item())
                     pred_stats['mean'].append(heatmap_pred.mean().item())
@@ -444,7 +461,15 @@ class Trainer:
                 loss_meter.update(loss.item(), ir_img.size(0))
 
                 # Compute metrics (simple binary IoU)
-                pred_binary = (heatmap_pred > self.args.peak_threshold).float()
+                # Use adaptive threshold if enabled
+                if self.args.adaptive_threshold == 'True' and epoch > 10:
+                    # Use mean + 2*std as threshold
+                    threshold = heatmap_pred.mean() + 2 * heatmap_pred.std()
+                    threshold = torch.clamp(threshold, min=0.01, max=0.5)
+                else:
+                    threshold = self.args.peak_threshold
+                
+                pred_binary = (heatmap_pred > threshold).float()
                 gt_binary = (heatmap_gt > 0.5).float()
 
                 intersection = (pred_binary * gt_binary).sum(dim=(1, 2, 3))
@@ -467,12 +492,15 @@ class Trainer:
         avg_iou = iou_sum / count
         avg_precision = precision_sum / count
         avg_recall = recall_sum / count
+        avg_f1 = 2 * (avg_precision * avg_recall) / (avg_precision + avg_recall + 1e-7)
 
         print(f"\n[Epoch {epoch}] Test Loss: {loss_meter.avg:.6f}, IoU: {avg_iou:.4f}, "
-              f"Precision: {avg_precision:.4f}, Recall: {avg_recall:.4f}")
+              f"Precision: {avg_precision:.4f}, Recall: {avg_recall:.4f}, F1: {avg_f1:.4f}")
+        if epoch % 10 == 0:
+            print(f"  Current threshold: {self.args.peak_threshold}")
         
-        # Print debug stats for first 10 epochs
-        if epoch < 10 and pred_stats['min']:
+        # Print debug stats every 10 epochs
+        if epoch % 10 == 0 and pred_stats['min']:
             print(f"\n  📊 Debug Statistics (first 5 batches, Epoch {epoch}):")
             print(f"     Pred: min={min(pred_stats['min']):.6f}, max={max(pred_stats['max']):.6f}, mean={sum(pred_stats['mean'])/len(pred_stats['mean']):.6f}")
             print(f"     GT:   min={min(gt_stats['min']):.6f}, max={max(gt_stats['max']):.6f}, mean={sum(gt_stats['mean'])/len(gt_stats['mean']):.6f}")
@@ -500,7 +528,7 @@ class Trainer:
             }, checkpoint_path)
             print(f"✅ Saved best model (IoU: {self.best_iou:.4f})")
 
-        return loss_meter.avg, avg_iou, avg_precision, avg_recall
+        return loss_meter.avg, avg_iou, avg_precision, avg_recall, avg_f1
 
     def run(self):
         """Main training loop."""
@@ -521,7 +549,7 @@ class Trainer:
             train_loss = self.training(epoch)
 
             # Testing
-            test_loss, test_iou, test_precision, test_recall = self.testing(epoch)
+            test_loss, test_iou, test_precision, test_recall, test_f1 = self.testing(epoch)
 
             # Update scheduler
             self.scheduler.step()
@@ -536,6 +564,7 @@ class Trainer:
                     test_iou,
                     test_precision,
                     test_recall,
+                    test_f1,
                     self.optimizer.param_groups[0]['lr']
                 ])
 
