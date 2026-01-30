@@ -57,17 +57,19 @@ for GPU_ID in $GPU_LIST; do
         TRAIN_PID=$!
         echo "进程 PID: $TRAIN_PID"
         
-        # 等待训练启动并监控前 2 分钟
-        echo "⏳ 监控训练启动中（最多等待 120 秒）..."
+        # 等待训练启动并监控前 5 分钟（确保通过 OOM 高风险期）
+        echo "⏳ 监控训练启动中（最多等待 300 秒以确认无 OOM）..."
         
         SUCCESS=false
-        for i in {1..120}; do
+        EPOCH_STARTED=false
+        
+        for i in {1..300}; do
             sleep 1
             
             # 检查进程是否还在运行
             if ! ps -p $TRAIN_PID > /dev/null 2>&1; then
                 # 进程已退出，检查是否是 OOM
-                if tail -50 $LOG_FILE | grep -q "OutOfMemoryError"; then
+                if tail -100 $LOG_FILE | grep -q "OutOfMemoryError"; then
                     echo "❌ GPU $GPU_ID (Batch Size $BATCH_SIZE) OOM，尝试下一个配置..."
                     break
                 else
@@ -78,11 +80,17 @@ for GPU_ID in $GPU_LIST; do
                 fi
             fi
             
-            # 检查是否成功开始训练（出现 Epoch 0）
-            if tail -20 $LOG_FILE | grep -q "Epoch 0:.*%"; then
+            # 检查是否出现 Epoch 0
+            if [ "$EPOCH_STARTED" = false ] && tail -20 $LOG_FILE | grep -q "Epoch 0:.*%"; then
+                EPOCH_STARTED=true
+                echo "  ✓ Epoch 0 已开始，继续监控稳定性..."
+            fi
+            
+            # 如果已经开始训练且运行超过 3 分钟（180秒），认为稳定
+            if [ "$EPOCH_STARTED" = true ] && [ $i -ge 180 ]; then
                 SUCCESS=true
                 echo ""
-                echo "✅ 训练成功启动！"
+                echo "✅ 训练稳定运行 3 分钟，确认成功！"
                 echo "========================================"
                 echo "配置信息:"
                 echo "  GPU: $GPU_ID"
@@ -94,7 +102,20 @@ for GPU_ID in $GPU_LIST; do
                 echo "  PID: $TRAIN_PID"
                 echo "========================================"
                 echo ""
-                echo "📊 实时监控训练进度:"
+                echo "📊 开始实时显示训练日志（按 Ctrl+C 退出查看，训练继续后台运行）"
+                echo ""
+                sleep 2
+                
+                # 实时显示训练日志
+                tail -f $LOG_FILE
+                
+                # 如果用户 Ctrl+C 退出，显示后续监控命令
+                echo ""
+                echo "========================================"
+                echo "训练仍在后台运行中"
+                echo "========================================"
+                echo ""
+                echo "📊 重新查看训练进度:"
                 echo "  tail -f $LOG_FILE"
                 echo ""
                 echo "🛑 停止训练:"
@@ -104,15 +125,12 @@ for GPU_ID in $GPU_LIST; do
                 echo "  watch -n 1 nvidia-smi"
                 echo ""
                 
-                # 显示初始训练日志
-                tail -30 $LOG_FILE
-                
                 exit 0
             fi
             
-            # 每 10 秒显示一次进度
-            if [ $((i % 10)) -eq 0 ]; then
-                echo "  等待中... ${i}s"
+            # 每 15 秒显示一次进度
+            if [ $((i % 15)) -eq 0 ]; then
+                echo "  等待中... ${i}s (Epoch started: $EPOCH_STARTED)"
             fi
         done
         
