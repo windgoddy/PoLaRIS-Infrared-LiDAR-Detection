@@ -19,7 +19,10 @@ echo ""
 
 # 1. 先检查初始化是否正确
 echo "步骤 1/3: 验证模型初始化..."
-cd /Users/fengshendada/PycharmProjects/PoLaRIS-Infrared-LiDAR-Detection/model_Mamba
+# Get script directory and project root
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MODEL_MAMBA_DIR="$(dirname "$SCRIPT_DIR")"
+cd "$MODEL_MAMBA_DIR"
 python3 scripts/check_initialization.py
 
 if [ $? -ne 0 ]; then
