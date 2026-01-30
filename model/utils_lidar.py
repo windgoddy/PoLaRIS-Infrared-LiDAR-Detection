@@ -30,7 +30,8 @@ class PoLaRISTrainLoader(Dataset):
         super(PoLaRISTrainLoader, self).__init__()
 
         self.transform = transform
-        self._items = img_id
+        # Normalize all item ids to strings to avoid type errors when building paths
+        self._items = [str(i) for i in img_id]
         self.masks = os.path.join(dataset_dir, 'masks')
         self.images = os.path.join(dataset_dir, image_folder)
         self.lidar_roi = os.path.join(dataset_dir, 'lidar_roi')
@@ -301,7 +302,8 @@ class PoLaRISTestLoader(Dataset):
         super(PoLaRISTestLoader, self).__init__()
 
         self.transform = transform
-        self._items = img_id
+        # Normalize all item ids to strings to avoid type errors when building paths
+        self._items = [str(i) for i in img_id]
         self.masks = os.path.join(dataset_dir, 'masks')
         self.images = os.path.join(dataset_dir, image_folder)
         self.lidar_roi = os.path.join(dataset_dir, 'lidar_roi')
