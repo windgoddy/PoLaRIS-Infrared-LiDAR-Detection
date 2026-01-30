@@ -31,13 +31,19 @@ def selective_scan_mamba_v1_2(x, delta, A, B, C, D):
         A: State transition matrix (D, D_state)
         B: Input matrix (B, L, D_state)
         C: Output matrix (B, L, D_state)
-        D: Skip connection (D,)
+        D: Skip connection (D,) - can be tensor or parameter
     
     Returns:
         y: Output tensor (B, D, L)
     """
-    B_batch, D, L = x.shape
+    B_batch, D_dim, L = x.shape
     D_state = A.shape[1]
+    
+    # Ensure D is a tensor
+    if not isinstance(D, torch.Tensor):
+        D = torch.tensor(D, device=x.device, dtype=x.dtype)
+    if D.dim() == 0:
+        D = D.unsqueeze(0)
     
     # Transpose delta to (B, D, L)
     delta_transposed = delta.transpose(1, 2)  # (B, D, L)
@@ -50,12 +56,12 @@ def selective_scan_mamba_v1_2(x, delta, A, B, C, D):
     
     # Call mamba_ssm 1.2.0
     y = selective_scan_fn(
-        x,                  # u: (batch, dim, seqlen)
-        delta_transposed,   # delta: (batch, dim, seqlen)
-        A,                  # A: (dim, dstate)
-        B_reshaped,         # B: (batch, n_groups, dstate, seqlen)
-        C_reshaped,         # C: (batch, n_groups, dstate, seqlen)
-        D,                  # D: (dim,)
+        x.contiguous(),                  # u: (batch, dim, seqlen)
+        delta_transposed.contiguous(),   # delta: (batch, dim, seqlen)
+        A.contiguous(),                  # A: (dim, dstate)
+        B_reshaped.contiguous(),         # B: (batch, n_groups, dstate, seqlen)
+        C_reshaped.contiguous(),         # C: (batch, n_groups, dstate, seqlen)
+        D.contiguous(),                  # D: (dim,)
         z=None,
         delta_bias=None,
         delta_softplus=False,
@@ -67,7 +73,7 @@ def selective_scan_mamba_v1_2(x, delta, A, B, C, D):
 
 def selective_scan_pytorch_native(x, delta, A, B, C):
     """
-    PyTorch native implementation of selective scan (fallback).
+    Memory-efficient PyTorch native implementation of selective scan (fallback).
     
     Args:
         x: Input tensor (B, D, L)
@@ -82,23 +88,31 @@ def selective_scan_pytorch_native(x, delta, A, B, C):
     B_batch, D, L = x.shape
     D_state = A.shape[1]
     
-    # Expand A for batch processing
-    A_expanded = A.unsqueeze(0).expand(B_batch, -1, -1)  # (B, D, D_state)
-    
-    # Compute deltaA and deltaB
-    deltaA = torch.einsum('bdt,dn->bdtn', delta, A)  # (B, D, L, D_state)
-    A_bar = torch.exp(deltaA)  # (B, D, L, D_state)
-    
-    deltaB_u = torch.einsum('bdt,bnt,bdt->bdtn', delta, B, x)  # (B, D, L, D_state)
-    
     # Initialize state
     h = torch.zeros(B_batch, D, D_state, device=x.device, dtype=x.dtype)
     
-    # Recurrent computation
+    # Recurrent computation (avoid large intermediate tensors)
     ys = []
     for t in range(L):
-        h = A_bar[:, :, t] * h + deltaB_u[:, :, t]
-        y_t = torch.einsum('bdn,bn->bd', h, C[:, :, t])
+        # Compute A_bar and deltaB_u for this timestep only
+        delta_t = delta[:, :, t]  # (B, D)
+        x_t = x[:, :, t]  # (B, D)
+        B_t = B[:, :, t]  # (B, D_state)
+        C_t = C[:, :, t]  # (B, D_state)
+        
+        # A_bar = exp(delta * A)  (B, D, D_state)
+        # Avoid materializing full (B, D, L, D_state) tensor
+        deltaA_t = delta_t.unsqueeze(-1) * A.unsqueeze(0)  # (B, D, D_state)
+        A_bar_t = torch.exp(deltaA_t)  # (B, D, D_state)
+        
+        # deltaB_u = delta * B * x  (B, D, D_state)
+        deltaB_u_t = delta_t.unsqueeze(-1) * B_t.unsqueeze(1) * x_t.unsqueeze(-1)  # (B, D, D_state)
+        
+        # State update
+        h = A_bar_t * h + deltaB_u_t  # (B, D, D_state)
+        
+        # Output
+        y_t = torch.einsum('bdn,bn->bd', h, C_t)  # (B, D)
         ys.append(y_t)
     
     y = torch.stack(ys, dim=2)  # (B, D, L)
