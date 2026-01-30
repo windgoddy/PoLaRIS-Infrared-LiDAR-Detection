@@ -27,13 +27,8 @@ import torch.nn.functional as F
 from einops import rearrange
 import math
 
-# Try to import mamba_ssm for efficient implementation
-try:
-    from mamba_ssm.ops.selective_scan_interface import selective_scan_fn
-    MAMBA_AVAILABLE = True
-except ImportError:
-    MAMBA_AVAILABLE = False
-    print("[WARNING] mamba_ssm not available. Using PyTorch native fallback (slower).")
+# Use compatibility layer for mamba_ssm
+from .mamba_compat import selective_scan_compat, MAMBA_AVAILABLE
 
 
 class CrossScan(nn.Module):
@@ -286,25 +281,15 @@ class SS2D(nn.Module):
         # Get A matrix
         A = -torch.exp(self.A_log.float())  # (D, D_state)
 
-        if MAMBA_AVAILABLE:
-            # Use efficient mamba_ssm kernel
-            # Note: A should be (D, D_state), not expanded for mamba_ssm 1.2.0+
-            y = selective_scan_fn(
-                x_flat.transpose(1, 2),  # (B*K, L, D)
-                delta,
-                A,  # Keep original shape (D, D_state)
-                B_ssm,
-                C_ssm,
-                self.D.float(),
-                z=None,
-                delta_softplus=False,  # Already applied
-            )  # (B*K, L, D)
-            y = y.transpose(1, 2)  # (B*K, D, L)
-        else:
-            # PyTorch native fallback (slower)
-            y = self._selective_scan_pytorch(
-                x_flat, delta.transpose(1, 2), A, B_ssm, C_ssm
-            )  # (B*K, D, L)
+        # Use compatibility layer (handles both mamba_ssm and PyTorch native)
+        y = selective_scan_compat(
+            x_flat,       # (B*K, D, L)
+            delta,        # (B*K, L, D)
+            A,            # (D, D_state)
+            B_ssm,        # (B*K, L, D_state)
+            C_ssm,        # (B*K, L, D_state)
+            self.D.float() if MAMBA_AVAILABLE else None,  # D only for mamba_ssm
+        )  # (B*K, D, L)
 
         # Reshape back
         y = rearrange(y, '(b k) d l -> b k d l', b=B, k=K)
