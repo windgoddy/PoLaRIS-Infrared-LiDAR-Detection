@@ -288,10 +288,11 @@ class SS2D(nn.Module):
 
         if MAMBA_AVAILABLE:
             # Use efficient mamba_ssm kernel
+            # Note: A should be (D, D_state), not expanded for mamba_ssm 1.2.0+
             y = selective_scan_fn(
                 x_flat.transpose(1, 2),  # (B*K, L, D)
                 delta,
-                A.unsqueeze(0).expand(B * K, -1, -1),
+                A,  # Keep original shape (D, D_state)
                 B_ssm,
                 C_ssm,
                 self.D.float(),
