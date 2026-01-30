@@ -25,6 +25,7 @@ import os
 import sys
 import argparse
 import csv
+import signal
 from collections import defaultdict
 from PIL import Image
 import cv2
@@ -471,6 +472,9 @@ class Trainer:
         print(f"{'=' * 60}\n")
 
         for epoch in range(self.args.start_epoch, self.args.epochs):
+            # 保存当前 epoch 用于信号处理
+            self.current_epoch = epoch
+            
             # Training
             train_loss = self.training(epoch)
 
@@ -514,6 +518,43 @@ if __name__ == '__main__':
     args = parse_args()
     set_seed(args.seed)
 
+    # 全局标志用于优雅退出
+    interrupted = False
+    trainer_instance = None
+
+    def signal_handler(sig, frame):
+        """处理 Ctrl+C 信号，优雅保存 checkpoint"""
+        global interrupted, trainer_instance
+        if interrupted:
+            print("\n\n⚠️  再次按 Ctrl+C 强制退出（不保存）")
+            sys.exit(1)
+        
+        interrupted = True
+        print("\n\n" + "="*60)
+        print("⚠️  收到中断信号 (Ctrl+C)")
+        print("="*60)
+        print("正在保存当前进度...")
+        
+        if trainer_instance is not None:
+            # 保存紧急 checkpoint
+            checkpoint_path = os.path.join(args.save_dir, 'checkpoint_interrupted.pth')
+            model_state = trainer_instance.net.module.state_dict() if trainer_instance.use_multi_gpu else trainer_instance.net.state_dict()
+            torch.save({
+                'epoch': getattr(trainer_instance, 'current_epoch', 0),
+                'model_state_dict': model_state,
+                'optimizer_state_dict': trainer_instance.optimizer.state_dict(),
+            }, checkpoint_path)
+            print(f"✅ Checkpoint 已保存: {checkpoint_path}")
+        
+        print("="*60)
+        print("训练已停止。可使用 checkpoint_interrupted.pth 恢复训练。")
+        print("="*60)
+        sys.exit(0)
+
+    # 注册信号处理器
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
     # Set GPU
     if torch.cuda.is_available():
         os.environ['CUDA_VISIBLE_DEVICES'] = args.gpus
@@ -523,4 +564,10 @@ if __name__ == '__main__':
 
     # Start training
     trainer = Trainer(args)
-    trainer.run()
+    trainer_instance = trainer  # 保存到全局变量用于信号处理
+    
+    try:
+        trainer.run()
+    except KeyboardInterrupt:
+        # 这个不会触发，因为信号处理器会先捕获
+        pass

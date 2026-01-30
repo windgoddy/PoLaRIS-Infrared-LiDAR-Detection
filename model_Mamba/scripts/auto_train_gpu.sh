@@ -1,12 +1,56 @@
 #!/bin/bash
 # 自动选择 GPU 并启动训练，OOM 时自动切换到下一个 GPU
 # 使用方法: bash scripts/auto_train_gpu.sh
+# Ctrl+C: 优雅停止训练（保存 checkpoint）
 
 set -e
+
+# 优雅退出处理
+TRAIN_PID=""
+TAIL_PID=""
+
+cleanup() {
+    echo ""
+    echo "⚠️  收到中断信号，正在优雅停止训练..."
+    
+    # 停止 tail
+    if [ -n "$TAIL_PID" ] && ps -p $TAIL_PID > /dev/null 2>&1; then
+        kill $TAIL_PID 2>/dev/null || true
+        echo "  ✓ 已停止日志显示"
+    fi
+    
+    # 向训练进程发送 SIGINT（让它有机会保存 checkpoint）
+    if [ -n "$TRAIN_PID" ] && ps -p $TRAIN_PID > /dev/null 2>&1; then
+        echo "  ⏳ 正在等待训练进程保存 checkpoint（PID: $TRAIN_PID）..."
+        kill -INT $TRAIN_PID 2>/dev/null || true
+        
+        # 等待最多 30 秒让它保存
+        for i in {1..30}; do
+            if ! ps -p $TRAIN_PID > /dev/null 2>&1; then
+                echo "  ✓ 训练进程已优雅退出"
+                exit 0
+            fi
+            sleep 1
+        done
+        
+        # 如果 30 秒后还没退出，强制终止
+        echo "  ⚠️  超时，强制终止..."
+        kill -9 $TRAIN_PID 2>/dev/null || true
+    fi
+    
+    echo "  ✓ 清理完成"
+    exit 0
+}
+
+# 捕获 Ctrl+C (SIGINT) 和 SIGTERM
+trap cleanup SIGINT SIGTERM
 
 echo "========================================"
 echo "PoLaRIS-Mamba 自动 GPU 训练启动器"
 echo "========================================"
+echo ""
+echo "💡 提示: 按 Ctrl+C 可优雅停止训练（会保存 checkpoint）"
+echo ""
 
 # 训练参数配置
 DATASET="Pohang-Canal-3k"

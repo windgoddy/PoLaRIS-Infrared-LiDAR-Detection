@@ -178,9 +178,10 @@ class SS2D(nn.Module):
 
         # A: state transition matrix (D_inner, D_state)
         # Initialize with -exp(uniform(log(0.001), log(0.1)))
-        A = torch.randn(self.d_inner, self.d_state)
-        A = -torch.exp(A * (math.log(0.1) - math.log(0.001)) + math.log(0.001))
-        self.A_log = nn.Parameter(A.log())  # Log space for numerical stability
+        # CRITICAL FIX: Use uniform distribution to avoid extreme values
+        A = torch.rand(self.d_inner, self.d_state)  # [0, 1]
+        A = -(A * (0.1 - 0.001) + 0.001)  # [-0.1, -0.001]
+        self.A_log = nn.Parameter(torch.log(-A))  # Log of positive value
         self.A_log._no_weight_decay = True
 
         # D: skip connection parameter

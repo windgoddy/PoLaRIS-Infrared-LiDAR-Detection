@@ -55,58 +55,60 @@ def diagnose_ss2d_block(block, x, name="SS2D"):
     
     check_tensor_stats(f"{name} input", x)
     
-    # Hook into internal layers
-    intermediates = {}
+    # Check parameters first
+    print(f"\n  参数检查:")
+    for param_name, param in block.named_parameters():
+        has_nan = torch.isnan(param).any().item()
+        has_inf = torch.isinf(param).any().item()
+        if has_nan or has_inf:
+            print(f"    ❌ {param_name}: 参数包含 NaN/Inf")
+        else:
+            norm_val = param.norm().item()
+            if norm_val > 1000 or norm_val < 1e-6:
+                print(f"    ⚠️  {param_name}: norm={norm_val:.4e} (异常)")
+            else:
+                print(f"    ✅ {param_name}: norm={norm_val:.4f}")
     
-    def make_hook(layer_name):
-        def hook(module, input, output):
-            if isinstance(output, torch.Tensor):
-                intermediates[layer_name] = output.detach()
-            elif isinstance(output, tuple) and len(output) > 0:
-                intermediates[layer_name] = output[0].detach()
-        return hook
-    
-    hooks = []
-    
-    # Register hooks on key components
-    if hasattr(block, 'norm'):
-        hooks.append(block.norm.register_forward_hook(make_hook('norm')))
-    if hasattr(block, 'in_proj'):
-        hooks.append(block.in_proj.register_forward_hook(make_hook('in_proj')))
-    if hasattr(block, 'conv2d'):
-        hooks.append(block.conv2d.register_forward_hook(make_hook('conv2d')))
-    if hasattr(block, 'act'):
-        hooks.append(block.act.register_forward_hook(make_hook('act')))
-    
-    # Forward
+    # Manual step-by-step forward
+    print(f"\n  逐步 forward:")
     try:
         with torch.no_grad():
-            output = block(x)
-        
-        check_tensor_stats(f"{name} output", output)
-        
-        # Check intermediates
-        print(f"\n  中间层:")
-        for layer_name, tensor in intermediates.items():
-            check_tensor_stats(layer_name, tensor, prefix="    ")
-        
-        # Check parameters
-        print(f"\n  参数检查:")
-        for param_name, param in block.named_parameters():
-            has_nan = torch.isnan(param).any().item()
-            has_inf = torch.isinf(param).any().item()
-            if has_nan or has_inf:
-                print(f"    ❌ {param_name}: 参数包含 NaN/Inf")
+            # Step 1: Norm
+            if hasattr(block, 'norm'):
+                x_norm = block.norm(x)
+                check_tensor_stats("after norm", x_norm, prefix="    ")
             else:
-                print(f"    ✅ {param_name}: OK (norm={param.norm().item():.4f})")
-        
+                x_norm = x
+            
+            # Step 2: in_proj
+            if hasattr(block, 'in_proj'):
+                x_proj = block.in_proj(x_norm)
+                check_tensor_stats("after in_proj", x_proj, prefix="    ")
+            else:
+                x_proj = x_norm
+            
+            # Step 3: conv2d (if exists)
+            if hasattr(block, 'conv2d'):
+                x_conv = block.conv2d(x_proj)
+                check_tensor_stats("after conv2d", x_conv, prefix="    ")
+            else:
+                x_conv = x_proj
+            
+            # Step 4: act
+            if hasattr(block, 'act'):
+                x_act = block.act(x_conv)
+                check_tensor_stats("after activation", x_act, prefix="    ")
+            else:
+                x_act = x_conv
+            
+            # Step 5: full forward to see where NaN appears
+            output = block(x)
+            check_tensor_stats(f"{name} final output", output)
+            
     except Exception as e:
-        print(f"  ❌ Forward 失败: {e}")
+        print(f"    ❌ Forward 失败: {e}")
         import traceback
         traceback.print_exc()
-    finally:
-        for hook in hooks:
-            hook.remove()
 
 
 def diagnose_vmamba_block(block, x, name="VSSBlock"):
@@ -182,9 +184,11 @@ def main():
     if hasattr(model, 'stages') and len(model.stages) > 0:
         stage_0 = model.stages[0]
         
+        print(f"\nStage 0 类型: {type(stage_0)}")
+        
         # Check if stage is a Sequential of VSSBlocks
         if isinstance(stage_0, nn.Sequential):
-            print(f"\nStage 0 包含 {len(stage_0)} 个 blocks")
+            print(f"Stage 0 包含 {len(stage_0)} 个 blocks")
             
             x_current = x
             for i, block in enumerate(stage_0):
@@ -212,7 +216,8 @@ def main():
                     traceback.print_exc()
                     break
         else:
-            # Single block
+            # Single block or other structure - diagnose it directly
+            print(f"Stage 0 不是 Sequential，直接诊断")
             diagnose_vmamba_block(stage_0, x, name="Stage_0")
     
     print(f"\n{'='*80}")
