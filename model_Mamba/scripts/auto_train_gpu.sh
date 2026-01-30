@@ -54,10 +54,10 @@ echo ""
 
 # 训练参数配置
 DATASET="Pohang-Canal-3k"
-SPLIT_METHOD="50_50_2k_new"  # 根据服务器实际存在的 split 目录
+SPLIT_METHOD="50_50_2k"  # 标准split目录
 MODEL="mamba_tiny"
 EPOCHS=1000
-LR=0.0001  # 降低学习率避免 NaN
+LR=0.00005  # 5e-5, Mamba对LR敏感，防止loss爆炸
 
 # 获取可用 GPU 列表（按空闲显存从大到小排序）
 echo ""

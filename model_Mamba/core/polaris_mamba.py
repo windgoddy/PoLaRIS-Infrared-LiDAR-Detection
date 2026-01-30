@@ -228,9 +228,9 @@ class GaussianHead(nn.Module):
         self.conv_out = nn.Conv2d(in_dim // 4, 1, kernel_size=1, bias=True)
         
         # CRITICAL: Initialize bias for heatmap head (CenterNet style)
-        # This ensures initial predictions are centered around 0.5 after sigmoid
-        # Without this, predictions are too small (near 0)
-        nn.init.constant_(self.conv_out.bias, -2.19)  # sigmoid(-2.19) ≈ 0.1
+        # Using -4.59 so sigmoid(-4.59) ≈ 0.01 (lower than -2.19→0.1)
+        # This prevents massive background loss (99.9% of pixels are background)
+        nn.init.constant_(self.conv_out.bias, -4.59)  # sigmoid(-4.59) ≈ 0.01
 
         # Upsampling (bilinear interpolation)
         self.upsample = nn.Upsample(
@@ -376,10 +376,11 @@ class PoLaRIS_Mamba(nn.Module):
         """Special initialization for Gaussian Head's final layer."""
         if hasattr(self, 'head') and hasattr(self.head, 'conv_out'):
             if isinstance(self.head.conv_out, nn.Conv2d):
-                # CRITICAL: Set bias to -2.19 so sigmoid(-2.19) ≈ 0.1
+                # CRITICAL: Set bias to -4.59 so sigmoid(-4.59) ≈ 0.01
                 # This prevents massive loss from background pixels on first epoch
-                nn.init.constant_(self.head.conv_out.bias, -2.19)
-                print("✅ Gaussian Head initialized with bias=-2.19 (sigmoid ≈ 0.1)")
+                # Lower than -2.19 (→0.1) to further reduce initial loss
+                nn.init.constant_(self.head.conv_out.bias, -4.59)
+                print("✅ Gaussian Head initialized with bias=-4.59 (sigmoid ≈ 0.01)")
 
     def forward(self, ir_img, lidar_img=None):
         """

@@ -106,8 +106,8 @@ def parse_args():
                         help='Training batch size')
     parser.add_argument('--test_batch_size', type=int, default=4,
                         help='Test batch size')
-    parser.add_argument('--lr', type=float, default=1e-3,
-                        help='Initial learning rate')
+    parser.add_argument('--lr', type=float, default=5e-5,
+                        help='Initial learning rate (5e-5, Mamba is sensitive to LR)')
     parser.add_argument('--min_lr', type=float, default=1e-6,
                         help='Minimum learning rate')
     parser.add_argument('--weight_decay', type=float, default=1e-4,

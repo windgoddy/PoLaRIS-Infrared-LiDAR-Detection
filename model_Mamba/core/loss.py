@@ -92,10 +92,20 @@ class GaussianFocalLoss(nn.Module):
         if self.reduction == 'sum':
             return loss.sum()
         elif self.reduction == 'mean':
-            # Use max(1.0, num_pos) for more stable normalization
-            # When num_pos=0, this normalizes by 1 instead of huge total_pixels
-            # This prevents gradient explosion on background-only batches
-            return loss.sum() / max(1.0, num_pos)
+            if num_pos == 0:
+                # No positive samples: normalize by total pixels to avoid huge loss
+                total_pixels = pred.shape[0] * pred.shape[2] * pred.shape[3]
+                return loss.sum() / total_pixels
+            else:
+                # CRITICAL FIX: Reduce neg_loss weight to prevent "all-black" prediction
+                # Split loss into pos and neg components
+                pos_loss_val = (pos_loss * pos_mask).sum()
+                neg_loss_val = (neg_loss * neg_mask).sum()
+                
+                # Downweight negative loss by 0.1 (CenterNet-style)
+                # This prevents background pixels from overwhelming the few positive ones
+                loss_combined = -(pos_loss_val + 0.1 * neg_loss_val) / num_pos
+                return loss_combined
         else:
             raise ValueError(f"Unsupported reduction: {self.reduction}")
 
