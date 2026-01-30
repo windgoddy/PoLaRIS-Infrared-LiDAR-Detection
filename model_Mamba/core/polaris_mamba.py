@@ -226,6 +226,11 @@ class GaussianHead(nn.Module):
 
         # Final prediction layer
         self.conv_out = nn.Conv2d(in_dim // 4, 1, kernel_size=1, bias=True)
+        
+        # CRITICAL: Initialize bias for heatmap head (CenterNet style)
+        # This ensures initial predictions are centered around 0.5 after sigmoid
+        # Without this, predictions are too small (near 0)
+        nn.init.constant_(self.conv_out.bias, -2.19)  # sigmoid(-2.19) ≈ 0.1
 
         # Upsampling (bilinear interpolation)
         self.upsample = nn.Upsample(

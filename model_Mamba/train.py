@@ -138,7 +138,7 @@ def parse_args():
                         help='Save checkpoint every N epochs')
 
     # Evaluation
-    parser.add_argument('--peak_threshold', type=float, default=0.5,
+    parser.add_argument('--peak_threshold', type=float, default=0.05,
                         help='Threshold for peak detection')
 
     args = parser.parse_args()
