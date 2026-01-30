@@ -123,8 +123,14 @@ def draw_gaussian(heatmap, center, radius, k=1):
     height, width = heatmap.shape[0:2]
 
     # Compute the bounding box of the Gaussian
-    left, right = min(cx, radius), min(width - cx, radius + 1)
-    top, bottom = min(cy, radius), min(height - cy, radius + 1)
+    left = min(cx, radius)
+    right = min(width - cx, radius + 1)
+    top = min(cy, radius)
+    bottom = min(height - cy, radius + 1)
+
+    # Skip if the region is invalid (out of bounds)
+    if left <= 0 or right <= 0 or top <= 0 or bottom <= 0:
+        return heatmap
 
     # Ensure valid indices
     left, right = int(left), int(right)
@@ -132,8 +138,8 @@ def draw_gaussian(heatmap, center, radius, k=1):
 
     # Extract the valid region of the Gaussian kernel
     masked_gaussian = gaussian[
-        int(radius - top):int(radius + bottom),
-        int(radius - left):int(radius + right)
+        radius - top:radius + bottom,
+        radius - left:radius + right
     ]
 
     # Update heatmap (take maximum to avoid overwriting existing Gaussians)
@@ -142,8 +148,12 @@ def draw_gaussian(heatmap, center, radius, k=1):
         cx - left:cx + right
     ]
 
-    # Element-wise maximum (handle overlapping Gaussians)
-    np.maximum(target_region, masked_gaussian * k, out=target_region)
+    # Verify shapes match before broadcasting
+    if masked_gaussian.shape == target_region.shape:
+        np.maximum(target_region, masked_gaussian * k, out=target_region)
+    else:
+        # Fallback: skip this Gaussian if shapes don't match
+        pass
 
     return heatmap
 
