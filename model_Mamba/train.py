@@ -230,8 +230,23 @@ class Trainer:
             print("⚠️  CUDA not available, using CPU (not recommended)")
 
         # Load dataset
+        # Note: dataset_dir is the base directory with images/masks/lidar_roi
+        # load_dataset reads train.txt from root/dataset/split_method/
         dataset_dir = os.path.join(args.root, args.dataset)
         train_img_ids, val_img_ids, _ = load_dataset(args.root, args.dataset, args.split_method)
+        
+        # Verify dataset structure
+        images_path = os.path.join(dataset_dir, args.image_folder)
+        if not os.path.exists(images_path):
+            raise FileNotFoundError(
+                f"Images directory not found: {images_path}\n"
+                f"Expected structure: {dataset_dir}/{{images,masks,lidar_roi,labels}}/\n"
+                f"Split files should be in: {args.root}/{args.dataset}/{args.split_method}/{{train,test}}.txt"
+            )
+        print(f"✓ Dataset directory: {dataset_dir}")
+        print(f"✓ Images: {images_path}")
+        print(f"✓ Train samples: {len(train_img_ids)}")
+        print(f"✓ Val samples: {len(val_img_ids)}")
 
         # Base loaders
         base_train_loader = PoLaRISTrainLoader(
