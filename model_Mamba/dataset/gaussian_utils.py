@@ -106,6 +106,15 @@ def draw_gaussian(heatmap, center, radius, k=1):
     Returns:
         heatmap: (H, W) updated heatmap
     """
+    # Ensure radius is a valid positive integer
+    radius = max(0, int(radius))
+    if radius == 0:
+        # Degenerate case: just mark the center pixel
+        cx, cy = int(center[0]), int(center[1])
+        if 0 <= cy < heatmap.shape[0] and 0 <= cx < heatmap.shape[1]:
+            heatmap[cy, cx] = max(heatmap[cy, cx], k)
+        return heatmap
+
     diameter = int(2 * radius + 1)
     gaussian = gaussian_2d((diameter, diameter), sigma=radius / 3)  # sigma ≈ radius / 3
 
