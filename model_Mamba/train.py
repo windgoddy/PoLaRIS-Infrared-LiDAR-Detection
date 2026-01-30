@@ -440,14 +440,6 @@ class Trainer:
                 fp = (pred_binary * (1 - gt_binary)).sum().item()
                 fn = ((1 - pred_binary) * gt_binary).sum().item()
 
-        
-        # Print debug stats for first epoch
-        if epoch == 0 and pred_stats['min']:
-            print(f"\n  📊 Debug Statistics (first 5 batches):")
-            print(f"     Pred: min={min(pred_stats['min']):.6f}, max={max(pred_stats['max']):.6f}, mean={sum(pred_stats['mean'])/len(pred_stats['mean']):.6f}")
-            print(f"     GT:   min={min(gt_stats['min']):.6f}, max={max(gt_stats['max']):.6f}, mean={sum(gt_stats['mean'])/len(gt_stats['mean']):.6f}")
-            print(f"     GT positive pixels: {sum(gt_stats['num_pos'])/len(gt_stats['num_pos']):.1f} per batch")
-            print(f"     Threshold: {self.args.peak_threshold}")
                 precision = tp / (tp + fp + 1e-7)
                 recall = tp / (tp + fn + 1e-7)
 
@@ -458,6 +450,18 @@ class Trainer:
 
         avg_iou = iou_sum / count
         avg_precision = precision_sum / count
+        avg_recall = recall_sum / count
+
+        print(f"\n[Epoch {epoch}] Test Loss: {loss_meter.avg:.6f}, IoU: {avg_iou:.4f}, "
+              f"Precision: {avg_precision:.4f}, Recall: {avg_recall:.4f}")
+        
+        # Print debug stats for first epoch
+        if epoch == 0 and pred_stats['min']:
+            print(f"\n  📊 Debug Statistics (first 5 batches):")
+            print(f"     Pred: min={min(pred_stats['min']):.6f}, max={max(pred_stats['max']):.6f}, mean={sum(pred_stats['mean'])/len(pred_stats['mean']):.6f}")
+            print(f"     GT:   min={min(gt_stats['min']):.6f}, max={max(gt_stats['max']):.6f}, mean={sum(gt_stats['mean'])/len(gt_stats['mean']):.6f}")
+            print(f"     GT positive pixels: {sum(gt_stats['num_pos'])/len(gt_stats['num_pos']):.1f} per batch")
+            print(f"     Threshold: {self.args.peak_threshold}")
         avg_recall = recall_sum / count
 
         print(f"\n[Epoch {epoch}] Test Loss: {loss_meter.avg:.6f}, IoU: {avg_iou:.4f}, "
