@@ -106,8 +106,8 @@ def parse_args():
                         help='Training batch size')
     parser.add_argument('--test_batch_size', type=int, default=4,
                         help='Test batch size')
-    parser.add_argument('--lr', type=float, default=5e-5,
-                        help='Initial learning rate (5e-5, Mamba is sensitive to LR)')
+    parser.add_argument('--lr', type=float, default=2e-4,
+                        help='Initial learning rate (2e-4, updated 2026-01-30 for faster convergence)')
     parser.add_argument('--min_lr', type=float, default=1e-6,
                         help='Minimum learning rate')
     parser.add_argument('--weight_decay', type=float, default=1e-4,
@@ -141,8 +141,8 @@ def parse_args():
                         help='Save checkpoint every N epochs')
 
     # Evaluation
-    parser.add_argument('--peak_threshold', type=float, default=0.05,
-                        help='Threshold for peak detection (balanced for precision/recall)')
+    parser.add_argument('--peak_threshold', type=float, default=0.03,
+                        help='Threshold for peak detection (matched to bias=-3.0)')
     parser.add_argument('--adaptive_threshold', type=str, default='False',
                         help='Use adaptive threshold based on prediction distribution')
 
@@ -331,16 +331,17 @@ class Trainer:
         num_params = sum(p.numel() for p in self.net.parameters())
         print(f"✅ Model: {args.model}, Parameters: {num_params / 1e6:.2f}M")
 
-        # Loss function
+        # Loss function (updated 2026-01-30)
         if args.loss_type == 'combined':
             # Combined loss balances pixel accuracy and region overlap
+            # Updated weights to 50/50 for better balance
             self.criterion = CombinedLoss(
-                focal_weight=0.7,
-                dice_weight=0.3,
+                focal_weight=0.5,  # Updated from 0.7 to 0.5
+                dice_weight=0.5,   # Updated from 0.3 to 0.5
                 alpha=1,  # Reduced from 2 to make training easier
                 beta=args.loss_beta,
             )
-            print("✅ Using Combined Loss (Focal + Dice)")
+            print("✅ Using Combined Loss (Focal + Dice, 50/50 split)")
         else:
             # Pure Gaussian Focal Loss
             self.criterion = GaussianFocalLoss(
@@ -368,9 +369,10 @@ class Trainer:
         elif args.scheduler == 'StepLR':
             self.scheduler = lr_scheduler.StepLR(self.optimizer, step_size=50, gamma=0.5)
         
-        # Warmup settings
-        self.warmup_epochs = 5
-        self.warmup_lr_start = args.lr * 0.01  # Start from 1% of target lr
+        # Warmup settings (updated 2026-01-30)
+        # Reduced warmup epochs and increased starting lr for faster initial learning
+        self.warmup_epochs = 3  # Reduced from 5 to 3
+        self.warmup_lr_start = args.lr * 0.1  # Start from 10% of target lr (was 1%)
 
         # Metrics
         self.best_iou = 0.0
@@ -386,7 +388,11 @@ class Trainer:
         """Training loop for one epoch."""
         self.net.train()
         loss_meter = AverageMeter()
-        
+
+        # Diagnostic meters (added 2026-01-30)
+        pred_stats = {'min': [], 'max': [], 'mean': []}
+        gt_pos_counts = []
+
         # Warmup learning rate for first few epochs
         if epoch < self.warmup_epochs:
             warmup_factor = (epoch + 1) / self.warmup_epochs
@@ -407,13 +413,21 @@ class Trainer:
             # Loss
             loss = self.criterion(heatmap_pred, heatmap_gt)
 
+            # Diagnostic: collect statistics from first 5 batches
+            if i < 5:
+                with torch.no_grad():
+                    pred_stats['min'].append(heatmap_pred.min().item())
+                    pred_stats['max'].append(heatmap_pred.max().item())
+                    pred_stats['mean'].append(heatmap_pred.mean().item())
+                    gt_pos_counts.append((heatmap_gt > 0.5).sum().item())
+
             # Backward
             self.optimizer.zero_grad()
             loss.backward()
-            
+
             # Gradient clipping to prevent instability
             torch.nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=1.0)
-            
+
             self.optimizer.step()
 
             # Update meter
@@ -421,6 +435,15 @@ class Trainer:
 
             # Update tqdm
             tbar.set_postfix(loss=f'{loss_meter.avg:.6f}', lr=f'{self.optimizer.param_groups[0]["lr"]:.6f}')
+
+        # Print diagnostic statistics every 5 epochs
+        if epoch % 5 == 0 and pred_stats['min']:
+            print(f"\n  📊 Training Stats (first 5 batches, Epoch {epoch}):")
+            print(f"     Pred: min={min(pred_stats['min']):.6f}, "
+                  f"max={max(pred_stats['max']):.6f}, "
+                  f"mean={sum(pred_stats['mean'])/len(pred_stats['mean']):.6f}")
+            print(f"     GT positive pixels: {sum(gt_pos_counts)/len(gt_pos_counts):.1f} per batch")
+            print(f"     Avg loss: {loss_meter.avg:.6f}")
 
         return loss_meter.avg
 
@@ -461,20 +484,17 @@ class Trainer:
                 loss_meter.update(loss.item(), ir_img.size(0))
                 
                 # Visualization debug: save first batch of each epoch
-                if batch_idx == 0:
-                    import torchvision
-                    # Create visualization directory
-                    vis_dir = os.path.join(self.args.save_dir, 'vis_debug')
-                    os.makedirs(vis_dir, exist_ok=True)
-                    
-                    # Concatenate GT and Pred horizontally for easy comparison
-                    # GT on left, Pred on right
-                    debug_img = torch.cat([heatmap_gt[0], heatmap_pred[0]], dim=2)  # [1, H, W*2]
-                    torchvision.utils.save_image(
-                        debug_img,
-                        os.path.join(vis_dir, f'epoch_{epoch:04d}.png'),
-                        normalize=True
-                    )
+                # DISABLED: Disk space issue - uncomment when needed
+                # if batch_idx == 0:
+                #     import torchvision
+                #     vis_dir = os.path.join(self.args.save_dir, 'vis_debug')
+                #     os.makedirs(vis_dir, exist_ok=True)
+                #     debug_img = torch.cat([heatmap_gt[0], heatmap_pred[0]], dim=2)
+                #     torchvision.utils.save_image(
+                #         debug_img,
+                #         os.path.join(vis_dir, f'epoch_{epoch:04d}.png'),
+                #         normalize=True
+                #     )
 
                 # Compute metrics (simple binary IoU)
                 # Use adaptive threshold if enabled

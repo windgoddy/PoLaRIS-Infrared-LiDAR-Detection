@@ -226,11 +226,19 @@ class GaussianHead(nn.Module):
 
         # Final prediction layer
         self.conv_out = nn.Conv2d(in_dim // 4, 1, kernel_size=1, bias=True)
-        
+
         # CRITICAL: Initialize bias for heatmap head (CenterNet style)
-        # Using -4.59 so sigmoid(-4.59) ≈ 0.01 (lower than -2.19→0.1)
-        # This prevents massive background loss (99.9% of pixels are background)
-        nn.init.constant_(self.conv_out.bias, -4.59)  # sigmoid(-4.59) ≈ 0.01
+        # Updated 2026-01-30: Use -2.5 as balanced initialization
+        #
+        # Bias value determines initial prediction via sigmoid(bias):
+        # - bias = -2.5 → sigmoid ≈ 0.076 (good starting point)
+        # - bias = -3.0 → sigmoid ≈ 0.047 (too conservative, may cause slow learning)
+        # - bias = -2.0 → sigmoid ≈ 0.119 (more aggressive, faster convergence)
+        #
+        # The goal is to match the data distribution (~0.002 positive ratio)
+        # while still giving the model enough gradient signal to learn.
+        # Starting slightly higher (0.076) prevents "all-black" collapse.
+        nn.init.constant_(self.conv_out.bias, -2.5)  # sigmoid(-2.5) ≈ 0.076
 
         # Upsampling (bilinear interpolation)
         self.upsample = nn.Upsample(
@@ -376,11 +384,11 @@ class PoLaRIS_Mamba(nn.Module):
         """Special initialization for Gaussian Head's final layer."""
         if hasattr(self, 'head') and hasattr(self.head, 'conv_out'):
             if isinstance(self.head.conv_out, nn.Conv2d):
-                # CRITICAL: Set bias to -4.59 so sigmoid(-4.59) ≈ 0.01
-                # This prevents massive loss from background pixels on first epoch
-                # Lower than -2.19 (→0.1) to further reduce initial loss
-                nn.init.constant_(self.head.conv_out.bias, -4.59)
-                print("✅ Gaussian Head initialized with bias=-4.59 (sigmoid ≈ 0.01)")
+                # CRITICAL: Set bias to -2.5 so sigmoid(-2.5) ≈ 0.076
+                # Updated 2026-01-30: Slightly higher than before to prevent "all-black" predictions
+                # This gives stronger initial gradient signal for rare positive samples
+                nn.init.constant_(self.head.conv_out.bias, -2.5)
+                print("✅ Gaussian Head initialized with bias=-2.5 (sigmoid ≈ 0.076)")
 
     def forward(self, ir_img, lidar_img=None):
         """

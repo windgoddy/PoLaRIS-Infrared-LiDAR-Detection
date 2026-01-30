@@ -88,25 +88,40 @@ class GaussianFocalLoss(nn.Module):
 
         # Normalize by number of positive samples
         num_pos = pos_mask.sum()
-        
+
         if self.reduction == 'sum':
             return loss.sum()
         elif self.reduction == 'mean':
+            # CRITICAL FIX (2026-01-30): Normalize by TOTAL pixels instead of num_pos
+            # to prevent loss explosion when positive samples vary across batches.
+            #
+            # Previous issue: loss = (pos + 0.1*neg) / num_pos caused:
+            # - Batch with 1000 pos: loss ≈ 30
+            # - Batch with 500 pos:  loss ≈ 60 (2x instability!)
+            #
+            # Solution: Normalize by total pixels for stability
+            total_pixels = pred.shape[0] * pred.shape[2] * pred.shape[3]
+
             if num_pos == 0:
-                # No positive samples: normalize by total pixels to avoid huge loss
-                total_pixels = pred.shape[0] * pred.shape[2] * pred.shape[3]
+                # No positive samples: only negative loss
                 return loss.sum() / total_pixels
             else:
-                # CRITICAL FIX: Reduce neg_loss weight to prevent "all-black" prediction
-                # Split loss into pos and neg components
-                pos_loss_val = (pos_loss * pos_mask).sum()
-                neg_loss_val = (neg_loss * neg_mask).sum()
-                
-                # Downweight negative loss by 0.1 (CenterNet-style)
-                # This prevents background pixels from overwhelming the few positive ones
-                # NOTE: pos_loss and neg_loss already have negative signs in their definitions
-                # So we DON'T add another negative sign here!
-                loss_combined = (pos_loss_val + 0.1 * neg_loss_val) / num_pos
+                # Balance positive and negative loss by their relative importance
+                # Positive samples are rare (~0.2% of pixels), so weight them higher
+                pos_loss_val = pos_loss.sum()
+                neg_loss_val = neg_loss.sum()
+
+                # Method 1: Per-pixel normalization then weighted sum
+                # This ensures both pos and neg contribute equally regardless of sample count
+                pos_weight = 1.0  # Standard weight for positive
+                neg_weight = 0.1  # Reduce negative weight to 10%
+
+                pos_loss_normalized = pos_loss_val / (num_pos + 1e-7)
+                neg_loss_normalized = neg_loss_val / (total_pixels - num_pos + 1e-7)
+
+                # Weight positive loss higher (10x) to compensate for sample imbalance
+                loss_combined = 10.0 * pos_loss_normalized + neg_loss_normalized
+
                 return loss_combined
         else:
             raise ValueError(f"Unsupported reduction: {self.reduction}")
@@ -140,8 +155,11 @@ class CombinedLoss(nn.Module):
     """
     Combined Gaussian Focal Loss + Dice Loss
     Better balance between pixel-wise accuracy and region overlap
+
+    NOTE (2026-01-30): Dice loss helps prevent "all-black" predictions
+    by explicitly optimizing for overlap, complementing the focal loss.
     """
-    def __init__(self, focal_weight=0.7, dice_weight=0.3, alpha=1, beta=4):
+    def __init__(self, focal_weight=0.5, dice_weight=0.5, alpha=1, beta=4):
         super(CombinedLoss, self).__init__()
         self.focal_loss = GaussianFocalLoss(alpha=alpha, beta=beta, reduction='mean')
         self.dice_loss = DiceLoss(smooth=1.0)
