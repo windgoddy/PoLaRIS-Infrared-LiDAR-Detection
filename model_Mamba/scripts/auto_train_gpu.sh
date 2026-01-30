@@ -87,7 +87,7 @@ for GPU_ID in $GPU_LIST; do
         
         # 启动训练
         echo "🚀 启动训练..."
-        CUDA_VISIBLE_DEVICES=$GPU_ID python model_Mamba/train.py \
+        CUDA_VISIBLE_DEVICES=$GPU_ID python train.py \
             --dataset $DATASET \
             --split_method $SPLIT_METHOD \
             --model $MODEL \
