@@ -355,6 +355,9 @@ class PoLaRIS_Mamba(nn.Module):
 
         # Initialize weights
         self.apply(self._init_weights)
+        
+        # Special initialization for Gaussian Head
+        self._init_gaussian_head()
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -368,6 +371,15 @@ class PoLaRIS_Mamba(nn.Module):
         elif isinstance(m, (nn.LayerNorm, nn.BatchNorm2d)):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
+    
+    def _init_gaussian_head(self):
+        """Special initialization for Gaussian Head's final layer."""
+        if hasattr(self, 'head') and hasattr(self.head, 'conv_out'):
+            if isinstance(self.head.conv_out, nn.Conv2d):
+                # CRITICAL: Set bias to -2.19 so sigmoid(-2.19) ≈ 0.1
+                # This prevents massive loss from background pixels on first epoch
+                nn.init.constant_(self.head.conv_out.bias, -2.19)
+                print("✅ Gaussian Head initialized with bias=-2.19 (sigmoid ≈ 0.1)")
 
     def forward(self, ir_img, lidar_img=None):
         """

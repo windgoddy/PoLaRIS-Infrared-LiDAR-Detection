@@ -137,7 +137,7 @@ for GPU_ID in $GPU_LIST; do
                 EPOCH_STARTED=true
                 echo ""
                 echo "✓ Epoch 0 已开始，开始实时显示训练日志..."
-                echo "  (继续监控 3 分钟以确认稳定性)"
+                echo "  (继续监控 1 分钟以确认稳定性)"
                 echo "========================================"
                 
                 # 在后台启动 tail -f，输出到终端
@@ -145,12 +145,12 @@ for GPU_ID in $GPU_LIST; do
                 TAIL_PID=$!
             fi
             
-            # 如果已经开始训练且运行超过 3 分钟（180秒），认为稳定
-            if [ "$EPOCH_STARTED" = true ] && [ $i -ge 180 ]; then
+            # 如果已经开始训练且运行超过 1 分钟（60秒），认为稳定
+            if [ "$EPOCH_STARTED" = true ] && [ $i -ge 60 ]; then
                 SUCCESS=true
                 echo ""
                 echo "========================================"
-                echo "✅ 训练稳定运行 3 分钟，确认成功！"
+                echo "✅ 训练稳定运行 1 分钟，确认成功！"
                 echo "========================================"
                 echo "配置信息:"
                 echo "  GPU: $GPU_ID"

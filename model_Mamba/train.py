@@ -328,7 +328,10 @@ class Trainer:
             self.net = torch.nn.DataParallel(self.net, device_ids=self.gpu_ids)
 
         # Count parameters
-        num_params = su
+        num_params = sum(p.numel() for p in self.net.parameters())
+        print(f"✅ Model: {args.model}, Parameters: {num_params / 1e6:.2f}M")
+
+        # Loss function
         if args.loss_type == 'combined':
             # Combined loss balances pixel accuracy and region overlap
             self.criterion = CombinedLoss(
@@ -345,10 +348,7 @@ class Trainer:
                 beta=args.loss_beta,
                 reduction='mean',
             )
-            print("✅ Using Gaussian Focal Loss only"    alpha=1,  # Reduced from 2 to make training easier
-            beta=args.loss_beta,
-            reduction='mean',
-        )
+            print("✅ Using Gaussian Focal Loss only")
 
         # Optimizer
         if args.optimizer == 'Adam':
@@ -459,6 +459,22 @@ class Trainer:
                 # Loss
                 loss = self.criterion(heatmap_pred, heatmap_gt)
                 loss_meter.update(loss.item(), ir_img.size(0))
+                
+                # Visualization debug: save first batch of each epoch
+                if batch_idx == 0:
+                    import torchvision
+                    # Create visualization directory
+                    vis_dir = os.path.join(self.args.save_dir, 'vis_debug')
+                    os.makedirs(vis_dir, exist_ok=True)
+                    
+                    # Concatenate GT and Pred horizontally for easy comparison
+                    # GT on left, Pred on right
+                    debug_img = torch.cat([heatmap_gt[0], heatmap_pred[0]], dim=2)  # [1, H, W*2]
+                    torchvision.utils.save_image(
+                        debug_img,
+                        os.path.join(vis_dir, f'epoch_{epoch:04d}.png'),
+                        normalize=True
+                    )
 
                 # Compute metrics (simple binary IoU)
                 # Use adaptive threshold if enabled
