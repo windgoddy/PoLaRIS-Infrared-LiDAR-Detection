@@ -106,7 +106,7 @@ def parse_args():
                         help='Training batch size')
     parser.add_argument('--test_batch_size', type=int, default=4,
                         help='Test batch size')
-    parser.add_argument('--lr', type=float, default=0.0001,
+    parser.add_argument('--lr', type=float, default=1e-3,
                         help='Initial learning rate')
     parser.add_argument('--min_lr', type=float, default=1e-6,
                         help='Minimum learning rate')
@@ -138,8 +138,8 @@ def parse_args():
                         help='Save checkpoint every N epochs')
 
     # Evaluation
-    parser.add_argument('--peak_threshold', type=float, default=0.05,
-                        help='Threshold for peak detection')
+    parser.add_argument('--peak_threshold', type=float, default=0.01,
+                        help='Threshold for peak detection (lowered for training)')
 
     args = parser.parse_args()
 
@@ -326,9 +326,9 @@ class Trainer:
         num_params = sum(p.numel() for p in self.net.parameters())
         print(f"✅ Model: {args.model}, Parameters: {num_params / 1e6:.2f}M")
 
-        # Loss function
+        # Loss function (alpha=1 for easier training, lower than default 2)
         self.criterion = GaussianFocalLoss(
-            alpha=args.loss_alpha,
+            alpha=1,  # Reduced from 2 to make training easier
             beta=args.loss_beta,
             reduction='mean',
         )
@@ -341,7 +341,7 @@ class Trainer:
         elif args.optimizer == 'SGD':
             self.optimizer = optim.SGD(self.net.parameters(), lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
 
-        # Scheduler
+        # Scheduler with warmup
         if args.scheduler == 'CosineAnnealingLR':
             self.scheduler = lr_scheduler.CosineAnnealingLR(
                 self.optimizer,
@@ -350,6 +350,10 @@ class Trainer:
             )
         elif args.scheduler == 'StepLR':
             self.scheduler = lr_scheduler.StepLR(self.optimizer, step_size=50, gamma=0.5)
+        
+        # Warmup settings
+        self.warmup_epochs = 5
+        self.warmup_lr_start = args.lr * 0.01  # Start from 1% of target lr
 
         # Metrics
         self.best_iou = 0.0
@@ -365,6 +369,14 @@ class Trainer:
         """Training loop for one epoch."""
         self.net.train()
         loss_meter = AverageMeter()
+        
+        # Warmup learning rate for first few epochs
+        if epoch < self.warmup_epochs:
+            warmup_factor = (epoch + 1) / self.warmup_epochs
+            lr = self.warmup_lr_start + (self.args.lr - self.warmup_lr_start) * warmup_factor
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = lr
+            print(f"  🔥 Warmup: lr={lr:.6f} (epoch {epoch+1}/{self.warmup_epochs})")
 
         tbar = tqdm(self.train_loader, desc=f'Epoch {epoch}')
         for i, batch in enumerate(tbar):
@@ -381,6 +393,10 @@ class Trainer:
             # Backward
             self.optimizer.zero_grad()
             loss.backward()
+            
+            # Gradient clipping to prevent instability
+            torch.nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=1.0)
+            
             self.optimizer.step()
 
             # Update meter
@@ -413,8 +429,8 @@ class Trainer:
                 # Forward
                 heatmap_pred = self.net(ir_img, lidar_img)
 
-                # Collect statistics (first epoch only)
-                if epoch == 0 and batch_idx < 5:
+                # Collect statistics (first 10 epochs)
+                if epoch < 10 and batch_idx < 5:
                     pred_stats['min'].append(heatmap_pred.min().item())
                     pred_stats['max'].append(heatmap_pred.max().item())
                     pred_stats['mean'].append(heatmap_pred.mean().item())
@@ -455,9 +471,9 @@ class Trainer:
         print(f"\n[Epoch {epoch}] Test Loss: {loss_meter.avg:.6f}, IoU: {avg_iou:.4f}, "
               f"Precision: {avg_precision:.4f}, Recall: {avg_recall:.4f}")
         
-        # Print debug stats for first epoch
-        if epoch == 0 and pred_stats['min']:
-            print(f"\n  📊 Debug Statistics (first 5 batches):")
+        # Print debug stats for first 10 epochs
+        if epoch < 10 and pred_stats['min']:
+            print(f"\n  📊 Debug Statistics (first 5 batches, Epoch {epoch}):")
             print(f"     Pred: min={min(pred_stats['min']):.6f}, max={max(pred_stats['max']):.6f}, mean={sum(pred_stats['mean'])/len(pred_stats['mean']):.6f}")
             print(f"     GT:   min={min(gt_stats['min']):.6f}, max={max(gt_stats['max']):.6f}, mean={sum(gt_stats['mean'])/len(gt_stats['mean']):.6f}")
             print(f"     GT positive pixels: {sum(gt_stats['num_pos'])/len(gt_stats['num_pos']):.1f} per batch")
