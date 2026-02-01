@@ -119,8 +119,11 @@ class GaussianFocalLoss(nn.Module):
                 pos_loss_normalized = pos_loss_val / (num_pos + 1e-7)
                 neg_loss_normalized = neg_loss_val / (total_pixels - num_pos + 1e-7)
 
-                # Weight positive loss higher (10x) to compensate for sample imbalance
-                loss_combined = 10.0 * pos_loss_normalized + neg_loss_normalized
+                # Weight positive loss higher to compensate for sample imbalance
+                # UPDATED 2026-01-30 v2: Reduced from 10x to 3x to prevent over-prediction
+                # Issue: Model was predicting mean=0.5 when GT mean=0.0002 (2500x higher!)
+                # Root cause: 10x weight was too aggressive, causing model to over-predict
+                loss_combined = 3.0 * pos_loss_normalized + neg_loss_normalized
 
                 return loss_combined
         else:
@@ -317,6 +320,108 @@ class AverageMeter:
         self.sum += val * n
         self.count += n
         self.avg = self.sum / self.count
+
+
+# ======================== Binary Segmentation Losses (Scheme A) ========================
+
+class DiceLoss(nn.Module):
+    """
+    Dice Loss for Binary Segmentation.
+
+    Dice coefficient measures the overlap between prediction and ground truth.
+    It's particularly effective for handling class imbalance in segmentation tasks.
+
+    Dice = (2 * |X ∩ Y|) / (|X| + |Y|)
+    Dice Loss = 1 - Dice
+
+    Args:
+        smooth: Smoothing factor to avoid division by zero (default: 1.0)
+
+    Reference:
+        V-Net: https://arxiv.org/abs/1606.04797
+    """
+    def __init__(self, smooth=1.0):
+        super(DiceLoss, self).__init__()
+        self.smooth = smooth
+
+    def forward(self, pred, target):
+        """
+        Args:
+            pred: (B, 1, H, W) predicted probabilities in [0, 1]
+            target: (B, 1, H, W) binary ground truth in {0, 1}
+
+        Returns:
+            loss: scalar Dice loss
+        """
+        # Flatten spatial dimensions
+        pred = pred.contiguous().view(pred.size(0), -1)
+        target = target.contiguous().view(target.size(0), -1)
+
+        # Compute Dice coefficient
+        intersection = (pred * target).sum(dim=1)
+        union = pred.sum(dim=1) + target.sum(dim=1)
+
+        dice = (2.0 * intersection + self.smooth) / (union + self.smooth)
+
+        # Average over batch
+        dice = dice.mean()
+
+        # Return loss (1 - Dice)
+        return 1.0 - dice
+
+
+class BCEDiceLoss(nn.Module):
+    """
+    Combined BCE + Dice Loss for Binary Segmentation (Scheme A).
+
+    This loss combines:
+    1. Binary Cross Entropy (BCE): Pixel-wise classification accuracy
+    2. Dice Loss: Region overlap optimization
+
+    Standard configuration for medical image segmentation, crack detection,
+    and other binary segmentation tasks. Aligns with LIDAR-Mamba approach.
+
+    Args:
+        bce_weight: Weight for BCE loss component (default: 1.0)
+        dice_weight: Weight for Dice loss component (default: 3.0)
+                     Higher weight recommended for small object segmentation
+        smooth: Smoothing factor for Dice (default: 1.0)
+
+    Reference:
+        LIDAR-Mamba: https://github.com/Karl1109/LIDAR-Mamba
+    """
+    def __init__(self, bce_weight=1.0, dice_weight=3.0, smooth=1.0):
+        super(BCEDiceLoss, self).__init__()
+        # BCELoss expects probabilities in [0, 1]
+        # Since GaussianHead outputs sigmoid, we use BCELoss (not BCEWithLogitsLoss)
+        self.bce_fn = nn.BCELoss()
+        self.dice_loss = DiceLoss(smooth=smooth)
+        self.bce_weight = bce_weight
+        self.dice_weight = dice_weight
+
+    def forward(self, pred, target):
+        """
+        Args:
+            pred: (B, 1, H, W) predicted probabilities in [0, 1]
+            target: (B, 1, H, W) binary ground truth in {0, 1}
+
+        Returns:
+            loss: scalar combined loss
+        """
+        # Ensure target is float
+        target = target.float()
+
+        # Clamp predictions to avoid log(0)
+        pred = torch.clamp(pred, min=1e-7, max=1.0 - 1e-7)
+
+        # Compute individual losses
+        bce = self.bce_fn(pred, target)
+        dice = self.dice_loss(pred, target)
+
+        # Weighted combination
+        loss = self.bce_weight * bce + self.dice_weight * dice
+
+        return loss
 
 
 # ======================== Unit Test ========================
