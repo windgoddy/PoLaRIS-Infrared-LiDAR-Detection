@@ -52,12 +52,14 @@ echo ""
 echo "💡 提示: 按 Ctrl+C 可优雅停止训练（会保存 checkpoint）"
 echo ""
 
-# 训练参数配置
+# 训练参数配置 (Updated 2026-01-30)
 DATASET="Pohang-Canal-3k"
-SPLIT_METHOD="50_50_2k"  # 标准split目录
+SPLIT_METHOD="50_50_2k_new"  # Updated split directory
 MODEL="mamba_tiny"
 EPOCHS=1000
-LR=0.00005  # 5e-5, Mamba对LR敏感，防止loss爆炸
+LR=0.0002  # 2e-4, increased from 5e-5 for faster convergence (after loss fix)
+PEAK_THRESHOLD=0.5  # Increased from 0.03 to match prediction range
+SAVE_INTERVAL=0  # Disable periodic checkpoints to save disk space
 
 # 获取可用 GPU 列表（按空闲显存从大到小排序）
 echo ""
@@ -80,12 +82,12 @@ for GPU_ID in $GPU_LIST; do
     # 依次尝试不同的 batch_size
     for BATCH_SIZE in "${BATCH_SIZES[@]}"; do
         echo ""
-        echo "📝 配置: GPU=$GPU_ID, Batch Size=$BATCH_SIZE"
+        echo "📝 配置: GPU=$GPU_ID, Batch Size=$BATCH_SIZE, LR=$LR, Threshold=$PEAK_THRESHOLD"
         
         # 生成日志文件名
         LOG_FILE="training_mamba_gpu${GPU_ID}_bs${BATCH_SIZE}_$(date +%Y%m%d_%H%M%S).log"
         
-        # 启动训练
+        # 启动训练 (Updated 2026-01-30 with new parameters)
         echo "🚀 启动训练..."
         CUDA_VISIBLE_DEVICES=$GPU_ID python train.py \
             --root ../dataset \
@@ -96,6 +98,8 @@ for GPU_ID in $GPU_LIST; do
             --test_batch_size $BATCH_SIZE \
             --epochs $EPOCHS \
             --lr $LR \
+            --peak_threshold $PEAK_THRESHOLD \
+            --save_interval $SAVE_INTERVAL \
             --gpus 0 \
             > $LOG_FILE 2>&1 &
         
@@ -156,9 +160,12 @@ for GPU_ID in $GPU_LIST; do
                 echo "配置信息:"
                 echo "  GPU: $GPU_ID"
                 echo "  Batch Size: $BATCH_SIZE"
-                echo "  Dataset: $DATASET"
+                echo "  Dataset: $DATASET ($SPLIT_METHOD)"
                 echo "  Model: $MODEL"
                 echo "  Epochs: $EPOCHS"
+                echo "  Learning Rate: $LR"
+                echo "  Peak Threshold: $PEAK_THRESHOLD"
+                echo "  Save Interval: $SAVE_INTERVAL (0=disabled)"
                 echo "  Log File: $LOG_FILE"
                 echo "  PID: $TRAIN_PID"
                 echo "========================================"
