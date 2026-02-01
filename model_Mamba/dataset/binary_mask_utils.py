@@ -140,10 +140,13 @@ def load_yolo_labels(label_path):
                     cx, cy, w, h = map(float, parts[1:5])
 
                     # Validate ranges (YOLO format should be in [0, 1])
-                    if 0 <= cx <= 1 and 0 <= cy <= 1 and 0 <= w <= 1 and 0 <= h <= 1:
-                        labels.append([class_id, cx, cy, w, h])
-                    else:
-                        print(f"Warning: Invalid label in {label_path}: cx={cx}, cy={cy}, w={w}, h={h}")
+                    # Clamp out-of-bounds values instead of warning (common for edge objects)
+                    cx = max(0.0, min(1.0, cx))
+                    cy = max(0.0, min(1.0, cy))
+                    w = max(0.0, min(1.0, w))
+                    h = max(0.0, min(1.0, h))
+                    
+                    labels.append([class_id, cx, cy, w, h])
 
     except Exception as e:
         print(f"Error reading labels {label_path}: {e}")
