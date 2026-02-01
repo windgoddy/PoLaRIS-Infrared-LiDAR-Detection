@@ -144,8 +144,8 @@ def parse_args():
                         help='Save checkpoint every N epochs (default: 50, reduced from 10 to save disk space)')
 
     # Evaluation
-    parser.add_argument('--peak_threshold', type=float, default=0.03,
-                        help='Threshold for peak detection (matched to bias=-3.0)')
+    parser.add_argument('--peak_threshold', type=float, default=0.35,
+                        help='Threshold for binary segmentation (optimized from training observations)')
     parser.add_argument('--adaptive_threshold', type=str, default='False',
                         help='Use adaptive threshold based on prediction distribution')
 
@@ -337,16 +337,16 @@ class Trainer:
         print(f"✅ Model: {args.model}, Parameters: {num_params / 1e6:.2f}M")
 
         # [SCHEME A] Loss function - BCE + Dice for Binary Segmentation (2026-02-01)
-        # CONSERVATIVE WEIGHTS: Both set to 1.0 to avoid loss explosion
-        # Previous issue: dice_weight=3.0 caused loss ≈ 3.8 (too high)
-        # With 1.0/1.0: Expected loss range 0.5-2.0 (healthy)
+        # OPTIMIZED WEIGHTS: dice_weight=2.0 to improve Precision
+        # After validation (Epoch 0 Loss ~0.8, IoU ~0.46), now safe to increase dice_weight
+        # Higher dice_weight forces model to refine edges and reduce false positives
         self.criterion = BCEDiceLoss(
             bce_weight=1.0,   # Pixel-wise classification accuracy
-            dice_weight=1.0,  # Region overlap optimization (NOT 3.0!)
+            dice_weight=2.0,  # ⬆️ Increased from 1.0 to improve Precision (reduce over-segmentation)
             smooth=1.0,
         )
-        print("✅ Using BCE + Dice Loss (Binary Segmentation, weights=1.0/1.0)")
-        print("   NOTE: Switched from Gaussian Heatmap to Binary Mask (Scheme A)")
+        print("✅ Using BCE + Dice Loss (Binary Segmentation, weights=1.0/2.0)")
+        print("   NOTE: dice_weight increased to 2.0 for better edge refinement")
 
         # Optimizer
         if args.optimizer == 'Adam':
