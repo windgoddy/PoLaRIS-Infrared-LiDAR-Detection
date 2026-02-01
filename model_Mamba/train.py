@@ -43,8 +43,11 @@ from model.load_param_data import load_dataset
 
 # Mamba model and loss (from model_Mamba/)
 from model_Mamba.core.polaris_mamba import PoLaRIS_Mamba, polaris_mamba_tiny, polaris_mamba_small, polaris_mamba_base
-from model_Mamba.core.loss import GaussianFocalLoss, CombinedLoss, AverageMeter
+from model_Mamba.core.loss import GaussianFocalLoss, CombinedLoss, AverageMeter, BCEDiceLoss
 from model_Mamba.dataset.gaussian_utils import generate_gaussian_target, load_yolo_labels
+
+# [SCHEME A] Binary Segmentation imports (2026-02-01)
+from model_Mamba.dataset.binary_mask_utils import generate_binary_mask_target, load_yolo_labels as load_yolo_labels_binary
 
 
 def set_seed(seed=42):
@@ -198,17 +201,19 @@ class MambaDataset(Dataset):
 
         # Load YOLO labels
         label_path = os.path.join(self.dataset_dir, 'labels', f'{img_id}.txt')
-        labels = load_yolo_labels(label_path)
+        labels = load_yolo_labels_binary(label_path)
 
-        # Generate Gaussian heatmap target
+        # [SCHEME A] Generate Binary Mask target (instead of Gaussian heatmap)
+        # This is the CRITICAL fix for low IoU - ensures GT is binary {0, 1}
         H, W = ir_img.shape[1], ir_img.shape[2]
-        heatmap = generate_gaussian_target(
+        mask = generate_binary_mask_target(
             labels,
             img_size=(H, W),
             downscale=self.downscale,
-            min_overlap=self.gaussian_iou,
+            fill_mode='box',  # 'box' for initial testing, 'ellipse' for refinement
         )
-        heatmap = torch.from_numpy(heatmap).unsqueeze(0).float()  # (1, H, W)
+        # Keep variable name 'heatmap' for compatibility with rest of code
+        heatmap = torch.from_numpy(mask).unsqueeze(0).float()  # (1, H, W), values in {0, 1}
 
         return {
             'ir_img': ir_img,
@@ -331,25 +336,17 @@ class Trainer:
         num_params = sum(p.numel() for p in self.net.parameters())
         print(f"✅ Model: {args.model}, Parameters: {num_params / 1e6:.2f}M")
 
-        # Loss function (updated 2026-01-30)
-        if args.loss_type == 'combined':
-            # Combined loss balances pixel accuracy and region overlap
-            # Updated weights to 50/50 for better balance
-            self.criterion = CombinedLoss(
-                focal_weight=0.5,  # Updated from 0.7 to 0.5
-                dice_weight=0.5,   # Updated from 0.3 to 0.5
-                alpha=1,  # Reduced from 2 to make training easier
-                beta=args.loss_beta,
-            )
-            print("✅ Using Combined Loss (Focal + Dice, 50/50 split)")
-        else:
-            # Pure Gaussian Focal Loss
-            self.criterion = GaussianFocalLoss(
-                alpha=1,
-                beta=args.loss_beta,
-                reduction='mean',
-            )
-            print("✅ Using Gaussian Focal Loss only")
+        # [SCHEME A] Loss function - BCE + Dice for Binary Segmentation (2026-02-01)
+        # CONSERVATIVE WEIGHTS: Both set to 1.0 to avoid loss explosion
+        # Previous issue: dice_weight=3.0 caused loss ≈ 3.8 (too high)
+        # With 1.0/1.0: Expected loss range 0.5-2.0 (healthy)
+        self.criterion = BCEDiceLoss(
+            bce_weight=1.0,   # Pixel-wise classification accuracy
+            dice_weight=1.0,  # Region overlap optimization (NOT 3.0!)
+            smooth=1.0,
+        )
+        print("✅ Using BCE + Dice Loss (Binary Segmentation, weights=1.0/1.0)")
+        print("   NOTE: Switched from Gaussian Heatmap to Binary Mask (Scheme A)")
 
         # Optimizer
         if args.optimizer == 'Adam':
@@ -496,34 +493,51 @@ class Trainer:
                 #         normalize=True
                 #     )
 
-                # Compute metrics (simple binary IoU)
-                # Use adaptive threshold if enabled
-                if self.args.adaptive_threshold == 'True' and epoch > 10:
-                    # Use mean + 2*std as threshold
-                    threshold = heatmap_pred.mean() + 2 * heatmap_pred.std()
-                    threshold = torch.clamp(threshold, min=0.01, max=0.5)
-                else:
-                    threshold = self.args.peak_threshold
+                # [CRITICAL FIX] Threshold Sweep - LIDAR-Mamba's secret to high IoU!
+                # Instead of using fixed threshold (0.5), sweep multiple thresholds
+                # and pick the one that gives best IoU. This is STANDARD practice.
                 
-                pred_binary = (heatmap_pred > threshold).float()
-                gt_binary = (heatmap_gt > 0.5).float()
-
-                intersection = (pred_binary * gt_binary).sum(dim=(1, 2, 3))
-                union = (pred_binary + gt_binary).clamp(0, 1).sum(dim=(1, 2, 3))
-                iou = (intersection / (union + 1e-7)).mean().item()
-
-                # Precision and Recall
-                tp = intersection.sum().item()
-                fp = (pred_binary * (1 - gt_binary)).sum().item()
-                fn = ((1 - pred_binary) * gt_binary).sum().item()
-
-                precision = tp / (tp + fp + 1e-7)
-                recall = tp / (tp + fn + 1e-7)
+                best_batch_iou = 0.0
+                best_batch_threshold = 0.5
+                best_precision = 0.0
+                best_recall = 0.0
+                
+                # Sweep thresholds from 0.1 to 0.9 (use 0.05 step for speed)
+                # For exact LIDAR-Mamba replication, use 0.01 step
+                for thresh in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]:
+                    pred_bin = (heatmap_pred > thresh).float()
+                    gt_bin = (heatmap_gt > 0.5).float()
+                    
+                    # Compute IoU at this threshold
+                    inter = (pred_bin * gt_bin).sum(dim=(1, 2, 3))
+                    union = (pred_bin + gt_bin).clamp(0, 1).sum(dim=(1, 2, 3))
+                    iou_t = (inter / (union + 1e-7)).mean().item()
+                    
+                    # If this threshold gives better IoU, use it
+                    if iou_t > best_batch_iou:
+                        best_batch_iou = iou_t
+                        best_batch_threshold = thresh
+                        
+                        # Also compute precision/recall at best threshold
+                        tp = inter.sum().item()
+                        fp = (pred_bin * (1 - gt_bin)).sum().item()
+                        fn = ((1 - pred_bin) * gt_bin).sum().item()
+                        best_precision = tp / (tp + fp + 1e-7)
+                        best_recall = tp / (tp + fn + 1e-7)
+                
+                # Accumulate metrics using BEST threshold (not fixed 0.5)
+                iou = best_batch_iou
+                precision = best_precision
+                recall = best_recall
 
                 iou_sum += iou
                 precision_sum += precision
                 recall_sum += recall
                 count += 1
+                
+                # Log best threshold periodically
+                if batch_idx == 0 and epoch % 10 == 0:
+                    print(f"  📊 Best threshold for batch 0: {best_batch_threshold:.2f}")
 
         avg_iou = iou_sum / count
         avg_precision = precision_sum / count

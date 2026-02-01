@@ -390,7 +390,7 @@ class BCEDiceLoss(nn.Module):
     Reference:
         LIDAR-Mamba: https://github.com/Karl1109/LIDAR-Mamba
     """
-    def __init__(self, bce_weight=1.0, dice_weight=3.0, smooth=1.0):
+    def __init__(self, bce_weight=1.0, dice_weight=1.0, smooth=1.0):
         super(BCEDiceLoss, self).__init__()
         # BCELoss expects probabilities in [0, 1]
         # Since GaussianHead outputs sigmoid, we use BCELoss (not BCEWithLogitsLoss)
