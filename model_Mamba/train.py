@@ -137,8 +137,8 @@ def parse_args():
                         help='Experiment name for logging')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed')
-    parser.add_argument('--save_interval', type=int, default=10,
-                        help='Save checkpoint every N epochs')
+    parser.add_argument('--save_interval', type=int, default=50,
+                        help='Save checkpoint every N epochs (default: 50, reduced from 10 to save disk space)')
 
     # Evaluation
     parser.add_argument('--peak_threshold', type=float, default=0.03,
@@ -605,14 +605,25 @@ class Trainer:
                 ])
 
             # Save checkpoint periodically
-            if (epoch + 1) % self.args.save_interval == 0:
+            # UPDATED 2026-01-30: Skip periodic saving if save_interval=0 (to save disk space)
+            if self.args.save_interval > 0 and (epoch + 1) % self.args.save_interval == 0:
                 checkpoint_path = os.path.join(self.args.save_dir, f'checkpoint_epoch{epoch}.pth')
                 model_state = self.net.module.state_dict() if self.use_multi_gpu else self.net.state_dict()
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': model_state,
-                    'optimizer_state_dict': self.optimizer.state_dict(),
-                }, checkpoint_path)
+
+                # Try to save, but catch disk space errors gracefully
+                try:
+                    torch.save({
+                        'epoch': epoch,
+                        'model_state_dict': model_state,
+                        'optimizer_state_dict': self.optimizer.state_dict(),
+                    }, checkpoint_path)
+                    print(f"✅ Saved checkpoint: {checkpoint_path}")
+                except RuntimeError as e:
+                    if "write failed" in str(e) or "disk" in str(e).lower():
+                        print(f"⚠️  Failed to save checkpoint (disk full?): {e}")
+                        print(f"   Continuing training... (best_model.pth still saved)")
+                    else:
+                        raise  # Re-raise if it's a different error
 
         print(f"\n{'=' * 60}")
         print(f"Training Complete!")
