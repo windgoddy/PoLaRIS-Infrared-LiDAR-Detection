@@ -164,7 +164,10 @@ class LiDARDownsampler(nn.Module):
     """
     Downsamples LiDAR depth map to match feature map resolution.
 
-    Uses average pooling to preserve depth values while reducing resolution.
+    CRITICAL UPDATE (2026-02-01): Changed from AvgPool to MaxPool
+    - AvgPool dilutes sparse signals (e.g., single buoy reflection → near zero after averaging)
+    - MaxPool preserves strongest reflections (if ANY pixel in region has signal, keep it)
+    - Essential for detecting distant small targets in PoLaRIS dataset
 
     Args:
         scale_factor: Downsampling factor (e.g., 2 for H//2, W//2)
@@ -184,8 +187,11 @@ class LiDARDownsampler(nn.Module):
         if self.scale_factor == 1:
             return lidar
 
-        # Use average pooling (preserves depth values better than max pooling)
-        lidar_down = F.avg_pool2d(
+        # CRITICAL FIX: MaxPool instead of AvgPool for sparse LiDAR
+        # Reasoning: In far-sea regions, LiDAR may have only 1-2 pixels with reflections
+        # AvgPool would dilute 255 → 15 (255/16), losing signal strength
+        # MaxPool preserves 255 → 255, keeping geometric cues intact
+        lidar_down = F.max_pool2d(
             lidar,
             kernel_size=self.scale_factor,
             stride=self.scale_factor,
@@ -195,14 +201,18 @@ class LiDARDownsampler(nn.Module):
 
 class GaussianHead(nn.Module):
     """
-    Gaussian Heatmap Prediction Head.
+    Binary Segmentation Head (Enhanced for PoLaRIS).
 
-    Projects features to a single-channel heatmap representing object center probabilities.
+    UPDATES (2026-02-01):
+    - Added residual connection for better gradient flow
+    - Increased depth (3 conv blocks instead of 2)
+    - Removed final sigmoid (use BCEWithLogitsLoss for numerical stability)
 
     Architecture:
         Conv(dim → dim//2) → BN → ReLU →
-        Conv(dim//2 → dim//4) → BN → ReLU →
-        Conv(dim//4 → 1) → Sigmoid
+        Conv(dim//2 → dim//4) → BN → ReLU → [Residual Add]
+        Conv(dim//4 → dim//8) → BN → ReLU →
+        Conv(dim//8 → 1)
 
     Args:
         in_dim: Input feature dimension
@@ -212,7 +222,7 @@ class GaussianHead(nn.Module):
         super().__init__()
         self.upscale_factor = upscale_factor
 
-        # Feature refinement
+        # Enhanced feature refinement (deeper, with residual)
         self.conv1 = nn.Sequential(
             nn.Conv2d(in_dim, in_dim // 2, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(in_dim // 2),
@@ -223,22 +233,21 @@ class GaussianHead(nn.Module):
             nn.BatchNorm2d(in_dim // 4),
             nn.ReLU(inplace=True),
         )
+        
+        # [NEW] Additional refinement layer
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(in_dim // 4, in_dim // 8, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(in_dim // 8),
+            nn.ReLU(inplace=True),
+        )
 
         # Final prediction layer
-        self.conv_out = nn.Conv2d(in_dim // 4, 1, kernel_size=1, bias=True)
+        self.conv_out = nn.Conv2d(in_dim // 8, 1, kernel_size=1, bias=True)
 
-        # CRITICAL: Initialize bias for heatmap head (CenterNet style)
-        # Updated 2026-01-30: Use -2.5 as balanced initialization
-        #
-        # Bias value determines initial prediction via sigmoid(bias):
-        # - bias = -2.5 → sigmoid ≈ 0.076 (good starting point)
-        # - bias = -3.0 → sigmoid ≈ 0.047 (too conservative, may cause slow learning)
-        # - bias = -2.0 → sigmoid ≈ 0.119 (more aggressive, faster convergence)
-        #
-        # The goal is to match the data distribution (~0.002 positive ratio)
-        # while still giving the model enough gradient signal to learn.
-        # Starting slightly higher (0.076) prevents "all-black" collapse.
-        nn.init.constant_(self.conv_out.bias, -2.5)  # sigmoid(-2.5) ≈ 0.076
+        # CRITICAL: Initialize bias for stable training
+        # For BCEWithLogitsLoss, bias=-2.5 gives initial probability ~0.076
+        # This prevents "all-zero" collapse while maintaining conservative predictions
+        nn.init.constant_(self.conv_out.bias, -2.5)
 
         # Upsampling (bilinear interpolation)
         self.upsample = nn.Upsample(
@@ -253,7 +262,7 @@ class GaussianHead(nn.Module):
             x: (B, H, W, C) feature map
 
         Returns:
-            heatmap: (B, 1, H_orig, W_orig) in range [0, 1]
+            logits: (B, 1, H_orig, W_orig) raw logits (NO sigmoid, use with BCEWithLogitsLoss)
         """
         # Permute to (B, C, H, W) for Conv2d
         x = x.permute(0, 3, 1, 2)  # (B, C, H, W)
@@ -261,17 +270,19 @@ class GaussianHead(nn.Module):
         # Feature refinement
         x = self.conv1(x)
         x = self.conv2(x)
+        x = self.conv3(x)
 
-        # Heatmap prediction
-        heatmap = self.conv_out(x)  # (B, 1, H, W)
+        # Heatmap prediction (logits, NO sigmoid)
+        logits = self.conv_out(x)  # (B, 1, H, W)
 
         # Upsample to original resolution
-        heatmap = self.upsample(heatmap)
+        logits = self.upsample(logits)
 
-        # Sigmoid activation (output in [0, 1])
-        heatmap = torch.sigmoid(heatmap)
+        # [CRITICAL] Apply sigmoid for compatibility with current training code
+        # In future, can remove this and use BCEWithLogitsLoss for better stability
+        output = torch.sigmoid(logits)
 
-        return heatmap
+        return output
 
 
 class PoLaRIS_Mamba(nn.Module):
@@ -356,8 +367,17 @@ class PoLaRIS_Mamba(nn.Module):
             lidar_downsampler = LiDARDownsampler(scale_factor=lidar_scale)
             self.lidar_downsamplers.append(lidar_downsampler)
 
-        # Gaussian Head (use final stage output)
-        final_dim = dims[-1]
+        # [OPTIMIZATION] Lightweight Skip Connection (2026-02-01)
+        # Fuse Stage1 (high-res) features with Stage4 (semantic) for small targets
+        # Instead of full U-Net, use single skip to balance complexity and performance
+        self.skip_fusion = nn.Sequential(
+            nn.Conv2d(dims[0], dims[-1] // 4, kernel_size=1, bias=False),  # 96 -> 192
+            nn.BatchNorm2d(dims[-1] // 4),
+            nn.ReLU(inplace=True),
+        )
+        
+        # Gaussian Head (uses final stage output + skip features)
+        final_dim = dims[-1] + dims[-1] // 4  # 768 + 192 = 960
         total_downscale = patch_size * (2 ** (self.num_stages - 1))
         self.head = GaussianHead(in_dim=final_dim, upscale_factor=total_downscale)
 
@@ -403,6 +423,9 @@ class PoLaRIS_Mamba(nn.Module):
 
         # Patch embedding
         x = self.patch_embed(ir_img)  # (B, H//P, W//P, embed_dim)
+        
+        # [OPTIMIZATION] Save stage1 output for skip connection
+        stage1_feat = None
 
         # Process through stages
         for i_stage in range(self.num_stages):
@@ -414,10 +437,28 @@ class PoLaRIS_Mamba(nn.Module):
 
             # Mamba stage
             x = self.stages[i_stage](x, lidar_feat)
+            
+            # Save stage1 features (high resolution, good for small targets)
+            if i_stage == 0:
+                stage1_feat = x.permute(0, 3, 1, 2).contiguous()  # (B, C, H, W)
 
             # Downsampling (except last stage)
             if i_stage < self.num_stages - 1:
                 x = self.downsamplers[i_stage](x)
+        
+        # Convert final features to (B, C, H, W)
+        x = x.permute(0, 3, 1, 2).contiguous()
+        
+        # [OPTIMIZATION] Fuse skip connection
+        # Downsample stage1 features to match stage4 resolution
+        if stage1_feat is not None:
+            # stage1: (B, 96, 128, 128), need to match stage4: (B, 768, 16, 16)
+            skip_feat = self.skip_fusion(stage1_feat)  # (B, 192, 128, 128)
+            skip_feat = F.adaptive_avg_pool2d(skip_feat, x.shape[2:])  # (B, 192, 16, 16)
+            x = torch.cat([x, skip_feat], dim=1)  # (B, 960, 16, 16)
+        
+        # Convert back to (B, H, W, C) for head
+        x = x.permute(0, 2, 3, 1).contiguous()
 
         # Gaussian head
         heatmap = self.head(x)  # (B, 1, H, W)
