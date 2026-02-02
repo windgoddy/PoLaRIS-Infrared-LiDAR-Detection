@@ -44,6 +44,7 @@ from model.load_param_data import load_dataset
 # Mamba model and loss (from model_Mamba/)
 from model_Mamba.core.polaris_mamba import PoLaRIS_Mamba, polaris_mamba_tiny, polaris_mamba_small, polaris_mamba_base
 from model_Mamba.core.loss import GaussianFocalLoss, CombinedLoss, AverageMeter, BCEDiceLoss
+from model_Mamba.core.loss_improved import ImprovedBCEDiceLoss, ConfidenceCalibrationLoss
 from model_Mamba.dataset.gaussian_utils import generate_gaussian_target, load_yolo_labels
 
 # [SCHEME A] Binary Segmentation imports (2026-02-01)
@@ -336,17 +337,30 @@ class Trainer:
         num_params = sum(p.numel() for p in self.net.parameters())
         print(f"✅ Model: {args.model}, Parameters: {num_params / 1e6:.2f}M")
 
-        # [SCHEME A] Loss function - BCE + Dice for Binary Segmentation (2026-02-01)
-        # OPTIMIZED WEIGHTS: dice_weight=2.0 to improve Precision
-        # After validation (Epoch 0 Loss ~0.8, IoU ~0.46), now safe to increase dice_weight
-        # Higher dice_weight forces model to refine edges and reduce false positives
-        self.criterion = BCEDiceLoss(
-            bce_weight=1.0,   # Pixel-wise classification accuracy
-            dice_weight=2.0,  # ⬆️ Increased from 1.0 to improve Precision (reduce over-segmentation)
+        # [SCHEME A] Loss function - Improved BCE + Dice for Binary Segmentation (2026-02-02)
+        # CRITICAL FIX for threshold=0.9 issue:
+        # - Standard BCE treats all samples equally, allowing background to predict 0.6-0.8
+        # - Focal BCE downweights easy examples, forces model to focus on hard negatives
+        # - Increased dice_weight=4.0 to force tighter segmentation (reduce false positives)
+        self.criterion = ImprovedBCEDiceLoss(
+            focal_weight=1.0,      # Focal BCE component
+            dice_weight=4.0,       # ⬆️ Increased from 2.0 to 4.0 (stronger FP suppression)
+            focal_alpha=0.25,      # Balance pos/neg samples
+            focal_gamma=2.0,       # Focus on hard examples
+            ohem_ratio=0.0,        # Disabled by default (can enable if needed)
             smooth=1.0,
         )
-        print("✅ Using BCE + Dice Loss (Binary Segmentation, weights=1.0/2.0)")
-        print("   NOTE: dice_weight increased to 2.0 for better edge refinement")
+        # Optional: Add confidence calibration loss (can be enabled for fine-tuning)
+        self.calib_criterion = ConfidenceCalibrationLoss(
+            target_bg_conf=0.1,    # Force background towards 0.1
+            target_fg_conf=0.9,    # Force targets towards 0.9
+        )
+        self.use_calib_loss = False  # Set to True to enable
+
+        print("✅ Using Improved BCE + Dice Loss (Focal mechanism, weights=1.0/4.0)")
+        print("   - Focal BCE: suppresses easy negatives (sea background)")
+        print("   - Dice weight 4.0: forces tight segmentation")
+        print("   - Target: fix threshold=0.9 issue, bring optimal threshold to ~0.5")
 
         # Optimizer
         if args.optimizer == 'Adam':
