@@ -5,6 +5,19 @@
 
 set -e
 
+# 获取脚本所在目录的绝对路径
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+# 推导出 model_Mamba 目录的绝对路径
+MODEL_MAMBA_DIR="$(dirname "$SCRIPT_DIR")"
+# 推导出项目根目录的绝对路径
+PROJECT_ROOT="$(dirname "$MODEL_MAMBA_DIR")"
+
+echo "📂 Directories:"
+echo "  Script:       $SCRIPT_DIR"
+echo "  model_Mamba:  $MODEL_MAMBA_DIR"
+echo "  Project root: $PROJECT_ROOT"
+echo ""
+
 # 优雅退出处理
 TRAIN_PID=""
 TAIL_PID=""
@@ -85,13 +98,14 @@ for GPU_ID in $GPU_LIST; do
         echo ""
         echo "📝 配置: GPU=$GPU_ID, BS=$BATCH_SIZE, LR=$LR, Exp=$EXPERIMENT_NAME"
         
-        # 生成日志文件名
-        LOG_FILE="training_mamba_gpu${GPU_ID}_bs${BATCH_SIZE}_$(date +%Y%m%d_%H%M%S).log"
+        # 生成日志文件名（在scripts目录下）
+        LOG_FILE="$SCRIPT_DIR/training_mamba_gpu${GPU_ID}_bs${BATCH_SIZE}_$(date +%Y%m%d_%H%M%S).log"
         
-        # 启动训练 (Updated 2026-02-02: Fixed train.py path for Mamba model)
+        # 启动训练 (Updated 2026-02-02: Use absolute path to avoid confusion)
         echo "🚀 启动训练..."
-        CUDA_VISIBLE_DEVICES=$GPU_ID python ../train.py \
-            --root ../../dataset \
+        echo "  Training script: $MODEL_MAMBA_DIR/train.py"
+        CUDA_VISIBLE_DEVICES=$GPU_ID python "$MODEL_MAMBA_DIR/train.py" \
+            --root "$PROJECT_ROOT/dataset" \
             --dataset $DATASET \
             --split_method $SPLIT_METHOD \
             --model $MODEL \
@@ -186,13 +200,16 @@ for GPU_ID in $GPU_LIST; do
                 echo "========================================"
                 echo ""
                 echo "📊 重新查看训练进度:"
-                echo "  tail -f $LOG_FILE"
+                echo "  tail -f \"$LOG_FILE\""
                 echo ""
                 echo "🛑 停止训练:"
                 echo "  kill $TRAIN_PID"
                 echo ""
                 echo "📈 查看 GPU 使用:"
                 echo "  watch -n 1 nvidia-smi"
+                echo ""
+                echo "📁 日志文件位置:"
+                echo "  $LOG_FILE"
                 echo ""
                 
                 exit 0
@@ -222,7 +239,7 @@ echo ""
 echo "建议："
 echo "  1. 检查数据集路径是否正确"
 echo "  2. 检查最新的日志文件:"
-echo "     ls -lht training_mamba_*.log | head -5"
+echo "     ls -lht $SCRIPT_DIR/training_mamba_*.log | head -5"
 echo "  3. 考虑减小模型或图像分辨率"
 echo ""
 exit 1
