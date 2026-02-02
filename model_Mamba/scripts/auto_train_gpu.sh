@@ -52,14 +52,15 @@ echo ""
 echo "💡 提示: 按 Ctrl+C 可优雅停止训练（会保存 checkpoint）"
 echo ""
 
-# 训练参数配置 (Updated 2026-01-30)
+# 训练参数配置 (Updated 2026-02-02 - FINAL FIX)
 DATASET="Pohang-Canal-3k"
-SPLIT_METHOD="50_50_2k_new"  # Updated split directory
+SPLIT_METHOD="50_50_2k_new"  # Remote server split directory
 MODEL="mamba_tiny"
-EPOCHS=1000
-LR=0.0002  # 2e-4, increased from 5e-5 for faster convergence (after loss fix)
-PEAK_THRESHOLD=0.5  # Increased from 0.03 to match prediction range
-SAVE_INTERVAL=0  # Disable periodic checkpoints to save disk space
+EPOCHS=200  # Reduced from 1000 for faster validation
+LR=0.0002  # 2e-4, optimal learning rate
+PEAK_THRESHOLD=0.35  # Default threshold (will use dynamic best_threshold during testing)
+SAVE_INTERVAL=50  # Save checkpoint every 50 epochs
+EXPERIMENT_NAME="FINAL_FIX_alpha0.75_gamma2.5_maxpool"  # Track this critical fix
 
 # 获取可用 GPU 列表（按空闲显存从大到小排序）
 echo ""
@@ -82,15 +83,15 @@ for GPU_ID in $GPU_LIST; do
     # 依次尝试不同的 batch_size
     for BATCH_SIZE in "${BATCH_SIZES[@]}"; do
         echo ""
-        echo "📝 配置: GPU=$GPU_ID, Batch Size=$BATCH_SIZE, LR=$LR, Threshold=$PEAK_THRESHOLD"
+        echo "📝 配置: GPU=$GPU_ID, BS=$BATCH_SIZE, LR=$LR, Exp=$EXPERIMENT_NAME"
         
         # 生成日志文件名
         LOG_FILE="training_mamba_gpu${GPU_ID}_bs${BATCH_SIZE}_$(date +%Y%m%d_%H%M%S).log"
         
-        # 启动训练 (Updated 2026-01-30 with new parameters)
+        # 启动训练 (Updated 2026-02-02: Fixed train.py path for Mamba model)
         echo "🚀 启动训练..."
-        CUDA_VISIBLE_DEVICES=$GPU_ID python train.py \
-            --root ../dataset \
+        CUDA_VISIBLE_DEVICES=$GPU_ID python ../train.py \
+            --root ../../dataset \
             --dataset $DATASET \
             --split_method $SPLIT_METHOD \
             --model $MODEL \
@@ -100,6 +101,7 @@ for GPU_ID in $GPU_LIST; do
             --lr $LR \
             --peak_threshold $PEAK_THRESHOLD \
             --save_interval $SAVE_INTERVAL \
+            --experiment_name $EXPERIMENT_NAME \
             --gpus 0 \
             > $LOG_FILE 2>&1 &
         
@@ -162,10 +164,11 @@ for GPU_ID in $GPU_LIST; do
                 echo "  Batch Size: $BATCH_SIZE"
                 echo "  Dataset: $DATASET ($SPLIT_METHOD)"
                 echo "  Model: $MODEL"
+                echo "  Experiment: $EXPERIMENT_NAME"
                 echo "  Epochs: $EPOCHS"
                 echo "  Learning Rate: $LR"
-                echo "  Peak Threshold: $PEAK_THRESHOLD"
-                echo "  Save Interval: $SAVE_INTERVAL (0=disabled)"
+                echo "  Peak Threshold: $PEAK_THRESHOLD (dynamic best_threshold will be used)"
+                echo "  Save Interval: $SAVE_INTERVAL"
                 echo "  Log File: $LOG_FILE"
                 echo "  PID: $TRAIN_PID"
                 echo "========================================"
