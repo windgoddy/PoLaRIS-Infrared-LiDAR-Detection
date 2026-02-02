@@ -357,8 +357,8 @@ class Trainer:
             focal_weight=1.0,      # Focal BCE component
             dice_weight=4.0,       # ⬆️ Increased from 2.0 to 4.0 (stronger FP suppression)
             focal_alpha=0.25,      # Balance pos/neg samples
-            focal_gamma=2.0,       # Focus on hard examples
-            ohem_ratio=0.0,        # Disabled by default (can enable if needed)
+            focal_gamma=3.5,       # ⬆️ INCREASED from 2.0 to 3.5 - much stronger hard example focus
+            ohem_ratio=0.25,       # ⬆️ ENABLED - train only on hardest 25% pixels
             smooth=1.0,
         )
         # Optional: Add confidence calibration loss (can be enabled for fine-tuning)
@@ -368,10 +368,11 @@ class Trainer:
         )
         self.use_calib_loss = False  # Set to True to enable
 
-        print("✅ Using Improved BCE + Dice Loss (Focal mechanism, weights=1.0/4.0)")
-        print("   - Focal BCE: suppresses easy negatives (sea background)")
+        print("✅ Using Improved BCE + Dice Loss (ENHANCED - Focal γ=3.5, OHEM=25%)")
+        print("   - Focal BCE (γ=3.5): STRONG suppression of easy negatives")
+        print("   - OHEM (25%): Focus on hardest pixels only")
         print("   - Dice weight 4.0: forces tight segmentation")
-        print("   - Target: fix threshold=0.9 issue, bring optimal threshold to ~0.5")
+        print("   - Target: fix threshold=0.9 → 0.5 within 10-15 epochs")
 
         # Optimizer
         if args.optimizer == 'Adam':
