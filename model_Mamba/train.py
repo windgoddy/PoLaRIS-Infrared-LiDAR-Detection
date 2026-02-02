@@ -45,6 +45,17 @@ from model.load_param_data import load_dataset
 from model_Mamba.core.polaris_mamba import PoLaRIS_Mamba, polaris_mamba_tiny, polaris_mamba_small, polaris_mamba_base
 from model_Mamba.core.loss import GaussianFocalLoss, CombinedLoss, AverageMeter, BCEDiceLoss
 from model_Mamba.core.loss_improved import ImprovedBCEDiceLoss, ConfidenceCalibrationLoss
+
+# Mamba I/O utilities
+from model_Mamba.utils_io import (
+    create_experiment_dir,
+    save_training_config,
+    init_training_log_csv,
+    log_epoch_metrics,
+    save_best_model,
+    save_last_epoch_model,
+    update_training_summary
+)
 from model_Mamba.dataset.gaussian_utils import generate_gaussian_target, load_yolo_labels
 
 # [SCHEME A] Binary Segmentation imports (2026-02-01)
@@ -152,13 +163,13 @@ def parse_args():
 
     args = parser.parse_args()
 
-    # Create save directory
-    if args.experiment_name:
-        save_dir = f'result/{args.dataset}/{args.model}_{args.experiment_name}'
-    else:
-        save_dir = f'result/{args.dataset}/{args.model}'
-    os.makedirs(save_dir, exist_ok=True)
+    # Create experiment directory with timestamp
+    save_dir, dt_string = create_experiment_dir(args)
     args.save_dir = save_dir
+    args.dt_string = dt_string
+
+    # Save training configuration
+    save_training_config(args, save_dir)
 
     return args
 
@@ -390,10 +401,10 @@ class Trainer:
         self.best_epoch = 0
 
         # Logging
-        self.train_log_path = os.path.join(args.save_dir, 'train_log.csv')
-        with open(self.train_log_path, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(['Epoch', 'Train_Loss', 'Test_Loss', 'IoU', 'Precision', 'Recall', 'F1', 'LR'])
+        self.train_log_path = init_training_log_csv(args.save_dir)
+
+        # Track best threshold for monitoring
+        self.best_threshold_history = []
 
     def training(self, epoch):
         """Training loop for one epoch."""
@@ -552,6 +563,7 @@ class Trainer:
                 # Log best threshold periodically
                 if batch_idx == 0 and epoch % 10 == 0:
                     print(f"  📊 Best threshold for batch 0: {best_batch_threshold:.2f}")
+                    self.current_best_threshold = best_batch_threshold  # 保存供日志使用
 
         avg_iou = iou_sum / count
         avg_precision = precision_sum / count
@@ -572,27 +584,28 @@ class Trainer:
             print(f"     Threshold: {self.args.peak_threshold}")
         avg_recall = recall_sum / count
 
+        # 使用最近记录的 best_threshold（如果有）
+        best_threshold = getattr(self, 'current_best_threshold', self.args.peak_threshold)
+
         print(f"\n[Epoch {epoch}] Test Loss: {loss_meter.avg:.6f}, IoU: {avg_iou:.4f}, "
-              f"Precision: {avg_precision:.4f}, Recall: {avg_recall:.4f}")
+              f"Precision: {avg_precision:.4f}, Recall: {avg_recall:.4f}, Best_Threshold: {best_threshold:.2f}")
 
         # Save best model
         if avg_iou > self.best_iou:
             self.best_iou = avg_iou
             self.best_epoch = epoch
-            checkpoint_path = os.path.join(self.args.save_dir, 'best_model.pth')
 
-            # Handle DataParallel wrapper
-            model_state = self.net.module.state_dict() if self.use_multi_gpu else self.net.state_dict()
+            # Use new save function with IoU in filename
+            save_best_model(
+                self.net,
+                self.optimizer,
+                epoch,
+                avg_iou,
+                self.args.save_dir,
+                self.use_multi_gpu
+            )
 
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model_state,
-                'optimizer_state_dict': self.optimizer.state_dict(),
-                'best_iou': self.best_iou,
-            }, checkpoint_path)
-            print(f"✅ Saved best model (IoU: {self.best_iou:.4f})")
-
-        return loss_meter.avg, avg_iou, avg_precision, avg_recall, avg_f1
+        return loss_meter.avg, avg_iou, avg_precision, avg_recall, avg_f1, best_threshold
 
     def run(self):
         """Main training loop."""
@@ -613,24 +626,28 @@ class Trainer:
             train_loss = self.training(epoch)
 
             # Testing
-            test_loss, test_iou, test_precision, test_recall, test_f1 = self.testing(epoch)
+            test_loss, test_iou, test_precision, test_recall, test_f1, best_threshold = self.testing(epoch)
 
             # Update scheduler
             self.scheduler.step()
 
-            # Log results
-            with open(self.train_log_path, 'a', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    epoch,
-                    train_loss,
-                    test_loss,
-                    test_iou,
-                    test_precision,
-                    test_recall,
-                    test_f1,
-                    self.optimizer.param_groups[0]['lr']
-                ])
+            # Log results with timestamp
+            log_epoch_metrics(
+                self.train_log_path,
+                epoch,
+                train_loss,
+                test_loss,
+                test_iou,
+                test_precision,
+                test_recall,
+                test_f1,
+                best_threshold,
+                self.optimizer.param_groups[0]['lr']
+            )
+
+            # Store last epoch metrics
+            self.last_epoch = epoch
+            self.last_iou = test_iou
 
             # Save checkpoint periodically
             # UPDATED 2026-01-30: Skip periodic saving if save_interval=0 (to save disk space)
@@ -653,9 +670,30 @@ class Trainer:
                     else:
                         raise  # Re-raise if it's a different error
 
+        # Save last epoch model
+        print("\n📦 Saving last epoch model...")
+        save_last_epoch_model(
+            self.net,
+            self.optimizer,
+            self.last_epoch,
+            self.last_iou,
+            self.args.save_dir,
+            self.use_multi_gpu
+        )
+
+        # Update training summary
+        update_training_summary(
+            self.args.save_dir,
+            self.best_epoch,
+            self.best_iou,
+            self.last_epoch,
+            self.last_iou
+        )
+
         print(f"\n{'=' * 60}")
         print(f"Training Complete!")
         print(f"Best IoU: {self.best_iou:.4f} at Epoch {self.best_epoch}")
+        print(f"Final IoU: {self.last_iou:.4f} at Epoch {self.last_epoch}")
         print(f"Model saved to: {self.args.save_dir}")
         print(f"{'=' * 60}\n")
 
