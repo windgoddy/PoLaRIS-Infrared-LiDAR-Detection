@@ -454,7 +454,10 @@ class PoLaRIS_Mamba(nn.Module):
         if stage1_feat is not None:
             # stage1: (B, 96, 128, 128), need to match stage4: (B, 768, 16, 16)
             skip_feat = self.skip_fusion(stage1_feat)  # (B, 192, 128, 128)
-            skip_feat = F.adaptive_avg_pool2d(skip_feat, x.shape[2:])  # (B, 192, 16, 16)
+            # CRITICAL FIX: Use MaxPool instead of AvgPool to preserve small target features
+            # AvgPool dilutes small targets: 6×6 target → 0.56 after averaging over 8×8
+            # MaxPool preserves strong activations: if ANY pixel in 8×8 has signal, keep it
+            skip_feat = F.adaptive_max_pool2d(skip_feat, x.shape[2:])  # (B, 192, 16, 16)
             x = torch.cat([x, skip_feat], dim=1)  # (B, 960, 16, 16)
         
         # Convert back to (B, H, W, C) for head
