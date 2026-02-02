@@ -175,6 +175,16 @@ def save_best_model(model, optimizer, epoch, iou, save_dir, use_multi_gpu=False)
         os.makedirs(abs_save_dir, exist_ok=True)
         print(f"✅ Created directory: {abs_save_dir}")
 
+    # [NEW] Delete previous best_model_epoch*.pth files to save disk space
+    import glob
+    old_best_models = glob.glob(os.path.join(abs_save_dir, 'best_model_epoch*.pth'))
+    for old_model in old_best_models:
+        try:
+            os.remove(old_model)
+            print(f"🗑️  Deleted old best model: {os.path.basename(old_model)}")
+        except Exception as e:
+            print(f"⚠️  Failed to delete {old_model}: {e}")
+
     # Extract model state (handle DataParallel)
     model_state = model.module.state_dict() if use_multi_gpu else model.state_dict()
 

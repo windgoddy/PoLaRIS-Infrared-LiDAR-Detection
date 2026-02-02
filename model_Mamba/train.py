@@ -150,6 +150,8 @@ def parse_args():
                         help='Number of data loading workers')
     parser.add_argument('--experiment_name', type=str, default=None,
                         help='Experiment name for logging')
+    parser.add_argument('--save_dir', type=str, default=None,
+                        help='Pre-created experiment directory (if provided, will not create new one)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed')
     parser.add_argument('--save_interval', type=int, default=50,
@@ -163,8 +165,16 @@ def parse_args():
 
     args = parser.parse_args()
 
-    # Create experiment directory with timestamp
-    save_dir, dt_string = create_experiment_dir(args)
+    # Create or use experiment directory
+    if args.save_dir:
+        # Use pre-created directory (from auto_train_gpu.sh)
+        save_dir = args.save_dir
+        dt_string = os.path.basename(save_dir).split('_')[-1]  # Extract timestamp from dir name
+        print(f"✅ Using pre-created experiment directory: {save_dir}")
+    else:
+        # Create new experiment directory with timestamp
+        save_dir, dt_string = create_experiment_dir(args)
+
     args.save_dir = save_dir
     args.dt_string = dt_string
 
@@ -355,10 +365,10 @@ class Trainer:
         # - Increased dice_weight=4.0 to force tighter segmentation (reduce false positives)
         self.criterion = ImprovedBCEDiceLoss(
             focal_weight=1.0,      # Focal BCE component
-            dice_weight=4.0,       # ⬆️ Increased from 2.0 to 4.0 (stronger FP suppression)
-            focal_alpha=0.90,      # ⬆️ CRITICAL FIX: 0.90 gives MUCH MORE weight to positive samples (1:11 ratio)
-            focal_gamma=2.5,       # ⬆️ OPTIMIZED: 2.5 balances easy/hard samples (not too aggressive)
-            ohem_ratio=0.0,        # ⬇️ DISABLED: Focal Loss already does hard example mining
+            dice_weight=4.0,       # Increased from 2.0 to 4.0 (stronger FP suppression)
+            focal_alpha=0.25,      # ⬇️ CORRECTED: 0.25 is standard for imbalanced data (was 0.90, too extreme)
+            focal_gamma=2.5,       # OPTIMIZED: 2.5 balances easy/hard samples (not too aggressive)
+            ohem_ratio=0.0,        # DISABLED: Focal Loss already does hard example mining
             smooth=1.0,
         )
         # Optional: Add confidence calibration loss (can be enabled for fine-tuning)
@@ -368,12 +378,13 @@ class Trainer:
         )
         self.use_calib_loss = False  # Set to True to enable
 
-        print("✅ Using Improved BCE + Dice Loss (FULLY OPTIMIZED - α=0.90, γ=2.5)")
-        print("   - Focal α=0.90: AGGRESSIVE positive sample weighting (1:11 pos:neg ratio)")
+        print("✅ Using Improved BCE + Dice Loss (CORRECTED - α=0.25, γ=2.5)")
+        print("   - Focal α=0.25: STANDARD for imbalanced data (1:3 pos:neg ratio)")
         print("   - Focal γ=2.5: Balanced hard example focus")
         print("   - OHEM DISABLED: Focal Loss already handles hard mining")
         print("   - Dice weight 4.0: Forces tight segmentation")
-        print("   - Target: Precision >10%, threshold <0.7, IoU >5% by epoch 50")
+        print("   - MaxPool LiDAR + Skip Connection: Preserves small target features")
+        print("   - Target: Threshold 0.3-0.5, Precision 70%+, IoU 35%+ by epoch 50")
 
         # Optimizer
         if args.optimizer == 'Adam':

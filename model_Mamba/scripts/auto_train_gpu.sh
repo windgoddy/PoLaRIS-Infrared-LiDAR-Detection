@@ -97,13 +97,27 @@ for GPU_ID in $GPU_LIST; do
     for BATCH_SIZE in "${BATCH_SIZES[@]}"; do
         echo ""
         echo "📝 配置: GPU=$GPU_ID, BS=$BATCH_SIZE, LR=$LR, Exp=$EXPERIMENT_NAME"
-        
-        # 生成日志文件名（在scripts目录下）
-        LOG_FILE="$SCRIPT_DIR/training_mamba_gpu${GPU_ID}_bs${BATCH_SIZE}_$(date +%Y%m%d_%H%M%S).log"
-        
-        # 启动训练 (Updated 2026-02-02: Use absolute path to avoid confusion)
+
+        # 生成实验目录名（与 train.py 的 create_experiment_dir 保持一致）
+        DT_STRING=$(date +%Y%m%d_%H%M%S)
+        if [ -n "$EXPERIMENT_NAME" ]; then
+            DIR_NAME="${EXPERIMENT_NAME}_${DATASET}_${MODEL}_${DT_STRING}"
+        else
+            DIR_NAME="${DATASET}_${MODEL}_${DT_STRING}"
+        fi
+        SAVE_DIR="$PROJECT_ROOT/model_Mamba/result/$DIR_NAME"
+
+        # 提前创建实验目录
+        mkdir -p "$SAVE_DIR"
+        echo "📁 实验目录: $SAVE_DIR"
+
+        # 生成日志文件名（保存在实验目录下）
+        LOG_FILE="$SAVE_DIR/training_mamba_gpu${GPU_ID}_bs${BATCH_SIZE}_${DT_STRING}.log"
+
+        # 启动训练 (Updated 2026-02-02: Use absolute path and pre-created save_dir)
         echo "🚀 启动训练..."
         echo "  Training script: $MODEL_MAMBA_DIR/train.py"
+        echo "  Log file: $LOG_FILE"
         CUDA_VISIBLE_DEVICES=$GPU_ID python "$MODEL_MAMBA_DIR/train.py" \
             --root "$PROJECT_ROOT/dataset" \
             --dataset $DATASET \
@@ -116,6 +130,7 @@ for GPU_ID in $GPU_LIST; do
             --peak_threshold $PEAK_THRESHOLD \
             --save_interval $SAVE_INTERVAL \
             --experiment_name $EXPERIMENT_NAME \
+            --save_dir "$SAVE_DIR" \
             --gpus 0 \
             > $LOG_FILE 2>&1 &
         
