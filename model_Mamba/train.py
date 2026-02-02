@@ -356,7 +356,7 @@ class Trainer:
         self.criterion = ImprovedBCEDiceLoss(
             focal_weight=1.0,      # Focal BCE component
             dice_weight=4.0,       # ⬆️ Increased from 2.0 to 4.0 (stronger FP suppression)
-            focal_alpha=0.75,      # ⬆️ CRITICAL FIX: 0.75 gives MORE weight to positive samples (targets)
+            focal_alpha=0.90,      # ⬆️ CRITICAL FIX: 0.90 gives MUCH MORE weight to positive samples (1:11 ratio)
             focal_gamma=2.5,       # ⬆️ OPTIMIZED: 2.5 balances easy/hard samples (not too aggressive)
             ohem_ratio=0.0,        # ⬇️ DISABLED: Focal Loss already does hard example mining
             smooth=1.0,
@@ -368,12 +368,12 @@ class Trainer:
         )
         self.use_calib_loss = False  # Set to True to enable
 
-        print("✅ Using Improved BCE + Dice Loss (FULLY OPTIMIZED - α=0.75, γ=2.5)")
-        print("   - Focal α=0.75: Prioritize POSITIVE samples (targets) over negatives")
+        print("✅ Using Improved BCE + Dice Loss (FULLY OPTIMIZED - α=0.90, γ=2.5)")
+        print("   - Focal α=0.90: AGGRESSIVE positive sample weighting (1:11 pos:neg ratio)")
         print("   - Focal γ=2.5: Balanced hard example focus")
         print("   - OHEM DISABLED: Focal Loss already handles hard mining")
         print("   - Dice weight 4.0: Forces tight segmentation")
-        print("   - Target: Recall >75%, threshold=0.4-0.6, IoU >60% by epoch 50")
+        print("   - Target: Precision >10%, threshold <0.7, IoU >5% by epoch 50")
 
         # Optimizer
         if args.optimizer == 'Adam':

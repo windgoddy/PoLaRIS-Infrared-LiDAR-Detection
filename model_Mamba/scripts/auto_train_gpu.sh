@@ -73,7 +73,7 @@ EPOCHS=200  # Reduced from 1000 for faster validation
 LR=0.0002  # 2e-4, optimal learning rate
 PEAK_THRESHOLD=0.35  # Default threshold (will use dynamic best_threshold during testing)
 SAVE_INTERVAL=50  # Save checkpoint every 50 epochs
-EXPERIMENT_NAME="FINAL_FIX_alpha0.75_gamma2.5_maxpool"  # Track this critical fix
+EXPERIMENT_NAME="FINAL_FIX_alpha0.90_gamma2.5_maxpool"  # Track this critical fix (alpha 0.90 for 1:11 ratio)
 
 # 获取可用 GPU 列表（按空闲显存从大到小排序）
 echo ""

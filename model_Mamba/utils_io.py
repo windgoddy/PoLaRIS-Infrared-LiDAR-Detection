@@ -11,6 +11,7 @@ Date: 2026-02-02
 
 import os
 import csv
+import torch
 from datetime import datetime
 
 
@@ -18,13 +19,13 @@ def create_experiment_dir(args):
     """
     Create experiment directory with timestamp.
 
-    Format: model_Mamba/result/{experiment_name}_{dataset}_{model}_{timestamp}/
+    Format: {PROJECT_ROOT}/model_Mamba/result/{experiment_name}_{dataset}_{model}_{timestamp}/
 
     Args:
         args: Parsed arguments from argparse
 
     Returns:
-        save_dir: Path to the created directory
+        save_dir: Absolute path to the created directory
         dt_string: Timestamp string (YYYYMMDD_HHMMSS)
     """
     now = datetime.now()
@@ -36,8 +37,13 @@ def create_experiment_dir(args):
     else:
         dir_name = f"{args.dataset}_{args.model}_{dt_string}"
 
-    # Create directory: model_Mamba/result/dir_name/
-    save_dir = os.path.join('model_Mamba', 'result', dir_name)
+    # Get absolute paths (CRITICAL FIX: Avoid relative path issues)
+    # utils_io.py is in model_Mamba/, so __file__'s dir is model_Mamba/
+    MODEL_MAMBA_DIR = os.path.dirname(os.path.abspath(__file__))
+    PROJECT_ROOT = os.path.dirname(MODEL_MAMBA_DIR)
+
+    # Create directory using absolute path: {PROJECT_ROOT}/model_Mamba/result/dir_name/
+    save_dir = os.path.join(PROJECT_ROOT, 'model_Mamba', 'result', dir_name)
     os.makedirs(save_dir, exist_ok=True)
 
     print(f"✅ Experiment directory created: {save_dir}")
@@ -159,32 +165,58 @@ def save_best_model(model, optimizer, epoch, iou, save_dir, use_multi_gpu=False)
         optimizer: Optimizer
         epoch: Current epoch
         iou: Current IoU score
-        save_dir: Directory to save the model
+        save_dir: Directory to save the model (absolute path)
         use_multi_gpu: Whether using DataParallel
     """
+    # Verify save directory exists
+    abs_save_dir = os.path.abspath(save_dir)
+    if not os.path.exists(abs_save_dir):
+        print(f"⚠️  Save directory does not exist: {abs_save_dir}")
+        os.makedirs(abs_save_dir, exist_ok=True)
+        print(f"✅ Created directory: {abs_save_dir}")
+
     # Extract model state (handle DataParallel)
     model_state = model.module.state_dict() if use_multi_gpu else model.state_dict()
 
     # Save with IoU in filename
-    checkpoint_path = os.path.join(save_dir, f'best_model_epoch{epoch:04d}_IoU{iou:.4f}.pth')
+    checkpoint_path = os.path.join(abs_save_dir, f'best_model_epoch{epoch:04d}_IoU{iou:.4f}.pth')
 
-    torch.save({
-        'epoch': epoch,
-        'model_state_dict': model_state,
-        'optimizer_state_dict': optimizer.state_dict(),
-        'iou': iou,
-    }, checkpoint_path)
+    try:
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model_state,
+            'optimizer_state_dict': optimizer.state_dict(),
+            'iou': iou,
+        }, checkpoint_path)
+
+        # Verify file was actually saved
+        if os.path.exists(checkpoint_path):
+            file_size_mb = os.path.getsize(checkpoint_path) / (1024 * 1024)
+            print(f"✅ Best model saved: {checkpoint_path}")
+            print(f"   📊 File size: {file_size_mb:.2f} MB")
+        else:
+            print(f"❌ ERROR: File not found after save: {checkpoint_path}")
+    except Exception as e:
+        print(f"❌ ERROR saving best model: {e}")
+        raise
 
     # Also save as latest_best_model.pth for easy loading
-    latest_path = os.path.join(save_dir, 'latest_best_model.pth')
-    torch.save({
-        'epoch': epoch,
-        'model_state_dict': model_state,
-        'optimizer_state_dict': optimizer.state_dict(),
-        'iou': iou,
-    }, latest_path)
+    latest_path = os.path.join(abs_save_dir, 'latest_best_model.pth')
+    try:
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model_state,
+            'optimizer_state_dict': optimizer.state_dict(),
+            'iou': iou,
+        }, latest_path)
 
-    print(f"✅ Best model saved: {checkpoint_path}")
+        if os.path.exists(latest_path):
+            print(f"✅ Latest best model saved: {latest_path}")
+        else:
+            print(f"❌ ERROR: Latest best model not found after save")
+    except Exception as e:
+        print(f"❌ ERROR saving latest best model: {e}")
+
     return checkpoint_path
 
 
@@ -197,23 +229,41 @@ def save_last_epoch_model(model, optimizer, epoch, iou, save_dir, use_multi_gpu=
         optimizer: Optimizer
         epoch: Current epoch
         iou: Current IoU score
-        save_dir: Directory to save the model
+        save_dir: Directory to save the model (absolute path)
         use_multi_gpu: Whether using DataParallel
     """
+    # Verify save directory exists
+    abs_save_dir = os.path.abspath(save_dir)
+    if not os.path.exists(abs_save_dir):
+        print(f"⚠️  Save directory does not exist: {abs_save_dir}")
+        os.makedirs(abs_save_dir, exist_ok=True)
+        print(f"✅ Created directory: {abs_save_dir}")
+
     # Extract model state (handle DataParallel)
     model_state = model.module.state_dict() if use_multi_gpu else model.state_dict()
 
     # Save last epoch model
-    checkpoint_path = os.path.join(save_dir, f'last_epoch_model_epoch{epoch:04d}_IoU{iou:.4f}.pth')
+    checkpoint_path = os.path.join(abs_save_dir, f'last_epoch_model_epoch{epoch:04d}_IoU{iou:.4f}.pth')
 
-    torch.save({
-        'epoch': epoch,
-        'model_state_dict': model_state,
-        'optimizer_state_dict': optimizer.state_dict(),
-        'iou': iou,
-    }, checkpoint_path)
+    try:
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model_state,
+            'optimizer_state_dict': optimizer.state_dict(),
+            'iou': iou,
+        }, checkpoint_path)
 
-    print(f"✅ Last epoch model saved: {checkpoint_path}")
+        # Verify file was actually saved
+        if os.path.exists(checkpoint_path):
+            file_size_mb = os.path.getsize(checkpoint_path) / (1024 * 1024)
+            print(f"✅ Last epoch model saved: {checkpoint_path}")
+            print(f"   📊 File size: {file_size_mb:.2f} MB")
+        else:
+            print(f"❌ ERROR: File not found after save: {checkpoint_path}")
+    except Exception as e:
+        print(f"❌ ERROR saving last epoch model: {e}")
+        raise
+
     return checkpoint_path
 
 
@@ -242,7 +292,3 @@ def update_training_summary(save_dir, best_epoch, best_iou, last_epoch, last_iou
         f.write("=" * 80 + "\n")
 
     print(f"✅ Training summary updated in: {config_file}")
-
-
-# Import torch here (at module level) for save functions
-import torch
