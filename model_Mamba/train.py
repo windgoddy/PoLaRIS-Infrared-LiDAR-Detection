@@ -562,9 +562,26 @@ class Trainer:
                 recall_sum += recall
                 count += 1
                 
-                # Log best threshold periodically
+                # Log best threshold periodically with detailed sweep results
                 if batch_idx == 0 and epoch % 10 == 0:
                     print(f"  📊 Best threshold for batch 0: {best_batch_threshold:.2f}")
+                    print(f"      [DEBUG] Threshold sweep results for batch 0:")
+
+                    # Re-do sweep for logging (only for batch 0)
+                    for thresh in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]:
+                        pred_bin_debug = (heatmap_pred > thresh).float()
+                        gt_bin_debug = (heatmap_gt > 0.5).float()
+                        inter_debug = (pred_bin_debug * gt_bin_debug).sum(dim=(1, 2, 3))
+                        union_debug = (pred_bin_debug + gt_bin_debug).clamp(0, 1).sum(dim=(1, 2, 3))
+                        iou_debug = (inter_debug / (union_debug + 1e-7)).mean().item()
+                        tp_debug = inter_debug.sum().item()
+                        fp_debug = (pred_bin_debug * (1 - gt_bin_debug)).sum().item()
+                        fn_debug = ((1 - pred_bin_debug) * gt_bin_debug).sum().item()
+                        prec_debug = tp_debug / (tp_debug + fp_debug + 1e-7)
+                        rec_debug = tp_debug / (tp_debug + fn_debug + 1e-7)
+                        marker = " ← BEST" if abs(thresh - best_batch_threshold) < 0.01 else ""
+                        print(f"        thresh={thresh:.1f}: IoU={iou_debug:.4f}, P={prec_debug:.3f}, R={rec_debug:.3f}{marker}")
+
                     self.current_best_threshold = best_batch_threshold  # 保存供日志使用
 
         avg_iou = iou_sum / count
