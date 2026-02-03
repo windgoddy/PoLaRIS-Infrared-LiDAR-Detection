@@ -345,10 +345,12 @@ def save_model(mean_IOU, best_iou, save_dir, save_prefix, train_loss, test_loss,
     Returns:
         best_iou: 更新后的最佳 mIoU（如果当前 mIoU 更好则返回新值，否则返回原值）
     """
-    if mean_IOU > best_iou:        # Ensure result directory exists
+    if mean_IOU > best_iou:
+        # Ensure result directory exists
         result_path = 'result/' + save_dir
         os.makedirs(result_path, exist_ok=True)
-                save_mIoU_dir = 'result/' + save_dir + '/' + save_prefix + '_best_IoU_IoU.log'
+        
+        save_mIoU_dir = 'result/' + save_dir + '/' + save_prefix + '_best_IoU_IoU.log'
         save_other_metric_dir = 'result/' + save_dir + '/' + save_prefix + '_best_IoU_other_metric.log'
         now = datetime.now()
         dt_string = now.strftime("%d/%m/%Y %H:%M:%S")
