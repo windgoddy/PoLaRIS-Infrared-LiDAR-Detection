@@ -110,6 +110,7 @@ def init_training_log_csv(save_dir):
             'Train_Loss',
             'Test_Loss',
             'IoU',
+            'Box_IoU',
             'Precision',
             'Recall',
             'F1',
@@ -121,7 +122,7 @@ def init_training_log_csv(save_dir):
     return csv_path
 
 
-def log_epoch_metrics(csv_path, epoch, train_loss, test_loss, iou, precision, recall, f1, best_threshold, lr):
+def log_epoch_metrics(csv_path, epoch, train_loss, test_loss, iou, box_iou, precision, recall, f1, best_threshold, lr):
     """
     Log epoch metrics to CSV file with timestamp.
 
@@ -130,7 +131,8 @@ def log_epoch_metrics(csv_path, epoch, train_loss, test_loss, iou, precision, re
         epoch: Current epoch number
         train_loss: Training loss
         test_loss: Testing loss
-        iou: IoU metric
+        iou: IoU metric (pixel-wise segmentation)
+        box_iou: Box IoU metric (detection performance)
         precision: Precision metric
         recall: Recall metric
         f1: F1 score
@@ -148,6 +150,7 @@ def log_epoch_metrics(csv_path, epoch, train_loss, test_loss, iou, precision, re
             f'{train_loss:.6f}',
             f'{test_loss:.6f}',
             f'{iou:.4f}',
+            f'{box_iou:.4f}',
             f'{precision:.4f}',
             f'{recall:.4f}',
             f'{f1:.4f}',

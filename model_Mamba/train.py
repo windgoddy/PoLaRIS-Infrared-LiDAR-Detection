@@ -46,6 +46,9 @@ from model_Mamba.core.polaris_mamba import PoLaRIS_Mamba, polaris_mamba_tiny, po
 from model_Mamba.core.loss import GaussianFocalLoss, CombinedLoss, AverageMeter, BCEDiceLoss
 from model_Mamba.core.loss_improved import ImprovedBCEDiceLoss, ConfidenceCalibrationLoss
 
+# Mamba metrics (2026-02-03: Added Mask-to-Box IoU)
+from model_Mamba.core.metrics import calculate_mask_to_box_iou
+
 # Mamba I/O utilities
 from model_Mamba.utils_io import (
     create_experiment_dir,
@@ -233,7 +236,7 @@ class MambaDataset(Dataset):
             labels,
             img_size=(H, W),
             downscale=self.downscale,
-            fill_mode='ellipse',  # CHANGED: 'ellipse' reduces 50% background noise vs 'box'
+            fill_mode='box',  # CHANGED: 'ellipse' reduces 50% background noise vs 'box'
             ellipse_ratio=0.8,    # 80% of bbox size (conservative, can tune to 0.7-0.9)
         )
         # Keep variable name 'heatmap' for compatibility with rest of code
@@ -413,6 +416,7 @@ class Trainer:
 
         # Metrics
         self.best_iou = 0.0
+        self.best_box_iou = 0.0  # [NEW] Track best Mask-to-Box IoU
         self.best_epoch = 0
 
         # Logging
@@ -491,6 +495,7 @@ class Trainer:
         iou_sum = 0.0
         precision_sum = 0.0
         recall_sum = 0.0
+        box_iou_sum = 0.0  # [NEW] Mask-to-Box IoU accumulator
         count = 0
         
         # Debug: track prediction statistics
@@ -575,6 +580,15 @@ class Trainer:
                 recall_sum += recall
                 count += 1
                 
+                # [NEW] Calculate Mask-to-Box IoU (检测评估指标)
+                # 使用与 segmentation 相同的最佳阈值，确保公平对比
+                batch_box_iou = calculate_mask_to_box_iou(
+                    heatmap_pred, 
+                    heatmap_gt, 
+                    threshold=best_batch_threshold
+                )
+                box_iou_sum += batch_box_iou
+                
                 # Log best threshold periodically with detailed sweep results
                 if batch_idx == 0 and epoch % 10 == 0:
                     print(f"  📊 Best threshold for batch 0: {best_batch_threshold:.2f}")
@@ -601,11 +615,23 @@ class Trainer:
         avg_precision = precision_sum / count
         avg_recall = recall_sum / count
         avg_f1 = 2 * (avg_precision * avg_recall) / (avg_precision + avg_recall + 1e-7)
+        avg_box_iou = box_iou_sum / count  # [NEW] 平均 Mask-to-Box IoU
 
-        print(f"\n[Epoch {epoch}] Test Loss: {loss_meter.avg:.6f}, IoU: {avg_iou:.4f}, "
-              f"Precision: {avg_precision:.4f}, Recall: {avg_recall:.4f}, F1: {avg_f1:.4f}")
+        # 使用最近记录的 best_threshold（如果有）
+        best_threshold = getattr(self, 'current_best_threshold', self.args.peak_threshold)
+
+        print(f"\n[Epoch {epoch}] Test Results:")
+        print(f"  Loss: {loss_meter.avg:.6f}")
+        print(f"  Segmentation IoU : {avg_iou:.4f}  (Pixel-wise)")
+        print(f"  Mask-to-Box IoU  : {avg_box_iou:.4f}  🎯 (Detection Performance)")
+        print(f"  Precision        : {avg_precision:.4f}")
+        print(f"  Recall           : {avg_recall:.4f}")
+        print(f"  F1 Score         : {avg_f1:.4f}")
+        print(f"  Best Threshold   : {best_threshold:.2f}")
+        
         if epoch % 10 == 0:
-            print(f"  Current threshold: {self.args.peak_threshold}")
+            print(f"\n  💡 Tip: Mask-to-Box IoU reflects real detection ability")
+            print(f"     (independent of GT shape: box vs ellipse)")
         
         # Print debug stats every 10 epochs
         if epoch % 10 == 0 and pred_stats['min']:
@@ -614,18 +640,13 @@ class Trainer:
             print(f"     GT:   min={min(gt_stats['min']):.6f}, max={max(gt_stats['max']):.6f}, mean={sum(gt_stats['mean'])/len(gt_stats['mean']):.6f}")
             print(f"     GT positive pixels: {sum(gt_stats['num_pos'])/len(gt_stats['num_pos']):.1f} per batch")
             print(f"     Threshold: {self.args.peak_threshold}")
-        avg_recall = recall_sum / count
-
-        # 使用最近记录的 best_threshold（如果有）
-        best_threshold = getattr(self, 'current_best_threshold', self.args.peak_threshold)
-
-        print(f"\n[Epoch {epoch}] Test Loss: {loss_meter.avg:.6f}, IoU: {avg_iou:.4f}, "
-              f"Precision: {avg_precision:.4f}, Recall: {avg_recall:.4f}, Best_Threshold: {best_threshold:.2f}")
 
         # Save best model
         if avg_iou > self.best_iou:
             self.best_iou = avg_iou
             self.best_epoch = epoch
+            # [NEW] Also track best Box IoU (可选：如果要用 Box IoU 作为保存标准)
+            self.best_box_iou = avg_box_iou
 
             # Use new save function with IoU in filename
             save_best_model(
@@ -637,7 +658,7 @@ class Trainer:
                 self.use_multi_gpu
             )
 
-        return loss_meter.avg, avg_iou, avg_precision, avg_recall, avg_f1, best_threshold
+        return loss_meter.avg, avg_iou, avg_precision, avg_recall, avg_f1, best_threshold, avg_box_iou
 
     def run(self):
         """Main training loop."""
@@ -657,19 +678,20 @@ class Trainer:
             # Training
             train_loss = self.training(epoch)
 
-            # Testing
-            test_loss, test_iou, test_precision, test_recall, test_f1, best_threshold = self.testing(epoch)
+            # Testing (返回值包含 box_iou)
+            test_loss, test_iou, test_precision, test_recall, test_f1, best_threshold, test_box_iou = self.testing(epoch)
 
             # Update scheduler
             self.scheduler.step()
 
-            # Log results with timestamp
+            # Log results with timestamp (包含 Box IoU)
             log_epoch_metrics(
                 self.train_log_path,
                 epoch,
                 train_loss,
                 test_loss,
                 test_iou,
+                test_box_iou,  # [NEW] 添加 Box IoU 参数
                 test_precision,
                 test_recall,
                 test_f1,
@@ -724,7 +746,8 @@ class Trainer:
 
         print(f"\n{'=' * 60}")
         print(f"Training Complete!")
-        print(f"Best IoU: {self.best_iou:.4f} at Epoch {self.best_epoch}")
+        print(f"Best Segmentation IoU: {self.best_iou:.4f} at Epoch {self.best_epoch}")
+        print(f"Best Mask-to-Box IoU : {self.best_box_iou:.4f} (Detection Performance)")
         print(f"Final IoU: {self.last_iou:.4f} at Epoch {self.last_epoch}")
         print(f"Model saved to: {self.args.save_dir}")
         print(f"{'=' * 60}\n")
