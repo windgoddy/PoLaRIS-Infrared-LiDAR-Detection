@@ -76,6 +76,24 @@ def save_training_config(args, save_dir):
         for key, value in sorted(dict_args.items()):
             f.write(f"  {key:25s}: {value}\n")
 
+        # Write Loss configuration (2026-02-03)
+        f.write("\n" + "=" * 80 + "\n")
+        f.write("Loss Configuration:\n")
+        f.write("-" * 80 + "\n")
+        f.write(f"  Loss Type: {getattr(args, 'loss_type', 'improved_bce_dice')}\n")
+        if hasattr(args, 'focal_alpha'):
+            f.write(f"  Focal Alpha: {args.focal_alpha}\n")
+        if hasattr(args, 'focal_gamma'):
+            f.write(f"  Focal Gamma: {args.focal_gamma}\n")
+        if hasattr(args, 'dice_weight'):
+            f.write(f"  Dice Weight: {args.dice_weight}\n")
+        if hasattr(args, 'projection_weight'):
+            f.write(f"  Projection Weight: {args.projection_weight}\n")
+        if hasattr(args, 'projection_mode'):
+            f.write(f"  Projection Mode: {args.projection_mode}\n")
+        if hasattr(args, 'ohem_ratio'):
+            f.write(f"  OHEM Ratio: {args.ohem_ratio}\n")
+
         # Write model info
         f.write("\n" + "=" * 80 + "\n")
         f.write("Model Information:\n")
@@ -115,14 +133,15 @@ def init_training_log_csv(save_dir):
             'Recall',
             'F1',
             'Best_Threshold',
-            'LR'
+            'LR',
+            'Loss_Type'  # 2026-02-03: Track loss function type
         ])
 
     print(f"✅ Training log CSV initialized: {csv_path}")
     return csv_path
 
 
-def log_epoch_metrics(csv_path, epoch, train_loss, test_loss, iou, box_iou, precision, recall, f1, best_threshold, lr):
+def log_epoch_metrics(csv_path, epoch, train_loss, test_loss, iou, box_iou, precision, recall, f1, best_threshold, lr, loss_type='improved_bce_dice'):
     """
     Log epoch metrics to CSV file with timestamp.
 
@@ -138,6 +157,7 @@ def log_epoch_metrics(csv_path, epoch, train_loss, test_loss, iou, box_iou, prec
         f1: F1 score
         best_threshold: Best threshold found
         lr: Current learning rate
+        loss_type: Loss function type (2026-02-03)
     """
     now = datetime.now()
     timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -155,7 +175,8 @@ def log_epoch_metrics(csv_path, epoch, train_loss, test_loss, iou, box_iou, prec
             f'{recall:.4f}',
             f'{f1:.4f}',
             f'{best_threshold:.2f}',
-            f'{lr:.6f}'
+            f'{lr:.6f}',
+            loss_type  # 2026-02-03: Record loss function type
         ])
 
 

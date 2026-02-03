@@ -45,6 +45,7 @@ from model.load_param_data import load_dataset
 from model_Mamba.core.polaris_mamba import PoLaRIS_Mamba, polaris_mamba_tiny, polaris_mamba_small, polaris_mamba_base
 from model_Mamba.core.loss import GaussianFocalLoss, CombinedLoss, AverageMeter, BCEDiceLoss
 from model_Mamba.core.loss_improved import ImprovedBCEDiceLoss, ConfidenceCalibrationLoss
+from model_Mamba.core.loss_advanced import LossFactory  # 2026-02-03: Multi-loss support
 
 # Mamba metrics (2026-02-03: Added Mask-to-Box IoU)
 from model_Mamba.core.metrics import calculate_mask_to_box_iou
@@ -137,14 +138,28 @@ def parse_args():
                         choices=['CosineAnnealingLR', 'StepLR'],
                         help='Learning rate scheduler')
 
-    # Loss function
-    parser.add_argument('--loss_type', type=str, default='combined',
-                        choices=['focal', 'combined'],
-                        help='Loss function type')
+    # Loss function (2026-02-03: Extended with advanced loss options)
+    parser.add_argument('--loss_type', type=str, default='improved_bce_dice',
+                        choices=['improved_bce_dice', 'projection', 'hybrid', 'focal', 'combined'],
+                        help='Loss function type: improved_bce_dice (baseline), projection (weak-supervision), hybrid (recommended for Box GT)')
+    parser.add_argument('--focal_alpha', type=float, default=0.25,
+                        help='Focal loss alpha parameter (positive sample weight)')
+    parser.add_argument('--focal_gamma', type=float, default=2.5,
+                        help='Focal loss gamma parameter (focusing parameter)')
+    parser.add_argument('--dice_weight', type=float, default=4.0,
+                        help='Dice loss weight')
+    parser.add_argument('--projection_weight', type=float, default=1.0,
+                        help='Projection loss weight (for hybrid loss)')
+    parser.add_argument('--projection_mode', type=str, default='max',
+                        choices=['max', 'mean'],
+                        help='Projection mode: max (default, sensitive to sparse targets) or mean')
+    parser.add_argument('--ohem_ratio', type=float, default=0.0,
+                        help='OHEM ratio (0.0 = disabled)')
+    # Legacy parameters (for backward compatibility)
     parser.add_argument('--loss_alpha', type=float, default=2.0,
-                        help='Focal loss alpha parameter')
+                        help='[DEPRECATED] Focal loss alpha parameter (use --focal_alpha instead)')
     parser.add_argument('--loss_beta', type=float, default=4.0,
-                        help='Gaussian falloff beta parameter')
+                        help='[DEPRECATED] Gaussian falloff beta parameter')
 
     # Hardware and logging
     parser.add_argument('--gpus', type=str, default='0',
@@ -363,31 +378,47 @@ class Trainer:
         num_params = sum(p.numel() for p in self.net.parameters())
         print(f"✅ Model: {args.model}, Parameters: {num_params / 1e6:.2f}M")
 
-        # [SCHEME A] Loss function - Improved BCE + Dice for Binary Segmentation (2026-02-02)
-        # CRITICAL FIX for threshold=0.9 issue:
-        # - Standard BCE treats all samples equally, allowing background to predict 0.6-0.8
-        # - Focal BCE downweights easy examples, forces model to focus on hard negatives
-        # - Increased dice_weight=4.0 to force tighter segmentation (reduce false positives)
-        self.criterion = ImprovedBCEDiceLoss(
-            focal_weight=1.0,      # Focal BCE component
-            dice_weight=4.0,       # Increased from 2.0 to 4.0 (stronger FP suppression)
-            focal_alpha=0.25,      # ⬇️ CORRECTED: 0.25 is standard for imbalanced data (was 0.90, too extreme)
-            focal_gamma=2.5,       # OPTIMIZED: 2.5 balances easy/hard samples (not too aggressive)
-            ohem_ratio=0.0,        # DISABLED: Focal Loss already does hard example mining
-            smooth=1.0,
-        )
-        # Optional: Add confidence calibration loss (can be enabled for fine-tuning)
+        # [2026-02-03] Loss Function Factory - Support Multiple Loss Strategies
+        # Available types:
+        # 1. 'improved_bce_dice': Baseline (Focal BCE + Dice)
+        # 2. 'projection': Weak-supervision via X/Y projection (allows irregular shapes)
+        # 3. 'hybrid': Combination of both (RECOMMENDED for Box GT)
+        
+        loss_config = {
+            'focal_alpha': args.focal_alpha,
+            'focal_gamma': args.focal_gamma,
+            'dice_weight': args.dice_weight,
+            'projection_weight': args.projection_weight,
+            'projection_mode': args.projection_mode,
+            'ohem_ratio': args.ohem_ratio,
+        }
+        
+        self.criterion = LossFactory.create(args.loss_type, **loss_config)
+        self.loss_type = args.loss_type
+        self.loss_name = LossFactory.get_loss_name(args.loss_type, **loss_config)
+        
+        # Optional: Confidence calibration loss (for fine-tuning)
         self.calib_criterion = ConfidenceCalibrationLoss(
-            target_bg_conf=0.1,    # Force background towards 0.1
-            target_fg_conf=0.9,    # Force targets towards 0.9
+            target_bg_conf=0.1,
+            target_fg_conf=0.9,
         )
-        self.use_calib_loss = False  # Set to True to enable
+        self.use_calib_loss = False
 
-        print("✅ Using Improved BCE + Dice Loss (CORRECTED - α=0.25, γ=2.5)")
-        print("   - Focal α=0.25: STANDARD for imbalanced data (1:3 pos:neg ratio)")
-        print("   - Focal γ=2.5: Balanced hard example focus")
-        print("   - OHEM DISABLED: Focal Loss already handles hard mining")
-        print("   - Dice weight 4.0: Forces tight segmentation")
+        print(f"\n{'='*70}")
+        print(f"Loss Configuration")
+        print(f"{'='*70}")
+        print(f"  Loss Type: {args.loss_type}")
+        print(f"  Loss Name: {self.loss_name}")
+        if args.loss_type in ['improved_bce_dice', 'hybrid']:
+            print(f"  - Focal α: {args.focal_alpha} (pos/neg weight balance)")
+            print(f"  - Focal γ: {args.focal_gamma} (hard example focus)")
+            print(f"  - Dice weight: {args.dice_weight} (segmentation quality)")
+        if args.loss_type in ['projection', 'hybrid']:
+            print(f"  - Projection weight: {args.projection_weight} (boundary constraint)")
+            print(f"  - Projection mode: {args.projection_mode} (max=sensitive, mean=smooth)")
+        if args.ohem_ratio > 0:
+            print(f"  - OHEM ratio: {args.ohem_ratio} (hard example mining)")
+        print(f"{'='*70}\n")
         print("   - MaxPool LiDAR + Skip Connection: Preserves small target features")
         print("   - Target: Threshold 0.3-0.5, Precision 70%+, IoU 35%+ by epoch 50")
 
@@ -622,8 +653,8 @@ class Trainer:
 
         print(f"\n[Epoch {epoch}] Test Results:")
         print(f"  Loss: {loss_meter.avg:.6f}")
-        print(f"  Segmentation IoU : {avg_iou:.4f}  (Pixel-wise)")
-        print(f"  Mask-to-Box IoU  : {avg_box_iou:.4f}  🎯 (Detection Performance)")
+        print(f"  Segmentation IoU : {avg_iou:.4f} ")
+        print(f"  Mask-to-Box IoU  : {avg_box_iou:.4f} ")
         print(f"  Precision        : {avg_precision:.4f}")
         print(f"  Recall           : {avg_recall:.4f}")
         print(f"  F1 Score         : {avg_f1:.4f}")
@@ -684,19 +715,20 @@ class Trainer:
             # Update scheduler
             self.scheduler.step()
 
-            # Log results with timestamp (包含 Box IoU)
+            # Log results with timestamp (包含 Box IoU 和 Loss Type)
             log_epoch_metrics(
                 self.train_log_path,
                 epoch,
                 train_loss,
                 test_loss,
                 test_iou,
-                test_box_iou,  # [NEW] 添加 Box IoU 参数
+                test_box_iou,  # [2026-02-02] 添加 Box IoU 参数
                 test_precision,
                 test_recall,
                 test_f1,
                 best_threshold,
-                self.optimizer.param_groups[0]['lr']
+                self.optimizer.param_groups[0]['lr'],
+                loss_type=self.loss_type  # [2026-02-03] 添加 Loss Type 参数
             )
 
             # Store last epoch metrics

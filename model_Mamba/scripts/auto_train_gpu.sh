@@ -65,7 +65,7 @@ echo ""
 echo "💡 提示: 按 Ctrl+C 可优雅停止训练（会保存 checkpoint）"
 echo ""
 
-# 训练参数配置 (Updated 2026-02-02 - FINAL FIX)
+# 训练参数配置 (Updated 2026-02-03 - Dynamic Experiment Naming & Loss Support)
 DATASET="Pohang-Canal-3k"
 SPLIT_METHOD="50_50_2k_new"  # Remote server split directory
 MODEL="mamba_tiny"
@@ -73,7 +73,25 @@ EPOCHS=200  # Reduced from 1000 for faster validation
 LR=0.0002  # 2e-4, optimal learning rate
 PEAK_THRESHOLD=0.35  # Default threshold (will use dynamic best_threshold during testing)
 SAVE_INTERVAL=50  # Save checkpoint every 50 epochs
-EXPERIMENT_NAME="FINAL_FIX_alpha0.90_gamma2.5_maxpool"  # Track this critical fix (alpha 0.90 for 1:11 ratio)
+
+# Loss 参数配置
+# Loss Type: 'improved_bce_dice' (baseline), 'projection' (weak-supervision), 'hybrid' (recommended)
+LOSS_TYPE="projection"  # 可修改为 'improved_bce_dice' 'projection' 或 'hybrid' 进行实验
+FOCAL_ALPHA=0.25  # Focal loss alpha (positive sample weight)
+FOCAL_GAMMA=2.5   # Focal loss gamma (focusing parameter)
+DICE_WEIGHT=4.0   # Dice loss weight
+PROJECTION_WEIGHT=1.0  # Projection loss weight (for hybrid loss)
+PROJECTION_MODE="max"  # Projection mode: 'max' or 'mean'
+OHEM_RATIO=0.0    # OHEM ratio (0.0 = disabled)
+
+# 动态生成实验名称（反映实际参数配置）
+if [ "$LOSS_TYPE" = "hybrid" ]; then
+    EXPERIMENT_NAME="Hybrid_a${FOCAL_ALPHA}_g${FOCAL_GAMMA}_d${DICE_WEIGHT}_p${PROJECTION_WEIGHT}_${PROJECTION_MODE}"
+elif [ "$LOSS_TYPE" = "projection" ]; then
+    EXPERIMENT_NAME="Projection_${PROJECTION_MODE}"
+else
+    EXPERIMENT_NAME="BCEDice_a${FOCAL_ALPHA}_g${FOCAL_GAMMA}_d${DICE_WEIGHT}"
+fi
 
 # 获取可用 GPU 列表（按空闲显存从大到小排序）
 echo ""
@@ -114,10 +132,11 @@ for GPU_ID in $GPU_LIST; do
         # 生成日志文件名（保存在实验目录下）
         LOG_FILE="$SAVE_DIR/training_mamba_gpu${GPU_ID}_bs${BATCH_SIZE}_${DT_STRING}.log"
 
-        # 启动训练 (Updated 2026-02-02: Use absolute path and pre-created save_dir)
+        # 启动训练 (Updated 2026-02-03: Added loss type parameters)
         echo "🚀 启动训练..."
         echo "  Training script: $MODEL_MAMBA_DIR/train.py"
         echo "  Log file: $LOG_FILE"
+        echo "  Loss type: $LOSS_TYPE"
         CUDA_VISIBLE_DEVICES=$GPU_ID python "$MODEL_MAMBA_DIR/train.py" \
             --root "$PROJECT_ROOT/dataset" \
             --dataset $DATASET \
@@ -130,6 +149,13 @@ for GPU_ID in $GPU_LIST; do
             --peak_threshold $PEAK_THRESHOLD \
             --save_interval $SAVE_INTERVAL \
             --experiment_name $EXPERIMENT_NAME \
+            --loss_type $LOSS_TYPE \
+            --focal_alpha $FOCAL_ALPHA \
+            --focal_gamma $FOCAL_GAMMA \
+            --dice_weight $DICE_WEIGHT \
+            --projection_weight $PROJECTION_WEIGHT \
+            --projection_mode $PROJECTION_MODE \
+            --ohem_ratio $OHEM_RATIO \
             --save_dir "$SAVE_DIR" \
             --gpus 0 \
             > $LOG_FILE 2>&1 &
