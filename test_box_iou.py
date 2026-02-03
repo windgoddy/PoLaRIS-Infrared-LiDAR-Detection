@@ -11,74 +11,73 @@ Author: PoLaRIS Team
 Date: 2026-02-03
 """
 
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader
-from torchvision import transforms
-from tqdm import tqdm
-import numpy as np
-import argparse
-import os
-import sys
+def create_test_loader(args):
+    """
+    创建测试数据加载器
+    """
+    print(f"\n📂 加载测试数据集...")
 
-# 添加项目根目录到路径
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, SCRIPT_DIR)
+    dataset_dir = os.path.join(args.root, args.dataset)
+    _, val_img_ids, _ = load_dataset(args.root, args.dataset, args.split_method)
 
-# 导入模型和工具
-from model.model_DNANet import DNANet, Res_CBAM_block
-from model.model_Phase3 import MS_CAFNet, MS_CAFNet_DualGeo
-from model.utils import TestSetLoader, AverageMeter
-from model.utils_lidar import PoLaRISTestLoader, polaris_collate_fn
-from model.metric import calculate_mask_to_box_iou, mIoU
-from model.load_param_data import load_dataset, load_param
+    print(f"  ✓ 数据集: {args.dataset}")
+    print(f"  ✓ 测试样本数: {len(val_img_ids)}")
 
+    use_lidar_loader = (args.use_lidar_dataloader == 'True')
 
-def parse_args():
-    """解析命令行参数"""
-    parser = argparse.ArgumentParser(description='Test Mask-to-Box IoU for trained model')
+    if use_lidar_loader:
+        print(f"  ✓ 使用 PoLaRIS LiDAR DataLoader")
+        testset = PoLaRISTestLoader(
+            dataset_dir=dataset_dir,
+            img_id=val_img_ids,
+            base_size=args.base_size,
+            crop_size=args.crop_size,
+            transform=None,
+            suffix=args.suffix,
+            normalize_16bit=(args.normalize_16bit == 'True'),
+            in_channels=args.in_channels,
+            image_folder=args.image_folder
+        )
+        test_loader = DataLoader(
+            dataset=testset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.workers,
+            drop_last=False,
+            collate_fn=polaris_collate_fn
+        )
+    else:
+        print(f"  ✓ 使用传统 DataLoader")
+        if args.in_channels == 1:
+            input_transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize([0.5], [0.5])
+            ])
+        else:
+            input_transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize([.485, .456, .406], [.229, .224, .225])
+            ])
 
-    # 必需参数
-    parser.add_argument('--checkpoint', type=str, required=True,
-                        help='Path to model checkpoint (.pth.tar file)')
+        testset = TestSetLoader(
+            dataset_dir,
+            img_id=val_img_ids,
+            base_size=args.base_size,
+            crop_size=args.crop_size,
+            transform=input_transform,
+            suffix=args.suffix,
+            in_channels=args.in_channels,
+            image_folder=args.image_folder
+        )
+        test_loader = DataLoader(
+            dataset=testset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.workers,
+            drop_last=False
+        )
 
-    # 可选参数
-    parser.add_argument('--gpu', type=str, default='0',
-                        help='GPU ID to use (default: 0)')
-    parser.add_argument('--threshold', type=float, default=0.5,
-                        help='Binary threshold for segmentation (default: 0.5)')
-    parser.add_argument('--batch_size', type=int, default=4,
-                        help='Test batch size (default: 4)')
-
-    # 数据集参数（通常从 checkpoint 推断，但可以覆盖）
-    parser.add_argument('--dataset', type=str, default='Pohang-Canal-3k',
-                        help='Dataset name')
-    parser.add_argument('--root', type=str, default='dataset/',
-                        help='Dataset root directory')
-    parser.add_argument('--split_method', type=str, default='50_50_2k_new',
-                        help='Train/test split method')
-    parser.add_argument('--image_folder', type=str, default='images',
-                        help='Image folder name')
-    parser.add_argument('--suffix', type=str, default='.png',
-                        help='Image file suffix')
-
-    # 模型参数
-    parser.add_argument('--model', type=str, default=None,
-                        help='Model type (auto-detect from checkpoint if not specified)')
-    parser.add_argument('--in_channels', type=int, default=1,
-                        help='Number of input channels (1=IR only, 2=IR+Depth)')
-    parser.add_argument('--base_size', type=int, default=512,
-                        help='Base image size')
-    parser.add_argument('--crop_size', type=int, default=480,
-                        help='Crop size for testing')
-
-    # 高级参数
-    parser.add_argument('--use_lidar_dataloader', type=str, default='False',
-                        help='Use PoLaRIS LiDAR DataLoader (True/False)')
-    parser.add_argument('--normalize_16bit', type=str, default='False',
-                        help='Use Min-Max normalization for 16-bit images')
-    parser.add_argument('--workers', type=int, default=4,
-                        help='Number of data loading workers')
+    return test_loader, use_lidar_loader
 
     return parser.parse_args()
 
@@ -100,10 +99,10 @@ def load_model_from_checkpoint(checkpoint_path, device):
     # 加载 checkpoint
     checkpoint = torch.load(checkpoint_path, map_location=device)
 
-    # 提取信息
+    # 提取信息（兼容 mamba 保存字段）
     epoch = checkpoint.get('epoch', 'Unknown')
-    mean_IOU = checkpoint.get('mean_IOU', checkpoint.get('mIoU', 'Unknown'))
-    box_IOU = checkpoint.get('box_IOU', None)
+    mean_IOU = checkpoint.get('mean_IOU', checkpoint.get('mIoU', checkpoint.get('iou', 'Unknown')))
+    box_IOU = checkpoint.get('box_IOU', checkpoint.get('box_iou', None))
 
     print(f"  ✓ Checkpoint 信息:")
     print(f"    - Epoch: {epoch}")
@@ -129,29 +128,33 @@ def detect_model_params(state_dict, model_type):
     """
     params = {}
 
-    # 检测 deep_supervision
+    # DNANet: deep supervision + in_channels
     if model_type == 'DNANet':
-        # 如果有 final1, final2, final3, final4 层，说明使用了 deep_supervision
         has_deep_supervision = any('final1.' in key for key in state_dict.keys())
         params['deep_supervision'] = has_deep_supervision
 
-    # 检测 in_channels
-    # 查找第一层卷积 (conv0_0) 来推断输入通道数
-    first_conv_key = None
-    for key in state_dict.keys():
-        # 明确查找第一层：conv0_0
-        if 'conv0_0' in key and 'weight' in key and 'conv0_0.0' in key:
-            first_conv_key = key
-            break
+        first_conv_key = None
+        for key in state_dict.keys():
+            if 'conv0_0' in key and 'weight' in key and 'conv0_0.0' in key:
+                first_conv_key = key
+                break
 
-    if first_conv_key:
-        conv_weight = state_dict[first_conv_key]
-        if len(conv_weight.shape) == 4:  # [out_channels, in_channels, H, W]
-            in_channels = conv_weight.shape[1]
-            params['in_channels'] = in_channels
-            print(f"  ℹ️  从 {first_conv_key} 检测到 in_channels: {in_channels}")
-    else:
-        print(f"  ⚠️  未找到 conv0_0 层，无法检测 in_channels")
+        if first_conv_key:
+            conv_weight = state_dict[first_conv_key]
+            if len(conv_weight.shape) == 4:
+                in_channels = conv_weight.shape[1]
+                params['in_channels'] = in_channels
+                print(f"  ℹ️  从 {first_conv_key} 检测到 in_channels: {in_channels}")
+        else:
+            print(f"  ⚠️  未找到 conv0_0 层，无法检测 in_channels")
+
+    # Mamba: infer in_channels and embed_dim from patch_embed
+    if 'patch_embed.proj.weight' in state_dict:
+        w = state_dict['patch_embed.proj.weight']
+        if len(w.shape) == 4:
+            params['in_channels'] = w.shape[1]
+            params['embed_dim'] = w.shape[0]
+            print(f"  ℹ️  Mamba patch_embed.proj.weight shape: {list(w.shape)} → in_channels={params['in_channels']}, embed_dim={params['embed_dim']}")
 
     return params
 
@@ -159,10 +162,16 @@ def detect_model_params(state_dict, model_type):
 def create_model(model_type, in_channels, checkpoint, device):
     """
     创建并加载模型
+
+    Returns:
+        model: 已加载权重的模型
+        apply_sigmoid: 是否需要在推理后显式 sigmoid（Mamba 已在头部 sigmoid）
     """
     print(f"\n🔧 创建模型: {model_type}")
 
-    state_dict = checkpoint['state_dict']
+    state_dict = checkpoint.get('state_dict') or checkpoint.get('model_state_dict')
+    if state_dict is None:
+        raise KeyError("Checkpoint missing state_dict/model_state_dict")
 
     # 自动检测模型参数
     detected_params = detect_model_params(state_dict, model_type)
@@ -171,12 +180,13 @@ def create_model(model_type, in_channels, checkpoint, device):
         print(f"    - deep_supervision: {detected_params['deep_supervision']}")
     if 'in_channels' in detected_params:
         print(f"    - in_channels: {detected_params['in_channels']}")
-        # 使用检测到的 in_channels 覆盖命令行参数
         in_channels = detected_params['in_channels']
+    if 'embed_dim' in detected_params:
+        print(f"    - embed_dim: {detected_params['embed_dim']}")
 
-    # 根据模型类型创建模型
+    apply_sigmoid = True
+
     if model_type == 'DNANet':
-        # DNANet 参数
         nb_filter, num_blocks = load_param('three', 'resnet_18')
         deep_supervision = detected_params.get('deep_supervision', False)
         model = DNANet(
@@ -191,39 +201,47 @@ def create_model(model_type, in_channels, checkpoint, device):
         model = MS_CAFNet(num_classes=1, input_channels=in_channels)
     elif model_type == 'MS_CAFNet_DualGeo':
         model = MS_CAFNet_DualGeo(num_classes=1, input_channels=in_channels)
+    elif model_type in ['mamba', 'mamba_tiny', 'mamba_small', 'mamba_base']:
+        # Map embed_dim to depths if available
+        embed_dim = detected_params.get('embed_dim', 96)
+        depths_map = {64: [2, 2, 4, 2], 96: [2, 2, 6, 2], 128: [2, 2, 12, 2]}
+        depths = depths_map.get(embed_dim, [2, 2, 6, 2])
+        model = PoLaRIS_Mamba(
+            in_channels=in_channels,
+            embed_dim=embed_dim,
+            depths=depths,
+            use_lidar=(in_channels == 2)
+        )
+        apply_sigmoid = False  # GaussianHead 内部已做 sigmoid
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
     # 加载权重
-    model.load_state_dict(state_dict)
+    model.load_state_dict(state_dict, strict=False)
     model = model.to(device)
     model.eval()
 
-    # 统计参数
     num_params = sum(p.numel() for p in model.parameters())
     print(f"  ✓ 模型参数: {num_params / 1e6:.2f}M")
 
-    return model
+    return model, apply_sigmoid
 
 
-def create_test_loader(args):
+def create_test_loader(args, force_lidar=False):
     """
     创建测试数据加载器
     """
     print(f"\n📂 加载测试数据集...")
 
-    # 加载数据集路径
     dataset_dir = os.path.join(args.root, args.dataset)
     _, val_img_ids, _ = load_dataset(args.root, args.dataset, args.split_method)
 
     print(f"  ✓ 数据集: {args.dataset}")
     print(f"  ✓ 测试样本数: {len(val_img_ids)}")
 
-    # 根据配置选择 DataLoader
-    use_lidar_loader = (args.use_lidar_dataloader == 'True')
+    use_lidar_loader = force_lidar or (args.use_lidar_dataloader == 'True')
 
     if use_lidar_loader:
-        # PoLaRIS LiDAR DataLoader
         print(f"  ✓ 使用 PoLaRIS LiDAR DataLoader")
         testset = PoLaRISTestLoader(
             dataset_dir=dataset_dir,
@@ -245,7 +263,6 @@ def create_test_loader(args):
             collate_fn=polaris_collate_fn
         )
     else:
-        # 传统 DataLoader
         print(f"  ✓ 使用传统 DataLoader")
         if args.in_channels == 1:
             input_transform = transforms.Compose([
@@ -279,7 +296,7 @@ def create_test_loader(args):
     return test_loader, use_lidar_loader
 
 
-def test_model(model, test_loader, use_lidar_loader, threshold, device):
+def test_model(model, test_loader, use_lidar_loader, threshold, device, apply_sigmoid=True, model_type=''):
     """
     测试模型并计算 Mask-to-Box IoU
     """
@@ -321,7 +338,16 @@ def test_model(model, test_loader, use_lidar_loader, threshold, device):
                 print(f"  - 标签正样本比例: {(labels > 0.5).float().mean().item():.4f}")
 
             # 前向传播
-            pred = model(data)
+            if model_type.startswith('mamba'):
+                if data.shape[1] >= 2:
+                    ir = data[:, 0:1]
+                    lidar = data[:, 1:2]
+                else:
+                    ir = data
+                    lidar = torch.zeros_like(ir)
+                pred = model(ir, lidar)
+            else:
+                pred = model(data)
 
             # 处理 deep_supervision 的情况（输出是列表）
             if isinstance(pred, list):
@@ -329,7 +355,8 @@ def test_model(model, test_loader, use_lidar_loader, threshold, device):
                 pred = pred[-1]
 
             # 应用 sigmoid 激活（模型输出是 logits）
-            pred = torch.sigmoid(pred)
+            if apply_sigmoid:
+                pred = torch.sigmoid(pred)
 
             # 调试信息（仅第一个 batch）
             if batch_idx == 0:
@@ -457,11 +484,19 @@ def main():
 
     # 2. 自动推断模型类型（如果未指定）
     if args.model is None:
-        # 从 checkpoint 路径推断
         checkpoint_name = os.path.basename(args.checkpoint)
         checkpoint_dir = os.path.dirname(args.checkpoint)
 
-        if 'DNANet' in checkpoint_dir or 'DNANet' in checkpoint_name:
+        if 'mamba' in checkpoint_dir.lower() or 'mamba' in checkpoint_name.lower():
+            if 'mamba_tiny' in checkpoint_name.lower() or 'mamba_tiny' in checkpoint_dir.lower():
+                args.model = 'mamba_tiny'
+            elif 'mamba_small' in checkpoint_name.lower() or 'mamba_small' in checkpoint_dir.lower():
+                args.model = 'mamba_small'
+            elif 'mamba_base' in checkpoint_name.lower() or 'mamba_base' in checkpoint_dir.lower():
+                args.model = 'mamba_base'
+            else:
+                args.model = 'mamba'
+        elif 'DNANet' in checkpoint_dir or 'DNANet' in checkpoint_name:
             args.model = 'DNANet'
         elif 'MS_CAFNet_DualGeo' in checkpoint_dir:
             args.model = 'MS_CAFNet_DualGeo'
@@ -481,14 +516,21 @@ def main():
         print(f"  ✓ 从 checkpoint 检测到 in_channels={detected_params['in_channels']}，更新数据加载器配置")
         args.in_channels = detected_params['in_channels']
 
+    # Mamba 默认使用 LiDAR Loader & 16-bit 归一化
+    force_lidar = False
+    if args.model.startswith('mamba'):
+        args.use_lidar_dataloader = 'True'
+        args.normalize_16bit = 'True'
+        force_lidar = True
+
     # 4. 创建模型
-    model = create_model(args.model, args.in_channels, checkpoint, device)
+    model, apply_sigmoid = create_model(args.model, args.in_channels, checkpoint, device)
 
     # 5. 创建测试数据加载器
-    test_loader, use_lidar_loader = create_test_loader(args)
+    test_loader, use_lidar_loader = create_test_loader(args, force_lidar=force_lidar)
 
     # 6. 测试模型
-    results = test_model(model, test_loader, use_lidar_loader, args.threshold, device)
+    results = test_model(model, test_loader, use_lidar_loader, args.threshold, device, apply_sigmoid=apply_sigmoid, model_type=args.model)
 
     # 7. 打印结果
     print_results(results, checkpoint_info)

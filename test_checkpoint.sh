@@ -55,25 +55,51 @@ echo "  Threshold: $THRESHOLD"
 echo "=========================================="
 echo ""
 
-# 从 checkpoint 路径推断数据集配置
-if [[ "$CHECKPOINT" == *"Pohang-Canal-3k"* ]]; then
+MODEL=""
+USE_LIDAR=""
+NORMALIZE_16BIT=""
+IN_CHANNELS_OVERRIDE=""
+
+# 从 checkpoint 路径推断数据集配置（优先 Mamba，其次 16bit，再处理 8bit 基线）
+if [[ "$CHECKPOINT" == *"mamba"* || "$CHECKPOINT" == *"Mamba"* ]]; then
     DATASET="Pohang-Canal-3k"
     SPLIT_METHOD="50_50_2k_new"
     IMAGE_FOLDER="images"
+    USE_LIDAR="True"
+    NORMALIZE_16BIT="True"
+    MODEL="mamba_tiny"
 elif [[ "$CHECKPOINT" == *"16bit"* ]]; then
     DATASET="Pohang-Canal-3k"
     SPLIT_METHOD="50_50_2k_new"
     IMAGE_FOLDER="images"
     USE_LIDAR="True"
     NORMALIZE_16BIT="True"
-else
+elif [[ "$CHECKPOINT" == *"8bit"* || "$CHECKPOINT" == *"baseline1"* || "$CHECKPOINT" == *"DNANet_baseline_8bit"* ]]; then
     DATASET="Pohang-Canal-3k"
     SPLIT_METHOD="50_50_2k_new"
     IMAGE_FOLDER="images-8bit"
+else
+    DATASET="Pohang-Canal-3k"
+    SPLIT_METHOD="50_50_2k_new"
+    IMAGE_FOLDER="images"
 fi
 
 # 运行测试
 cd "$SCRIPT_DIR"
+
+EXTRA_ARGS=()
+if [[ -n "$MODEL" ]]; then
+    EXTRA_ARGS+=(--model "$MODEL")
+fi
+if [[ -n "$USE_LIDAR" ]]; then
+    EXTRA_ARGS+=(--use_lidar_dataloader "$USE_LIDAR")
+fi
+if [[ -n "$NORMALIZE_16BIT" ]]; then
+    EXTRA_ARGS+=(--normalize_16bit "$NORMALIZE_16BIT")
+fi
+if [[ -n "$IN_CHANNELS_OVERRIDE" ]]; then
+    EXTRA_ARGS+=(--in_channels "$IN_CHANNELS_OVERRIDE")
+fi
 
 python test_box_iou.py \
     --checkpoint "$CHECKPOINT" \
@@ -85,7 +111,8 @@ python test_box_iou.py \
     --image_folder "$IMAGE_FOLDER" \
     --in_channels 1 \
     --base_size 512 \
-    --crop_size 480
+    --crop_size 480 \
+    "${EXTRA_ARGS[@]}"
 
 echo ""
 echo "=========================================="
