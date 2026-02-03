@@ -25,20 +25,25 @@ BATCH_SIZE=4
 if [ $# -lt 1 ]; then
     echo "❌ 错误: 缺少 checkpoint 路径"
     echo ""
-    echo "用法: bash test_checkpoint.sh <checkpoint_path> [gpu_id]"
+    echo "用法: bash test_checkpoint.sh <checkpoint_path> [gpu_id] [额外参数将透传给 test_box_iou.py]"
     echo ""
     echo "示例:"
     echo "  bash test_checkpoint.sh result/DNANet_baseline_8bit_Pohang-Canal-3k_DNANet_28_01_2026_17_37_58_wDS/latest_best_model.pth.tar"
-    echo "  bash test_checkpoint.sh result/xxx/best_model_epoch0100_mIoU0.5678.pth.tar 0"
+    echo "  bash test_checkpoint.sh result/xxx/best_model_epoch0100_mIoU0.5678.pth.tar 0 --threshold 0.35"
     exit 1
 fi
 
 CHECKPOINT="$1"
+shift
 
-# 可选参数: GPU ID
-if [ $# -ge 2 ]; then
-    GPU="$2"
+# 可选参数: GPU ID（如果下一个参数不是 -- 开头）
+if [ $# -ge 1 ] && [[ "$1" != --* ]]; then
+    GPU="$1"
+    shift
 fi
+
+# 其余参数透传给 test_box_iou.py
+USER_EXTRA_ARGS=("$@")
 
 # 检查 checkpoint 是否存在
 if [ ! -f "$SCRIPT_DIR/$CHECKPOINT" ]; then
@@ -112,7 +117,8 @@ python test_box_iou.py \
     --in_channels 1 \
     --base_size 512 \
     --crop_size 480 \
-    "${EXTRA_ARGS[@]}"
+    "${EXTRA_ARGS[@]}" \
+    "${USER_EXTRA_ARGS[@]}"
 
 echo ""
 echo "=========================================="
