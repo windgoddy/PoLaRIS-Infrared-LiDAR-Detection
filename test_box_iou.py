@@ -136,15 +136,22 @@ def detect_model_params(state_dict, model_type):
         params['deep_supervision'] = has_deep_supervision
 
     # 检测 in_channels
-    # 查找第一个卷积层来推断输入通道数
+    # 查找第一层卷积 (conv0_0) 来推断输入通道数
+    first_conv_key = None
     for key in state_dict.keys():
-        if 'conv' in key and 'weight' in key:
-            # 获取第一个卷积层的权重
-            conv_weight = state_dict[key]
-            if len(conv_weight.shape) == 4:  # [out_channels, in_channels, H, W]
-                in_channels = conv_weight.shape[1]
-                params['in_channels'] = in_channels
-                break
+        # 明确查找第一层：conv0_0
+        if 'conv0_0' in key and 'weight' in key and 'conv0_0.0' in key:
+            first_conv_key = key
+            break
+
+    if first_conv_key:
+        conv_weight = state_dict[first_conv_key]
+        if len(conv_weight.shape) == 4:  # [out_channels, in_channels, H, W]
+            in_channels = conv_weight.shape[1]
+            params['in_channels'] = in_channels
+            print(f"  ℹ️  从 {first_conv_key} 检测到 in_channels: {in_channels}")
+    else:
+        print(f"  ⚠️  未找到 conv0_0 层，无法检测 in_channels")
 
     return params
 
@@ -303,6 +310,16 @@ def test_model(model, test_loader, use_lidar_loader, threshold, device):
                 data = data.to(device)
                 labels = labels.to(device)
 
+            # 调试信息（仅第一个 batch）
+            if batch_idx == 0:
+                print(f"\n🔍 调试信息 (第一个 batch):")
+                print(f"  - 数据形状: {data.shape}")
+                print(f"  - 标签形状: {labels.shape}")
+                print(f"  - 数据范围: [{data.min().item():.4f}, {data.max().item():.4f}]")
+                print(f"  - 标签范围: [{labels.min().item():.4f}, {labels.max().item():.4f}]")
+                print(f"  - 数据均值: {data.mean().item():.4f}")
+                print(f"  - 标签正样本比例: {(labels > 0.5).float().mean().item():.4f}")
+
             # 前向传播
             pred = model(data)
 
@@ -313,6 +330,13 @@ def test_model(model, test_loader, use_lidar_loader, threshold, device):
 
             # 应用 sigmoid 激活（模型输出是 logits）
             pred = torch.sigmoid(pred)
+
+            # 调试信息（仅第一个 batch）
+            if batch_idx == 0:
+                print(f"  - 预测形状: {pred.shape}")
+                print(f"  - 预测范围: [{pred.min().item():.4f}, {pred.max().item():.4f}]")
+                print(f"  - 预测均值: {pred.mean().item():.4f}")
+                print(f"  - 预测正样本比例 (>0.5): {(pred > 0.5).float().mean().item():.4f}\n")
 
             # 计算 Segmentation IoU
             miou_metric.update(pred, labels)
