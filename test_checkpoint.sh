@@ -25,20 +25,38 @@ BATCH_SIZE=4
 if [ $# -lt 1 ]; then
     echo "❌ 错误: 缺少 checkpoint 路径"
     echo ""
-    echo "用法: bash test_checkpoint.sh <checkpoint_path> [gpu_id]"
+    echo "用法: bash test_checkpoint.sh <checkpoint_path> [gpu_id] [--threshold X]"
     echo ""
     echo "示例:"
     echo "  bash test_checkpoint.sh result/DNANet_baseline_8bit_Pohang-Canal-3k_DNANet_28_01_2026_17_37_58_wDS/latest_best_model.pth.tar"
     echo "  bash test_checkpoint.sh result/xxx/best_model_epoch0100_mIoU0.5678.pth.tar 0"
+    echo "  bash test_checkpoint.sh result/xxx/best_model.pth.tar 0 --threshold 0.3"
     exit 1
 fi
 
 CHECKPOINT="$1"
 
 # 可选参数: GPU ID
-if [ $# -ge 2 ]; then
+if [ $# -ge 2 ] && [[ "$2" != --* ]]; then
     GPU="$2"
+    shift 2
+else
+    shift 1
 fi
+
+# 解析额外的参数 (--threshold)
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --threshold)
+            THRESHOLD="$2"
+            shift 2
+            ;;
+        *)
+            echo "❌ 未知参数: $1"
+            exit 1
+            ;;
+    esac
+done
 
 # 检查 checkpoint 是否存在
 if [ ! -f "$SCRIPT_DIR/$CHECKPOINT" ]; then
