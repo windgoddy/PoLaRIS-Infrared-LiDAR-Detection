@@ -306,6 +306,11 @@ def test_model(model, test_loader, use_lidar_loader, threshold, device):
             # 前向传播
             pred = model(data)
 
+            # 处理 deep_supervision 的情况（输出是列表）
+            if isinstance(pred, list):
+                # Deep supervision 模式：取最后一个输出作为最终预测
+                pred = pred[-1]
+
             # 计算 Segmentation IoU
             miou_metric.update(pred, labels)
 
