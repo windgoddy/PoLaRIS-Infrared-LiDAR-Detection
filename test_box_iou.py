@@ -11,27 +11,6 @@ Author: PoLaRIS Team
 Date: 2026-02-03
 """
 
-def create_test_loader(args):
-    """
-    创建测试数据加载器
-    """
-    print(f"\n📂 加载测试数据集...")
-
-    dataset_dir = os.path.join(args.root, args.dataset)
-    _, val_img_ids, _ = load_dataset(args.root, args.dataset, args.split_method)
-#!/usr/bin/env python3
-"""
-测试脚本：计算训练好的模型在测试集上的 Mask-to-Box IoU
-==========================================
-
-用法:
-    python test_box_iou.py --checkpoint result/xxx/latest_best_model.pth.tar
-    python test_box_iou.py --checkpoint result/xxx/best_model_epoch0100_mIoU0.5678.pth.tar --gpu 0
-
-Author: PoLaRIS Team
-Date: 2026-02-03
-"""
-
 import argparse
 import os
 import sys
@@ -161,13 +140,27 @@ def detect_model_params(state_dict, model_type):
         else:
             print(f"  ⚠️  未找到 conv0_0 层，无法检测 in_channels")
 
-    # Mamba: infer in_channels and embed_dim from patch_embed
+    # Mamba: infer in_channels, embed_dim, and use_lidar
     if 'patch_embed.proj.weight' in state_dict:
         w = state_dict['patch_embed.proj.weight']
         if len(w.shape) == 4:
+            # patch_embed only processes IR, always in_channels=1
             params['in_channels'] = w.shape[1]
             params['embed_dim'] = w.shape[0]
-            print(f"  ℹ️  Mamba patch_embed.proj.weight shape: {list(w.shape)} → in_channels={params['in_channels']}, embed_dim={params['embed_dim']}")
+            print(f"  ℹ️  Mamba patch_embed.proj.weight shape: {list(w.shape)} → IR_channels={params['in_channels']}, embed_dim={params['embed_dim']}")
+            
+            # CRITICAL FIX: Check if model uses LiDAR gating
+            # LiDAR is injected via gate mechanism, not patch_embed
+            has_lidar_gate = any('lidar_gate' in key for key in state_dict.keys())
+            params['use_lidar'] = has_lidar_gate
+            
+            # For data loader: need 2 channels if LiDAR is used
+            if has_lidar_gate:
+                params['data_in_channels'] = 2  # IR + Depth
+                print(f"  ℹ️  检测到 LiDAR gating → 数据加载器需要 2 通道 (IR + Depth)")
+            else:
+                params['data_in_channels'] = 1  # IR only
+                print(f"  ℹ️  未检测到 LiDAR gating → 数据加载器只需 1 通道 (IR)")
 
     return params
 
@@ -186,9 +179,14 @@ def create_model(model_type, in_channels, checkpoint, device):
         print(f"    - deep_supervision: {detected_params['deep_supervision']}")
     if 'in_channels' in detected_params:
         print(f"    - in_channels: {detected_params['in_channels']}")
-        in_channels = detected_params['in_channels']
+        # For Mamba, in_channels is only for IR (patch_embed)
+        # Don't override the in_channels parameter here
+        if model_type not in ['mamba', 'mamba_tiny', 'mamba_small', 'mamba_base']:
+            in_channels = detected_params['in_channels']
     if 'embed_dim' in detected_params:
         print(f"    - embed_dim: {detected_params['embed_dim']}")
+    if 'use_lidar' in detected_params:
+        print(f"    - use_lidar: {detected_params['use_lidar']}")
 
     apply_sigmoid = True
 
@@ -211,11 +209,12 @@ def create_model(model_type, in_channels, checkpoint, device):
         embed_dim = detected_params.get('embed_dim', 96)
         depths_map = {64: [2, 2, 4, 2], 96: [2, 2, 6, 2], 128: [2, 2, 12, 2]}
         depths = depths_map.get(embed_dim, [2, 2, 6, 2])
+        use_lidar = detected_params.get('use_lidar', False)
         model = PoLaRIS_Mamba(
-            in_channels=in_channels,
+            in_channels=1,  # Always 1 for IR (patch_embed)
             embed_dim=embed_dim,
             depths=depths,
-            use_lidar=(in_channels == 2)
+            use_lidar=use_lidar
         )
         apply_sigmoid = False  # GaussianHead 内部已做 sigmoid
     else:
@@ -484,7 +483,12 @@ def main():
     state_dict = checkpoint.get('state_dict') or checkpoint.get('model_state_dict')
     detected_params = detect_model_params(state_dict, args.model)
 
-    if 'in_channels' in detected_params:
+    # CRITICAL FIX: For Mamba, use data_in_channels (which includes LiDAR)
+    # instead of model in_channels (which is only IR)
+    if 'data_in_channels' in detected_params:
+        print(f"  ✓ 从 checkpoint 检测到 data_in_channels={detected_params['data_in_channels']}，更新数据加载器配置")
+        args.in_channels = detected_params['data_in_channels']
+    elif 'in_channels' in detected_params:
         print(f"  ✓ 从 checkpoint 检测到 in_channels={detected_params['in_channels']}，更新数据加载器配置")
         args.in_channels = detected_params['in_channels']
 
@@ -523,4 +527,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-    # 4. 创建模型
