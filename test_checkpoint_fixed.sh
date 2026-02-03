@@ -42,20 +42,29 @@ echo "=========================================="
 echo ""
 
 # Infer dataset configuration from checkpoint path
-if [[ "$CHECKPOINT" == *"Pohang-Canal-3k"* ]]; then
-    DATASET="Pohang-Canal-3k"
-    SPLIT_METHOD="50_50_2k_new"
-    IMAGE_FOLDER="images"
-elif [[ "$CHECKPOINT" == *"16bit"* ]]; then
+# 注意：判断顺序很重要，先检查更具体的标识（16bit/8bit）
+if [[ "$CHECKPOINT" == *"16bit"* ]]; then
+    # 16-bit LiDAR images
     DATASET="Pohang-Canal-3k"
     SPLIT_METHOD="50_50_2k_new"
     IMAGE_FOLDER="images"
     USE_LIDAR="True"
     NORMALIZE_16BIT="True"
-else
+elif [[ "$CHECKPOINT" == *"8bit"* ]] || [[ "$CHECKPOINT" == *"baseline"* ]]; then
+    # 8-bit images (baseline models)
     DATASET="Pohang-Canal-3k"
     SPLIT_METHOD="50_50_2k_new"
     IMAGE_FOLDER="images-8bit"
+elif [[ "$CHECKPOINT" == *"Pohang-Canal-3k"* ]]; then
+    # Default Pohang-Canal-3k
+    DATASET="Pohang-Canal-3k"
+    SPLIT_METHOD="50_50_2k_new"
+    IMAGE_FOLDER="images"
+else
+    # Fallback
+    DATASET="Pohang-Canal-3k"
+    SPLIT_METHOD="50_50_2k_new"
+    IMAGE_FOLDER="images"
 fi
 
 # Run test

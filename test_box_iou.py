@@ -311,6 +311,9 @@ def test_model(model, test_loader, use_lidar_loader, threshold, device):
                 # Deep supervision 模式：取最后一个输出作为最终预测
                 pred = pred[-1]
 
+            # 应用 sigmoid 激活（模型输出是 logits）
+            pred = torch.sigmoid(pred)
+
             # 计算 Segmentation IoU
             miou_metric.update(pred, labels)
 
