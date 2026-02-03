@@ -314,7 +314,9 @@ def save_train_log(args, save_dir):
     return
 
 def save_model_and_result(dt_string, epoch,train_loss, test_loss, best_iou, recall, precision, save_mIoU_dir, save_other_metric_dir):
-
+    # Ensure directory exists before writing
+    os.makedirs(os.path.dirname(save_mIoU_dir), exist_ok=True)
+    
     with open(save_mIoU_dir, 'a') as f:
         f.write('{} - {:04d}:\t - train_loss: {:04f}:\t - test_loss: {:04f}:\t mIoU {:.4f}\n' .format(dt_string, epoch,train_loss, test_loss, best_iou))
     with open(save_other_metric_dir, 'a') as f:
@@ -343,8 +345,10 @@ def save_model(mean_IOU, best_iou, save_dir, save_prefix, train_loss, test_loss,
     Returns:
         best_iou: 更新后的最佳 mIoU（如果当前 mIoU 更好则返回新值，否则返回原值）
     """
-    if mean_IOU > best_iou:
-        save_mIoU_dir = 'result/' + save_dir + '/' + save_prefix + '_best_IoU_IoU.log'
+    if mean_IOU > best_iou:        # Ensure result directory exists
+        result_path = 'result/' + save_dir
+        os.makedirs(result_path, exist_ok=True)
+                save_mIoU_dir = 'result/' + save_dir + '/' + save_prefix + '_best_IoU_IoU.log'
         save_other_metric_dir = 'result/' + save_dir + '/' + save_prefix + '_best_IoU_other_metric.log'
         now = datetime.now()
         dt_string = now.strftime("%d/%m/%Y %H:%M:%S")
