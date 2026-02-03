@@ -9,6 +9,7 @@ from model.parse_args_train import  parse_args
 # metric, loss .etc
 from model.utils import *
 from model.metric import *
+from model.metric import calculate_mask_to_box_iou  # 2026-02-03: Added Mask-to-Box IoU
 from model.loss import *
 from model.load_param_data import  load_dataset, load_param
 
@@ -66,8 +67,14 @@ class Trainer(object):
 
         # Evaluation metrics
         self.best_iou       = 0
+        self.best_box_iou   = 0  # 2026-02-03: Track best Mask-to-Box IoU
         self.best_recall    = [0,0,0,0,0,0,0,0,0,0,0]
         self.best_precision = [0,0,0,0,0,0,0,0,0,0,0]
+
+        # Last epoch metrics
+        self.last_epoch = 0
+        self.last_mean_IOU = 0
+        self.last_box_IOU = 0  # 2026-02-03: Track last Mask-to-Box IoU
 
     # Training
     def training(self,epoch):
@@ -100,6 +107,8 @@ class Trainer(object):
         self.model.eval()
         self.mIoU.reset()
         losses = AverageMeter()
+        box_iou_sum = 0.0  # 2026-02-03: Accumulate Mask-to-Box IoU
+        box_iou_count = 0
 
         with torch.no_grad():
             for i, ( data, labels) in enumerate(tbar):
@@ -120,17 +129,56 @@ class Trainer(object):
                 self.mIoU.update(pred, labels)
                 ture_positive_rate, false_positive_rate, recall, precision = self.ROC.get()
                 _, mean_IOU = self.mIoU.get()
-                tbar.set_description('Epoch %d, test loss %.4f, mean_IoU: %.4f' % (epoch, losses.avg, mean_IOU ))
+
+                # 2026-02-03: Calculate Mask-to-Box IoU (使用与 segmentation 一致的阈值)
+                batch_box_iou = calculate_mask_to_box_iou(pred, labels, threshold=self.mIoU.threshold)
+                box_iou_sum += batch_box_iou
+                box_iou_count += 1
+
+                tbar.set_description('Epoch %d, test loss %.4f, mean_IoU: %.4f, Box_IoU: %.4f' %
+                                    (epoch, losses.avg, mean_IOU, batch_box_iou))
             test_loss=losses.avg
+
+        # 2026-02-03: Calculate average Mask-to-Box IoU
+        mean_box_IOU = box_iou_sum / max(box_iou_count, 1)
+
+        # Print test results with both metrics
+        print(f"\n[Epoch {epoch}] Test Results:")
+        print(f"  Loss              : {test_loss:.4f}")
+        print(f"  Segmentation IoU  : {mean_IOU:.4f}")
+        print(f"  Mask-to-Box IoU   : {mean_box_IOU:.4f} (Detection Performance)")
+        print(f"  Precision         : {precision[5]:.4f}")
+        print(f"  Recall            : {recall[5]:.4f}")
+
+        # Store last epoch metrics
+        self.last_epoch = epoch
+        self.last_mean_IOU = mean_IOU
+        self.last_box_IOU = mean_box_IOU  # 2026-02-03: Store Box IoU
         # save high-performance model and update best_iou
+        old_best_iou = self.best_iou
         self.best_iou = save_model(mean_IOU, self.best_iou, self.save_dir, self.save_prefix,
-                                    self.train_loss, test_loss, recall, precision, epoch, self.model.state_dict())
+                                    self.train_loss, test_loss, recall, precision, epoch, self.model.state_dict(),
+                                    mean_box_IOU)  # 2026-02-03: Pass Box IoU to save_model
+
+        # 2026-02-03: Track best Box IoU when best segmentation IoU is updated
+        if mean_IOU > old_best_iou:
+            self.best_box_iou = mean_box_IOU
 
 def main(args):
     trainer = Trainer(args)
     for epoch in range(args.start_epoch, args.epochs):
         trainer.training(epoch)
         trainer.testing(epoch)
+
+    # 2026-02-03: Print final summary with Box IoU
+    print(f"\n{'=' * 60}")
+    print(f"Training Summary")
+    print(f"{'=' * 60}")
+    print(f"Best Segmentation IoU : {trainer.best_iou:.4f}")
+    print(f"Best Mask-to-Box IoU  : {trainer.best_box_iou:.4f}")
+    print(f"Final Segmentation IoU: {trainer.last_mean_IOU:.4f}")
+    print(f"Final Mask-to-Box IoU : {trainer.last_box_IOU:.4f}")
+    print(f"{'=' * 60}\n")
 
 
 if __name__ == "__main__":
