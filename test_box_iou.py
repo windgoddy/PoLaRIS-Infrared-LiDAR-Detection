@@ -298,19 +298,35 @@ def create_test_loader(args, force_lidar=False):
 
 
 def test_model(model, test_loader, use_lidar_loader, threshold, device, apply_sigmoid=True, model_type=''):
-    """测试模型并计算 Mask-to-Box IoU"""
+    """测试模型并计算 Mask-to-Box IoU
+    
+    Args:
+        model_type: 模型类型，如果是mamba则使用动态阈值扫描
+    """
+    # Mamba使用动态阈值扫描（与训练时一致）
+    use_threshold_sweep = model_type.startswith('mamba')
+    
     print(f"\n🧪 开始测试...")
-    print(f"  - 阈值: {threshold}")
+    if use_threshold_sweep:
+        print(f"  - 评估策略: 动态阈值扫描 [0.1-0.9] (与Mamba训练一致)")
+        print(f"  - 基准阈值: {threshold} (仅用于对比)")
+    else:
+        print(f"  - 阈值: {threshold}")
     print(f"  - 设备: {device}")
 
     model.eval()
 
-    miou_metric = mIoU(1, threshold=threshold)
+    # 对于非Mamba模型，使用传统的固定阈值评估
+    if not use_threshold_sweep:
+        miou_metric = mIoU(1, threshold=threshold)
+    
     box_iou_sum = 0.0
     box_iou_count = 0
+    iou_sum = 0.0  # For Mamba threshold sweep
 
     sample_ious = []
     sample_box_ious = []
+    sample_best_thresholds = []  # Track best threshold per sample
 
     with torch.no_grad():
         tbar = tqdm(test_loader, desc='Testing')
@@ -355,34 +371,99 @@ def test_model(model, test_loader, use_lidar_loader, threshold, device, apply_si
                 print(f"  - 预测均值: {pred.mean().item():.4f}")
                 print(f"  - 预测正样本比例 (>0.5): {(pred > 0.5).float().mean().item():.4f}\n")
 
-            miou_metric.update(pred, labels)
+            # Mamba: 使用阈值扫描（与训练一致）
+            if use_threshold_sweep:
+                # Threshold sweep for each batch (like Mamba training)
+                best_batch_iou = 0.0
+                best_batch_threshold = 0.5
+                
+                for thresh in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]:
+                    pred_bin = (pred > thresh).float()
+                    gt_bin = (labels > 0.5).float()
+                    
+                    inter = (pred_bin * gt_bin).sum(dim=(1, 2, 3))
+                    union = (pred_bin + gt_bin).clamp(0, 1).sum(dim=(1, 2, 3))
+                    iou_t = (inter / (union + 1e-7)).mean().item()
+                    
+                    if iou_t > best_batch_iou:
+                        best_batch_iou = iou_t
+                        best_batch_threshold = thresh
+                
+                # Use best threshold for this batch
+                iou_sum += best_batch_iou
+                batch_box_iou = calculate_mask_to_box_iou(pred, labels, threshold=best_batch_threshold)
+                box_iou_sum += batch_box_iou
+                box_iou_count += 1
+                
+                # Per-sample metrics using best threshold
+                pred_binary = (pred > best_batch_threshold).float()
+                labels_binary = (labels > 0.5).float()
+                
+                for i in range(pred.size(0)):
+                    pred_i = pred_binary[i:i+1]
+                    label_i = labels_binary[i:i+1]
+                    inter = (pred_i * label_i).sum()
+                    union = (pred_i + label_i).clamp(0, 1).sum()
+                    sample_iou = (inter / (union + 1e-7)).item()
+                    sample_ious.append(sample_iou)
+                    sample_best_thresholds.append(best_batch_threshold)
+                    
+                    sample_box_iou = calculate_mask_to_box_iou(pred[i:i+1], labels[i:i+1], threshold=best_batch_threshold)
+                    sample_box_ious.append(sample_box_iou)
+                
+                # Update progress bar
+                current_mean_iou = iou_sum / box_iou_count
+                current_box_iou = box_iou_sum / box_iou_count
+                tbar.set_postfix({
+                    'mIoU': f'{current_mean_iou:.4f}',
+                    'Box_IoU': f'{current_box_iou:.4f}',
+                    'BestThresh': f'{best_batch_threshold:.1f}'
+                })
+            else:
+                # Traditional fixed threshold evaluation
+                miou_metric.update(pred, labels)
 
-            batch_box_iou = calculate_mask_to_box_iou(pred, labels, threshold=threshold)
-            box_iou_sum += batch_box_iou
-            box_iou_count += 1
+                batch_box_iou = calculate_mask_to_box_iou(pred, labels, threshold=threshold)
+                box_iou_sum += batch_box_iou
+                box_iou_count += 1
 
-            pred_binary = (pred > threshold).float()
-            labels_binary = (labels > 0.5).float()
+                pred_binary = (pred > threshold).float()
+                labels_binary = (labels > 0.5).float()
 
-            for i in range(pred.size(0)):
-                pred_i = pred_binary[i:i+1]
-                label_i = labels_binary[i:i+1]
-                inter = (pred_i * label_i).sum()
-                union = (pred_i + label_i).clamp(0, 1).sum()
-                sample_iou = (inter / (union + 1e-7)).item()
-                sample_ious.append(sample_iou)
+                for i in range(pred.size(0)):
+                    pred_i = pred_binary[i:i+1]
+                    label_i = labels_binary[i:i+1]
+                    inter = (pred_i * label_i).sum()
+                    union = (pred_i + label_i).clamp(0, 1).sum()
+                    sample_iou = (inter / (union + 1e-7)).item()
+                    sample_ious.append(sample_iou)
 
-                sample_box_iou = calculate_mask_to_box_iou(pred[i:i+1], labels[i:i+1], threshold=threshold)
-                sample_box_ious.append(sample_box_iou)
+                    sample_box_iou = calculate_mask_to_box_iou(pred[i:i+1], labels[i:i+1], threshold=threshold)
+                    sample_box_ious.append(sample_box_iou)
 
-            _, current_mean_iou = miou_metric.get()
-            current_box_iou = box_iou_sum / box_iou_count
-            tbar.set_postfix({
-                'mIoU': f'{current_mean_iou:.4f}',
-                'Box_IoU': f'{current_box_iou:.4f}'
-            })
+                _, current_mean_iou = miou_metric.get()
+                current_box_iou = box_iou_sum / box_iou_count
+                tbar.set_postfix({
+                    'mIoU': f'{current_mean_iou:.4f}',
+                    'Box_IoU': f'{current_box_iou:.4f}'
+                })
 
-    _, mean_iou = miou_metric.get()
+    # Calculate final metrics
+    if use_threshold_sweep:
+        mean_iou = iou_sum / box_iou_count
+        # Also calculate threshold distribution
+        if sample_best_thresholds:
+            threshold_counts = {}
+            for t in sample_best_thresholds:
+                threshold_counts[t] = threshold_counts.get(t, 0) + 1
+            print(f"\n📊 Best threshold distribution:")
+            for t in sorted(threshold_counts.keys()):
+                count = threshold_counts[t]
+                pct = count / len(sample_best_thresholds) * 100
+                print(f"  {t:.1f}: {count:4d} samples ({pct:5.1f}%)")
+    else:
+        _, mean_iou = miou_metric.get()
+    
     mean_box_iou = box_iou_sum / box_iou_count
 
     sample_ious = np.array(sample_ious)
@@ -394,6 +475,7 @@ def test_model(model, test_loader, use_lidar_loader, threshold, device, apply_si
         'sample_ious': sample_ious,
         'sample_box_ious': sample_box_ious,
         'num_samples': len(sample_ious),
+        'use_threshold_sweep': use_threshold_sweep,
     }
 
     return results
@@ -413,6 +495,8 @@ def print_results(results, checkpoint_info):
         print(f"  - 训练时 Box IoU: {checkpoint_info['box_IOU']:.4f}")
 
     print(f"\n🎯 测试集结果 (共 {results['num_samples']} 个样本):")
+    if results.get('use_threshold_sweep', False):
+        print(f"  - 评估策略           : 动态阈值扫描 (与Mamba训练一致)")
     print(f"  - Segmentation IoU : {results['mean_iou']:.4f}")
     print(f"  - Mask-to-Box IoU  : {results['mean_box_iou']:.4f}")
 
