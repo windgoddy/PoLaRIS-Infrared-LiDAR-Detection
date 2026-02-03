@@ -4,7 +4,7 @@
 # ============================================================
 # 用法:
 #   bash test_checkpoint.sh <checkpoint_path> [gpu_id]
-#
+
 # 示例:
 #   bash test_checkpoint.sh result/DNANet_baseline_8bit_Pohang-Canal-3k_DNANet_28_01_2026_17_37_58_wDS/latest_best_model.pth.tar
 #   bash test_checkpoint.sh result/xxx/best_model_epoch0100_mIoU0.5678.pth.tar 0
