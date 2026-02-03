@@ -295,3 +295,134 @@ def batch_intersection_union(output, target, nclass, depth_map=None, use_adaptiv
         "Error: Intersection area should be smaller than Union area"
     return area_inter, area_union
 
+
+# ======================== Mask-to-Box IoU ========================
+# 2026-02-03: Added for fair evaluation with Box-annotated datasets
+
+def calculate_mask_to_box_iou(pred_mask, gt_mask, threshold=0.5):
+    """
+    计算 Mask-to-Box IoU（检测评估指标）。
+
+    原理：
+    1. 将预测 mask 和 GT mask 转换为二值图
+    2. 计算它们的外接矩形 (Bounding Box)
+    3. 计算这两个矩形的 IoU
+
+    这个指标解决了"弱监督评估不公平"问题：
+    - Segmentation IoU 会因为 GT 是 box/ellipse 而产生差异
+    - Mask-to-Box IoU 统一用外接矩形评估，更公平
+    - 更接近真实的检测性能（类似 YOLO 的评估方式）
+
+    Args:
+        pred_mask: (B, 1, H, W) 预测概率图 或 Torch Tensor
+        gt_mask: (B, 1, H, W) 真实标签 mask (box 或 ellipse 均可) 或 Torch Tensor
+        threshold: 二值化阈值（建议与 segmentation 评估一致）
+
+    Returns:
+        avg_iou: 当前 batch 的平均 Box IoU
+
+    Example:
+        >>> pred = torch.rand(4, 1, 512, 640)
+        >>> gt = torch.randint(0, 2, (4, 1, 512, 640)).float()
+        >>> box_iou = calculate_mask_to_box_iou(pred, gt, threshold=0.5)
+        >>> print(f"Mask-to-Box IoU: {box_iou:.4f}")
+    """
+    # Convert to numpy if needed
+    if isinstance(pred_mask, torch.Tensor):
+        pred_mask = (pred_mask > threshold).float()
+        pred_np = pred_mask.detach().cpu().numpy()
+    else:
+        pred_np = (pred_mask > threshold).astype(np.float32)
+
+    if isinstance(gt_mask, torch.Tensor):
+        gt_mask = (gt_mask > 0.5).float()
+        gt_np = gt_mask.detach().cpu().numpy()
+    else:
+        gt_np = (gt_mask > 0.5).astype(np.float32)
+
+    batch_size = pred_np.shape[0]
+    total_iou = 0.0
+    valid_count = 0
+
+    for i in range(batch_size):
+        # 提取当前样本
+        p_m = pred_np[i, 0]
+        g_m = gt_np[i, 0]
+
+        # 获取外接矩形 [x1, y1, x2, y2]
+        pred_box = _get_bounding_box(p_m)
+        gt_box = _get_bounding_box(g_m)
+
+        if gt_box is None:
+            # 如果 GT 是空的（理论不应发生），跳过
+            continue
+
+        if pred_box is None:
+            # 如果预测是空的（漏检），IoU 为 0
+            iou = 0.0
+        else:
+            # 计算 Box IoU
+            iou = _compute_box_iou(pred_box, gt_box)
+
+        total_iou += iou
+        valid_count += 1
+
+    # 返回平均值
+    if valid_count == 0:
+        return 0.0
+    return total_iou / valid_count
+
+
+def _get_bounding_box(binary_mask):
+    """
+    从二值 mask 提取外接矩形 [x_min, y_min, x_max, y_max]。
+
+    Args:
+        binary_mask: (H, W) numpy array, binary {0, 1}
+
+    Returns:
+        box: [x_min, y_min, x_max, y_max] 或 None (如果 mask 为空)
+    """
+    rows = np.any(binary_mask, axis=1)
+    cols = np.any(binary_mask, axis=0)
+
+    if not np.any(rows) or not np.any(cols):
+        return None
+
+    y_min, y_max = np.where(rows)[0][[0, -1]]
+    x_min, x_max = np.where(cols)[0][[0, -1]]
+
+    return [x_min, y_min, x_max, y_max]
+
+
+def _compute_box_iou(box1, box2):
+    """
+    计算两个矩形的 IoU。
+
+    Args:
+        box1: [x1, y1, x2, y2]
+        box2: [x1, y1, x2, y2]
+
+    Returns:
+        iou: Intersection over Union
+    """
+    x1_a, y1_a, x2_a, y2_a = box1
+    x1_b, y1_b, x2_b, y2_b = box2
+
+    # Intersection
+    inter_x1 = max(x1_a, x1_b)
+    inter_y1 = max(y1_a, y1_b)
+    inter_x2 = min(x2_a, x2_b)
+    inter_y2 = min(y2_a, y2_b)
+
+    inter_w = max(0, inter_x2 - inter_x1 + 1)
+    inter_h = max(0, inter_y2 - inter_y1 + 1)
+    inter_area = inter_w * inter_h
+
+    # Union
+    area_a = (x2_a - x1_a + 1) * (y2_a - y1_a + 1)
+    area_b = (x2_b - x1_b + 1) * (y2_b - y1_b + 1)
+    union_area = area_a + area_b - inter_area
+
+    return inter_area / (union_area + 1e-7)
+

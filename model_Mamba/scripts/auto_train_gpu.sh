@@ -76,7 +76,7 @@ SAVE_INTERVAL=50  # Save checkpoint every 50 epochs
 
 # Loss 参数配置
 # Loss Type: 'improved_bce_dice' (baseline), 'projection' (weak-supervision), 'hybrid' (recommended)
-LOSS_TYPE="projection"  # 可修改为 'improved_bce_dice' 'projection' 或 'hybrid' 进行实验
+LOSS_TYPE="hybrid"  # 可修改为 'improved_bce_dice' 'projection' 或 'hybrid' 进行实验
 FOCAL_ALPHA=0.25  # Focal loss alpha (positive sample weight)
 FOCAL_GAMMA=2.5   # Focal loss gamma (focusing parameter)
 DICE_WEIGHT=4.0   # Dice loss weight

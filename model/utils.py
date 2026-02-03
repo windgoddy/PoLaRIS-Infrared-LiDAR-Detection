@@ -313,12 +313,16 @@ def save_train_log(args, save_dir):
             f.write('\n')
     return
 
-def save_model_and_result(dt_string, epoch,train_loss, test_loss, best_iou, recall, precision, save_mIoU_dir, save_other_metric_dir):
+def save_model_and_result(dt_string, epoch,train_loss, test_loss, best_iou, recall, precision, save_mIoU_dir, save_other_metric_dir, box_iou=None):
     # Ensure directory exists before writing
     os.makedirs(os.path.dirname(save_mIoU_dir), exist_ok=True)
-    
+
     with open(save_mIoU_dir, 'a') as f:
-        f.write('{} - {:04d}:\t - train_loss: {:04f}:\t - test_loss: {:04f}:\t mIoU {:.4f}\n' .format(dt_string, epoch,train_loss, test_loss, best_iou))
+        # 2026-02-03: Include Box IoU in log
+        if box_iou is not None:
+            f.write('{} - {:04d}:\t - train_loss: {:04f}:\t - test_loss: {:04f}:\t mIoU {:.4f}\t Box_IoU {:.4f}\n' .format(dt_string, epoch,train_loss, test_loss, best_iou, box_iou))
+        else:
+            f.write('{} - {:04d}:\t - train_loss: {:04f}:\t - test_loss: {:04f}:\t mIoU {:.4f}\n' .format(dt_string, epoch,train_loss, test_loss, best_iou))
     with open(save_other_metric_dir, 'a') as f:
         f.write(dt_string)
         f.write('-')
@@ -338,9 +342,12 @@ def save_model_and_result(dt_string, epoch,train_loss, test_loss, best_iou, reca
             f.write('   ')
         f.write('\n')
 
-def save_model(mean_IOU, best_iou, save_dir, save_prefix, train_loss, test_loss, recall, precision, epoch, net):
+def save_model(mean_IOU, best_iou, save_dir, save_prefix, train_loss, test_loss, recall, precision, epoch, net, box_iou=None):
     """
     保存最佳模型
+
+    Args:
+        box_iou: 2026-02-03: Mask-to-Box IoU (optional)
 
     Returns:
         best_iou: 更新后的最佳 mIoU（如果当前 mIoU 更好则返回新值，否则返回原值）
@@ -349,14 +356,14 @@ def save_model(mean_IOU, best_iou, save_dir, save_prefix, train_loss, test_loss,
         # Ensure result directory exists
         result_path = 'result/' + save_dir
         os.makedirs(result_path, exist_ok=True)
-        
+
         save_mIoU_dir = 'result/' + save_dir + '/' + save_prefix + '_best_IoU_IoU.log'
         save_other_metric_dir = 'result/' + save_dir + '/' + save_prefix + '_best_IoU_other_metric.log'
         now = datetime.now()
         dt_string = now.strftime("%d/%m/%Y %H:%M:%S")
         best_iou = mean_IOU
         save_model_and_result(dt_string, epoch, train_loss, test_loss, best_iou,
-                              recall, precision, save_mIoU_dir, save_other_metric_dir)
+                              recall, precision, save_mIoU_dir, save_other_metric_dir, box_iou)
 
         # 删除旧的最佳模型文件（只保留最新的最佳模型）
         result_path = 'result/' + save_dir
@@ -370,32 +377,37 @@ def save_model(mean_IOU, best_iou, save_dir, save_prefix, train_loss, test_loss,
 
         # 保存最佳模型（包含 epoch 和 IoU 信息）
         best_model_filename = f'best_model_epoch{epoch:04d}_mIoU{mean_IOU:.4f}.pth.tar'
-        save_ckpt({
+        save_dict = {
             'epoch': epoch,
             'state_dict': net,
             'loss': test_loss,
             'mean_IOU': mean_IOU,
             'recall': recall,
             'precision': precision,
-        }, save_path='result/' + save_dir,
-            filename=best_model_filename)
-        print(f'🎉 保存新的最佳模型: {best_model_filename} (Epoch {epoch}, mIoU {mean_IOU:.4f})')
+        }
+        # 2026-02-03: Add Box IoU to checkpoint
+        if box_iou is not None:
+            save_dict['box_IOU'] = box_iou
+
+        save_ckpt(save_dict, save_path='result/' + save_dir, filename=best_model_filename)
+
+        # Print with Box IoU if available
+        if box_iou is not None:
+            print(f'🎉 保存新的最佳模型: {best_model_filename} (Epoch {epoch}, mIoU {mean_IOU:.4f}, Box_IoU {box_iou:.4f})')
+        else:
+            print(f'🎉 保存新的最佳模型: {best_model_filename} (Epoch {epoch}, mIoU {mean_IOU:.4f})')
 
         # 同时保存一个 latest_best.pth.tar（方便加载）
-        save_ckpt({
-            'epoch': epoch,
-            'state_dict': net,
-            'loss': test_loss,
-            'mean_IOU': mean_IOU,
-            'recall': recall,
-            'precision': precision,
-        }, save_path='result/' + save_dir,
-            filename='latest_best_model.pth.tar')
+        save_ckpt(save_dict, save_path='result/' + save_dir, filename='latest_best_model.pth.tar')
 
     return best_iou
 
-def save_last_epoch(save_dir, train_loss, test_loss, mean_IOU, recall, precision, epoch, net):
-    """保存最后一个 epoch 的模型"""
+def save_last_epoch(save_dir, train_loss, test_loss, mean_IOU, recall, precision, epoch, net, box_iou=None):
+    """保存最后一个 epoch 的模型
+
+    Args:
+        box_iou: 2026-02-03: Mask-to-Box IoU (optional)
+    """
     # 删除旧的最后一个 epoch 模型（如果存在）
     result_path = 'result/' + save_dir
     old_last_models = glob.glob(os.path.join(result_path, 'last_epoch*.pth.tar'))
@@ -407,16 +419,24 @@ def save_last_epoch(save_dir, train_loss, test_loss, mean_IOU, recall, precision
 
     # 保存最后一个 epoch 的模型
     last_model_filename = f'last_epoch{epoch:04d}.pth.tar'
-    save_ckpt({
+    save_dict = {
         'epoch': epoch,
         'state_dict': net,
         'loss': test_loss,
         'mean_IOU': mean_IOU,
         'recall': recall,
         'precision': precision,
-    }, save_path='result/' + save_dir,
-        filename=last_model_filename)
-    print(f'Saved last epoch model: {last_model_filename}')
+    }
+    # 2026-02-03: Add Box IoU to checkpoint
+    if box_iou is not None:
+        save_dict['box_IOU'] = box_iou
+
+    save_ckpt(save_dict, save_path='result/' + save_dir, filename=last_model_filename)
+
+    if box_iou is not None:
+        print(f'Saved last epoch model: {last_model_filename} (mIoU {mean_IOU:.4f}, Box_IoU {box_iou:.4f})')
+    else:
+        print(f'Saved last epoch model: {last_model_filename} (mIoU {mean_IOU:.4f})')
 
 def save_result_for_test(dataset_dir, st_model, epochs, best_iou, recall, precision ):
     with open(dataset_dir + '/' + 'value_result'+'/' + st_model +'_best_IoU.log', 'a') as f:
