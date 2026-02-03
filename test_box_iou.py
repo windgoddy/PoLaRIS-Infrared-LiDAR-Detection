@@ -441,19 +441,27 @@ def main():
 
     print(f"  ✓ 模型类型: {args.model}")
 
-    # 3. 创建模型
+    # 3. 检测模型参数并更新 args
+    state_dict = checkpoint['state_dict']
+    detected_params = detect_model_params(state_dict, args.model)
+
+    if 'in_channels' in detected_params:
+        print(f"  ✓ 从 checkpoint 检测到 in_channels={detected_params['in_channels']}，更新数据加载器配置")
+        args.in_channels = detected_params['in_channels']
+
+    # 4. 创建模型
     model = create_model(args.model, args.in_channels, checkpoint, device)
 
-    # 4. 创建测试数据加载器
+    # 5. 创建测试数据加载器
     test_loader, use_lidar_loader = create_test_loader(args)
 
-    # 5. 测试模型
+    # 6. 测试模型
     results = test_model(model, test_loader, use_lidar_loader, args.threshold, device)
 
-    # 6. 打印结果
+    # 7. 打印结果
     print_results(results, checkpoint_info)
 
-    # 7. 保存结果到文件
+    # 8. 保存结果到文件
     result_dir = os.path.dirname(args.checkpoint)
     result_file = os.path.join(result_dir, 'box_iou_test_results.txt')
 
