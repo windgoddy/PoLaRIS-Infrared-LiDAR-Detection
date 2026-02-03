@@ -120,23 +120,65 @@ def load_model_from_checkpoint(checkpoint_path, device):
     return checkpoint, checkpoint_info
 
 
+def detect_model_params(state_dict, model_type):
+    """
+    从 checkpoint 的 state_dict 中自动检测模型参数
+
+    Returns:
+        dict: 检测到的模型参数
+    """
+    params = {}
+
+    # 检测 deep_supervision
+    if model_type == 'DNANet':
+        # 如果有 final1, final2, final3, final4 层，说明使用了 deep_supervision
+        has_deep_supervision = any('final1.' in key for key in state_dict.keys())
+        params['deep_supervision'] = has_deep_supervision
+
+    # 检测 in_channels
+    # 查找第一个卷积层来推断输入通道数
+    for key in state_dict.keys():
+        if 'conv' in key and 'weight' in key:
+            # 获取第一个卷积层的权重
+            conv_weight = state_dict[key]
+            if len(conv_weight.shape) == 4:  # [out_channels, in_channels, H, W]
+                in_channels = conv_weight.shape[1]
+                params['in_channels'] = in_channels
+                break
+
+    return params
+
+
 def create_model(model_type, in_channels, checkpoint, device):
     """
     创建并加载模型
     """
     print(f"\n🔧 创建模型: {model_type}")
 
+    state_dict = checkpoint['state_dict']
+
+    # 自动检测模型参数
+    detected_params = detect_model_params(state_dict, model_type)
+    print(f"  ℹ️  从 checkpoint 检测到的参数:")
+    if 'deep_supervision' in detected_params:
+        print(f"    - deep_supervision: {detected_params['deep_supervision']}")
+    if 'in_channels' in detected_params:
+        print(f"    - in_channels: {detected_params['in_channels']}")
+        # 使用检测到的 in_channels 覆盖命令行参数
+        in_channels = detected_params['in_channels']
+
     # 根据模型类型创建模型
     if model_type == 'DNANet':
         # DNANet 参数
         nb_filter, num_blocks = load_param('three', 'resnet_18')
+        deep_supervision = detected_params.get('deep_supervision', False)
         model = DNANet(
             num_classes=1,
             input_channels=in_channels,
             block=Res_CBAM_block,
             num_blocks=num_blocks,
             nb_filter=nb_filter,
-            deep_supervision=False
+            deep_supervision=deep_supervision
         )
     elif model_type == 'MS_CAFNet':
         model = MS_CAFNet(num_classes=1, input_channels=in_channels)
@@ -146,7 +188,6 @@ def create_model(model_type, in_channels, checkpoint, device):
         raise ValueError(f"Unknown model type: {model_type}")
 
     # 加载权重
-    state_dict = checkpoint['state_dict']
     model.load_state_dict(state_dict)
     model = model.to(device)
     model.eval()
