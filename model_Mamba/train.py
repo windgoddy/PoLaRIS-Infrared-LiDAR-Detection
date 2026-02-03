@@ -227,12 +227,14 @@ class MambaDataset(Dataset):
 
         # [SCHEME A] Generate Binary Mask target (instead of Gaussian heatmap)
         # This is the CRITICAL fix for low IoU - ensures GT is binary {0, 1}
+        # UPDATED 2026-02-03: Use ellipse mode to reduce background noise from rectangular corners
         H, W = ir_img.shape[1], ir_img.shape[2]
         mask = generate_binary_mask_target(
             labels,
             img_size=(H, W),
             downscale=self.downscale,
-            fill_mode='box',  # 'box' for initial testing, 'ellipse' for refinement
+            fill_mode='ellipse',  # CHANGED: 'ellipse' reduces 50% background noise vs 'box'
+            ellipse_ratio=0.8,    # 80% of bbox size (conservative, can tune to 0.7-0.9)
         )
         # Keep variable name 'heatmap' for compatibility with rest of code
         heatmap = torch.from_numpy(mask).unsqueeze(0).float()  # (1, H, W), values in {0, 1}
