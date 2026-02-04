@@ -86,16 +86,25 @@ extract_results() {
     seg_iou=$(grep "Segmentation IoU" "$result_file" | tail -1 | grep -oE "[0-9]+\.[0-9]+" || echo "N/A")
     box_iou=$(grep "Mask-to-Box IoU" "$result_file" | tail -1 | grep -oE "[0-9]+\.[0-9]+" || echo "N/A")
 
-    # 提取阈值分布
-    thresh_01=$(grep "0.1:" "$result_file" | grep -oE "[0-9]+\.[0-9]+%" | head -1 | sed 's/%//' || echo "0")
-    thresh_09=$(grep "0.9:" "$result_file" | grep -oE "[0-9]+\.[0-9]+%" | head -1 | sed 's/%//' || echo "0")
+    # 提取阈值分布（动态扫描才有，固定阈值策略返回N/A）
+    thresh_01=$(grep "0.1:" "$result_file" | grep -oE "[0-9]+\.[0-9]+%" | head -1 | sed 's/%//' || echo "")
+    thresh_09=$(grep "0.9:" "$result_file" | grep -oE "[0-9]+\.[0-9]+%" | head -1 | sed 's/%//' || echo "")
 
     # 计算极端阈值占比
-    if [[ "$thresh_01" != "0" && "$thresh_09" != "0" ]]; then
-        extreme=$(awk "BEGIN {printf \"%.1f\", ${thresh_01} + ${thresh_09}}")
+    if [[ -n "$thresh_01" && -n "$thresh_09" ]]; then
+        # 使用 bc 进行浮点运算（更安全）
+        extreme=$(echo "$thresh_01 + $thresh_09" | bc)
+    elif [[ -n "$thresh_01" ]]; then
+        extreme="$thresh_01"
+    elif [[ -n "$thresh_09" ]]; then
+        extreme="$thresh_09"
     else
         extreme="N/A"
     fi
+    
+    # 如果阈值为空，用0填充（避免CSV格式错误）
+    thresh_01="${thresh_01:-0}"
+    thresh_09="${thresh_09:-0}"
 
     # 保存到CSV
     echo "$model,$threshold,$seg_iou,$box_iou,$extreme,$thresh_01,$thresh_09" >> "$SUMMARY_CSV"
