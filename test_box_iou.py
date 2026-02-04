@@ -375,6 +375,11 @@ def test_model(model, test_loader, use_lidar_loader, threshold, device, apply_si
             else:
                 pred = model(data)
 
+            # 处理多输出模型（如 MS_CAFNet_DualGeo 返回 tuple: ([outputs], confidence)）
+            if isinstance(pred, tuple):
+                # 取第一个元素（多尺度输出列表）
+                pred = pred[0]
+
             if isinstance(pred, list):
                 pred = pred[-1]
 
