@@ -179,12 +179,14 @@ cat "$SUMMARY_CSV" | column -t -s, >> "$SUMMARY_TXT"
 } >> "$SUMMARY_TXT"
 
 # 使用Python进行统计分析
-python3 - << 'PYTHON_SCRIPT' >> "$SUMMARY_TXT"
+python3 - "$SUMMARY_CSV" << 'PYTHON_SCRIPT' >> "$SUMMARY_TXT"
 import pandas as pd
 import numpy as np
+import sys
 
-# 读取CSV
-df = pd.read_csv('${SUMMARY_CSV}')
+# 读取CSV（从命令行参数获取）
+csv_file = sys.argv[1]
+df = pd.read_csv(csv_file)
 
 # 确保数值列是float类型
 for col in ['Seg_IoU', 'Box_IoU', 'Extreme_Pct']:
