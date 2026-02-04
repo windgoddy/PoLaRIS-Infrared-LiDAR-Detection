@@ -84,6 +84,14 @@ def parse_args():
     parser.add_argument('--workers', type=int, default=4,
                         help='Number of data loading workers')
 
+    # 评估策略参数 (Added 2026-02-04)
+    parser.add_argument('--eval_strategy', type=str, default='auto',
+                        choices=['auto', 'fixed', 'dynamic'],
+                        help='Evaluation strategy: '
+                             'auto (Mamba uses dynamic, others use fixed), '
+                             'fixed (use --threshold value), '
+                             'dynamic (sweep thresholds [0.1-0.9] per sample)')
+
     return parser.parse_args()
 
 
@@ -297,20 +305,28 @@ def create_test_loader(args, force_lidar=False):
     return test_loader, use_lidar_loader
 
 
-def test_model(model, test_loader, use_lidar_loader, threshold, device, apply_sigmoid=True, model_type=''):
+def test_model(model, test_loader, use_lidar_loader, threshold, device, apply_sigmoid=True, model_type='', eval_strategy='auto'):
     """测试模型并计算 Mask-to-Box IoU
-    
+
     Args:
-        model_type: 模型类型，如果是mamba则使用动态阈值扫描
+        model_type: 模型类型
+        eval_strategy: 'auto' (Mamba用dynamic，其他用fixed), 'fixed', 'dynamic'
     """
-    # Mamba使用动态阈值扫描（与训练时一致）
-    use_threshold_sweep = model_type.startswith('mamba')
-    
+    # 根据eval_strategy决定是否使用动态阈值扫描
+    if eval_strategy == 'auto':
+        # 默认行为：Mamba用dynamic，其他模型用fixed
+        use_threshold_sweep = model_type.startswith('mamba')
+    elif eval_strategy == 'dynamic':
+        use_threshold_sweep = True
+    else:  # 'fixed'
+        use_threshold_sweep = False
+
     print(f"\n🧪 开始测试...")
     if use_threshold_sweep:
-        print(f"  - 评估策略: 动态阈值扫描 [0.1-0.9] (与Mamba训练一致)")
+        print(f"  - 评估策略: 动态阈值扫描 [0.1-0.9]")
         print(f"  - 基准阈值: {threshold} (仅用于对比)")
     else:
+        print(f"  - 评估策略: 固定阈值")
         print(f"  - 阈值: {threshold}")
     print(f"  - 设备: {device}")
 
@@ -587,7 +603,8 @@ def main():
     test_loader, use_lidar_loader = create_test_loader(args, force_lidar=force_lidar)
 
     results = test_model(model, test_loader, use_lidar_loader, args.threshold, device,
-                         apply_sigmoid=apply_sigmoid, model_type=args.model)
+                         apply_sigmoid=apply_sigmoid, model_type=args.model,
+                         eval_strategy=args.eval_strategy)
 
     print_results(results, checkpoint_info)
 

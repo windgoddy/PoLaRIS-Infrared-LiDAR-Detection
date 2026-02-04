@@ -404,11 +404,15 @@ class PoLaRIS_Mamba(nn.Module):
         """Special initialization for Gaussian Head's final layer."""
         if hasattr(self, 'head') and hasattr(self.head, 'conv_out'):
             if isinstance(self.head.conv_out, nn.Conv2d):
-                # CRITICAL: Set bias to -2.5 so sigmoid(-2.5) ≈ 0.076
-                # Updated 2026-01-30: Slightly higher than before to prevent "all-black" predictions
-                # This gives stronger initial gradient signal for rare positive samples
-                nn.init.constant_(self.head.conv_out.bias, -2.5)
-                print("✅ Gaussian Head initialized with bias=-2.5 (sigmoid ≈ 0.076)")
+                # CRITICAL: Adaptive bias initialization based on confidence calibration analysis
+                # Previous: bias=-2.5 (sigmoid≈0.076) caused 82% samples needing extreme thresholds
+                # Updated 2026-02-04: bias=-2.0 (sigmoid≈0.12) for better calibration
+                # - Positive sample ratio: ~1.2%
+                # - Theoretical optimal: log(0.012/0.988) ≈ -4.4 (too conservative)
+                # - Practical balance: -2.0 reduces extreme threshold dependency
+                # - Expected: <50% samples needing extreme thresholds (vs 82% before)
+                nn.init.constant_(self.head.conv_out.bias, -2.0)
+                print("✅ Gaussian Head initialized with bias=-2.0 (sigmoid ≈ 0.12)")
 
     def forward(self, ir_img, lidar_img=None):
         """

@@ -20,16 +20,27 @@ CHECKPOINT=""
 GPU=0
 THRESHOLD=0.5
 BATCH_SIZE=4
+EVAL_STRATEGY="auto"
 
 # 解析参数
 if [ $# -lt 1 ]; then
     echo "❌ 错误: 缺少 checkpoint 路径"
     echo ""
-    echo "用法: bash test_checkpoint.sh <checkpoint_path> [gpu_id] [--threshold VALUE] [--batch_size VALUE]"
+    echo "用法: bash test_checkpoint.sh <checkpoint_path> [gpu_id] [OPTIONS]"
+    echo ""
+    echo "选项:"
+    echo "  --threshold VALUE        固定阈值 (default: 0.5)"
+    echo "  --batch_size VALUE       批次大小 (default: 4)"
+    echo "  --eval_strategy STRATEGY 评估策略 (auto|fixed|dynamic, default: auto)"
+    echo "                          auto: Mamba用dynamic，其他用fixed"
+    echo "                          fixed: 所有模型用固定阈值"
+    echo "                          dynamic: 所有模型用动态阈值扫描"
     echo ""
     echo "示例:"
     echo "  bash test_checkpoint.sh result/DNANet_baseline_8bit_Pohang-Canal-3k_DNANet_28_01_2026_17_37_58_wDS/latest_best_model.pth.tar"
     echo "  bash test_checkpoint.sh result/xxx/best_model.pth.tar 0 --threshold 0.3"
+    echo "  bash test_checkpoint.sh result/DNANet_xxx.pth.tar 0 --eval_strategy dynamic  # DNANet也用动态扫描"
+    echo "  bash test_checkpoint.sh model_Mamba/result/xxx.pth 0 --eval_strategy fixed --threshold 0.5  # Mamba用固定阈值"
     exit 1
 fi
 
@@ -53,6 +64,10 @@ while [[ $# -gt 0 ]]; do
             BATCH_SIZE="$2"
             shift 2
             ;;
+        --eval_strategy)
+            EVAL_STRATEGY="$2"
+            shift 2
+            ;;
         *)
             echo "⚠️  未知参数: $1（忽略）"
             shift
@@ -72,6 +87,7 @@ echo "=========================================="
 echo "  Checkpoint: $CHECKPOINT"
 echo "  GPU: $GPU"
 echo "  Threshold: $THRESHOLD"
+echo "  Eval Strategy: $EVAL_STRATEGY"
 echo "=========================================="
 echo ""
 
@@ -126,6 +142,7 @@ python test_box_iou.py \
     --gpu "$GPU" \
     --threshold "$THRESHOLD" \
     --batch_size "$BATCH_SIZE" \
+    --eval_strategy "$EVAL_STRATEGY" \
     --dataset "$DATASET" \
     --split_method "$SPLIT_METHOD" \
     --image_folder "$IMAGE_FOLDER" \
