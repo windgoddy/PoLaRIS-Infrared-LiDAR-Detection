@@ -117,9 +117,9 @@ if [ "$BACKGROUND" = true ]; then
     echo ""
 fi
 
-# 查找所有checkpoint
+# 查找所有checkpoint (支持两种格式: checkpoint_epoch_49.pth 或 checkpoint_epoch49.pth)
 echo "🔍 搜索 checkpoint 文件..."
-CHECKPOINTS=$(find "$EXP_DIR" -name "checkpoint_epoch_*.pth" -o -name "checkpoint_epoch*.pth" | sort -V)
+CHECKPOINTS=$(find "$EXP_DIR" -type f \( -name "checkpoint_epoch_*.pth" -o -name "checkpoint_epoch[0-9]*.pth" \) | sort -V)
 
 if [ -z "$CHECKPOINTS" ]; then
     echo "❌ 未找到checkpoint文件"
@@ -127,12 +127,28 @@ if [ -z "$CHECKPOINTS" ]; then
     echo "💡 提示："
     echo "  1. 确认实验目录路径正确"
     echo "  2. 确认训练已开始保存checkpoint"
-    echo "  3. checkpoint文件命名格式应为: checkpoint_epoch_*.pth 或 checkpoint_epoch*.pth"
+    echo "  3. checkpoint文件命名格式应为: checkpoint_epoch49.pth 或 checkpoint_epoch_49.pth"
+    echo ""
+    echo "🔍 尝试手动查找:"
+    echo "  find \"$EXP_DIR\" -name \"*.pth\" | head -5"
     exit 1
 fi
 
 CHECKPOINT_COUNT=$(echo "$CHECKPOINTS" | wc -l | tr -d ' ')
 echo "✓ 找到 $CHECKPOINT_COUNT 个checkpoints"
+
+# 显示所有找到的 checkpoint 及其 epoch 数
+echo ""
+echo "📋 Checkpoint 列表:"
+for ckpt in $CHECKPOINTS; do
+    if [[ "$ckpt" =~ checkpoint_epoch_([0-9]+)\.pth ]]; then
+        epoch="${BASH_REMATCH[1]}"
+        echo "  - Epoch $epoch (第 $((epoch + 1)) 个epoch): $(basename "$ckpt")"
+    elif [[ "$ckpt" =~ checkpoint_epoch([0-9]+)\.pth ]]; then
+        epoch="${BASH_REMATCH[1]}"
+        echo "  - Epoch $epoch (第 $((epoch + 1)) 个epoch): $(basename "$ckpt")"
+    fi
+done
 echo ""
 
 # 创建结果汇总文件
@@ -165,8 +181,12 @@ TESTED_COUNT=0
 SKIPPED_COUNT=0
 
 for ckpt in $CHECKPOINTS; do
-    # 提取epoch数（支持多种命名格式）
-    if [[ "$ckpt" =~ checkpoint_epoch_([0-9]+)\.pth ]] || [[ "$ckpt" =~ checkpoint_epoch([0-9]+)\.pth ]]; then
+    # 提取epoch数（支持两种命名格式）
+    # 格式1: checkpoint_epoch_49.pth (带下划线)
+    # 格式2: checkpoint_epoch49.pth (不带下划线)
+    if [[ "$ckpt" =~ checkpoint_epoch_([0-9]+)\.pth ]]; then
+        epoch="${BASH_REMATCH[1]}"
+    elif [[ "$ckpt" =~ checkpoint_epoch([0-9]+)\.pth ]]; then
         epoch="${BASH_REMATCH[1]}"
     else
         echo "⚠️  无法解析epoch数: $ckpt (跳过)"
@@ -180,8 +200,29 @@ for ckpt in $CHECKPOINTS; do
         continue
     fi
 
-    # 检查是否符合测试间隔
-    if [ $((epoch % INTERVAL)) -ne 0 ]; then
+    # 智能测试策略：
+    # checkpoint 保存格式是 epoch49, 99, 149... (从0开始，保存间隔为INTERVAL)
+    # 即: (epoch + 1) % INTERVAL == 0 的checkpoint
+    #
+    # 测试策略：
+    # 1. 早期阶段 (epoch < INTERVAL): 测试所有 checkpoint
+    # 2. 后期阶段: 测试满足 (epoch + 1) % INTERVAL == 0 的 checkpoint
+    #    (即 epoch = 49, 99, 149... 对应第 50, 100, 150... 个epoch)
+
+    should_test=false
+
+    if [ $epoch -lt $INTERVAL ]; then
+        # 早期训练，测试所有 checkpoint
+        should_test=true
+        echo "📍 早期训练阶段 (Epoch $epoch < $INTERVAL)，执行测试"
+    elif [ $(((epoch + 1) % INTERVAL)) -eq 0 ]; then
+        # 符合测试间隔 (epoch 49, 99, 149... 对应第 50, 100, 150... 个epoch)
+        should_test=true
+        echo "📍 符合测试间隔 (Epoch $epoch = 第 $((epoch + 1)) 个epoch)，执行测试"
+    fi
+
+    if [ "$should_test" = false ]; then
+        echo "⏭️  Epoch $epoch 不符合测试间隔，跳过"
         SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
         continue
     fi
