@@ -387,54 +387,69 @@ def test_model(model, test_loader, use_lidar_loader, threshold, device, apply_si
                 print(f"  - 预测均值: {pred.mean().item():.4f}")
                 print(f"  - 预测正样本比例 (>0.5): {(pred > 0.5).float().mean().item():.4f}\n")
 
-            # Mamba: 使用阈值扫描（与训练一致）
+            # 使用动态阈值扫描（per-sample，更准确且节省内存）
             if use_threshold_sweep:
-                # Threshold sweep for each batch (like Mamba training)
-                best_batch_iou = 0.0
-                best_batch_threshold = 0.5
-                
-                for thresh in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]:
-                    pred_bin = (pred > thresh).float()
-                    gt_bin = (labels > 0.5).float()
-                    
-                    inter = (pred_bin * gt_bin).sum(dim=(1, 2, 3))
-                    union = (pred_bin + gt_bin).clamp(0, 1).sum(dim=(1, 2, 3))
-                    iou_t = (inter / (union + 1e-7)).mean().item()
-                    
-                    if iou_t > best_batch_iou:
-                        best_batch_iou = iou_t
-                        best_batch_threshold = thresh
-                
-                # Use best threshold for this batch
-                iou_sum += best_batch_iou
-                batch_box_iou = calculate_mask_to_box_iou(pred, labels, threshold=best_batch_threshold)
-                box_iou_sum += batch_box_iou
-                box_iou_count += 1
-                
-                # Per-sample metrics using best threshold
-                pred_binary = (pred > best_batch_threshold).float()
-                labels_binary = (labels > 0.5).float()
-                
+                # Per-sample threshold sweep (memory efficient)
+                batch_iou_sum = 0.0
+                batch_box_iou_sum = 0.0
+
+                # Detach predictions to save memory
+                pred = pred.detach()
+                labels = labels.detach()
+
                 for i in range(pred.size(0)):
-                    pred_i = pred_binary[i:i+1]
-                    label_i = labels_binary[i:i+1]
-                    inter = (pred_i * label_i).sum()
-                    union = (pred_i + label_i).clamp(0, 1).sum()
-                    sample_iou = (inter / (union + 1e-7)).item()
-                    sample_ious.append(sample_iou)
-                    sample_best_thresholds.append(best_batch_threshold)
-                    
-                    sample_box_iou = calculate_mask_to_box_iou(pred[i:i+1], labels[i:i+1], threshold=best_batch_threshold)
-                    sample_box_ious.append(sample_box_iou)
+                    pred_i = pred[i:i+1]
+                    label_i = labels[i:i+1]
+
+                    best_sample_iou = 0.0
+                    best_sample_threshold = 0.5
+                    best_sample_box_iou = 0.0
+
+                    # Sweep thresholds for this sample
+                    for thresh in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]:
+                        pred_bin = (pred_i > thresh).float()
+                        gt_bin = (label_i > 0.5).float()
+
+                        inter = (pred_bin * gt_bin).sum()
+                        union = (pred_bin + gt_bin).clamp(0, 1).sum()
+                        sample_iou = (inter / (union + 1e-7)).item()
+
+                        if sample_iou > best_sample_iou:
+                            best_sample_iou = sample_iou
+                            best_sample_threshold = thresh
+                            # Also compute box IoU at this threshold
+                            best_sample_box_iou = calculate_mask_to_box_iou(pred_i, label_i, threshold=thresh)
+
+                        # Clean up intermediate tensors
+                        del pred_bin, gt_bin, inter, union
+
+                    # Store per-sample results
+                    sample_ious.append(best_sample_iou)
+                    sample_box_ious.append(best_sample_box_iou)
+                    sample_best_thresholds.append(best_sample_threshold)
+
+                    batch_iou_sum += best_sample_iou
+                    batch_box_iou_sum += best_sample_box_iou
+
+                # Update batch statistics
+                iou_sum += batch_iou_sum / pred.size(0)
+                box_iou_sum += batch_box_iou_sum / pred.size(0)
+                box_iou_count += 1
                 
                 # Update progress bar
                 current_mean_iou = iou_sum / box_iou_count
                 current_box_iou = box_iou_sum / box_iou_count
+                # Show most recent sample's best threshold
+                recent_thresh = sample_best_thresholds[-1] if sample_best_thresholds else 0.5
                 tbar.set_postfix({
                     'mIoU': f'{current_mean_iou:.4f}',
                     'Box_IoU': f'{current_box_iou:.4f}',
-                    'BestThresh': f'{best_batch_threshold:.1f}'
+                    'BestThresh': f'{recent_thresh:.1f}'
                 })
+
+                # Clear GPU cache periodically
+                if batch_idx % 10 == 0:
+                    torch.cuda.empty_cache()
             else:
                 # Traditional fixed threshold evaluation
                 miou_metric.update(pred, labels)
@@ -463,6 +478,11 @@ def test_model(model, test_loader, use_lidar_loader, threshold, device, apply_si
                     'mIoU': f'{current_mean_iou:.4f}',
                     'Box_IoU': f'{current_box_iou:.4f}'
                 })
+
+            # Clean up tensors after each batch to free GPU memory
+            del data, labels, pred
+            if batch_idx % 10 == 0:
+                torch.cuda.empty_cache()
 
     # Calculate final metrics
     if use_threshold_sweep:

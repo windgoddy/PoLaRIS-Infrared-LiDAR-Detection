@@ -135,8 +135,9 @@ def parse_args():
                         choices=['Adam', 'AdamW', 'SGD'],
                         help='Optimizer')
     parser.add_argument('--scheduler', type=str, default='CosineAnnealingLR',
-                        choices=['CosineAnnealingLR', 'StepLR'],
-                        help='Learning rate scheduler')
+                        choices=['CosineAnnealingLR', 'CosineAnnealingWarmRestarts', 'StepLR'],
+                        help='Learning rate scheduler: CosineAnnealingLR (default), '
+                             'CosineAnnealingWarmRestarts (periodic restart for long training), StepLR')
 
     # Loss function (2026-02-03: Extended with advanced loss options)
     parser.add_argument('--loss_type', type=str, default='improved_bce_dice',
@@ -435,6 +436,16 @@ class Trainer:
             self.scheduler = lr_scheduler.CosineAnnealingLR(
                 self.optimizer,
                 T_max=args.epochs,
+                eta_min=args.min_lr,
+            )
+        elif args.scheduler == 'CosineAnnealingWarmRestarts':
+            # Periodic learning rate restart for long training (>500 epochs)
+            # T_0=100: First cycle is 100 epochs, then 200, 400, 800...
+            # This prevents learning rate decay to near-zero in long training
+            self.scheduler = lr_scheduler.CosineAnnealingWarmRestarts(
+                self.optimizer,
+                T_0=100,      # First restart after 100 epochs
+                T_mult=2,     # Double the period after each restart
                 eta_min=args.min_lr,
             )
         elif args.scheduler == 'StepLR':

@@ -65,33 +65,85 @@ echo ""
 echo "💡 提示: 按 Ctrl+C 可优雅停止训练（会保存 checkpoint）"
 echo ""
 
-# 训练参数配置 (Updated 2026-02-03 - Dynamic Experiment Naming & Loss Support)
-DATASET="Pohang-Canal-3k"
-SPLIT_METHOD="50_50_2k_new"  # Remote server split directory
-MODEL="mamba_tiny"
-EPOCHS=200  # Reduced from 1000 for faster validation
-LR=0.0002  # 2e-4, optimal learning rate
-PEAK_THRESHOLD=0.35  # Default threshold (will use dynamic best_threshold during testing)
-SAVE_INTERVAL=50  # Save checkpoint every 50 epochs
+# ============================================================
+# 🔧 实验配置选择 (Updated 2026-02-04)
+# ============================================================
+# 选择预设配置：
+#   - "PLAN_B": WarmRestarts + 原始loss权重 (d4.0_p1.0, 800ep)
+#   - "PLAN_C": WarmRestarts + 调整loss权重 (d2.5_p2.0, 500ep)
+#   - "CUSTOM": 自定义配置（手动设置下方所有参数）
+# ============================================================
+EXPERIMENT_CONFIG="PLAN_B"  # 修改此处选择配置: PLAN_B | PLAN_C | CUSTOM
 
-# Loss 参数配置
-# Loss Type: 'improved_bce_dice' (baseline), 'projection' (weak-supervision), 'hybrid' (recommended)
-LOSS_TYPE="hybrid"  # 可修改为 'improved_bce_dice' 'projection' 或 'hybrid' 进行实验
-FOCAL_ALPHA=0.25  # Focal loss alpha (positive sample weight)
-FOCAL_GAMMA=2.5   # Focal loss gamma (focusing parameter)
-DICE_WEIGHT=4.0   # Dice loss weight
-PROJECTION_WEIGHT=1.0  # Projection loss weight (for hybrid loss)
-PROJECTION_MODE="max"  # Projection mode: 'max' or 'mean'
-OHEM_RATIO=0.0    # OHEM ratio (0.0 = disabled)
+# 根据实验配置设置参数
+if [ "$EXPERIMENT_CONFIG" = "PLAN_B" ]; then
+    echo "📋 使用预设: Plan B - WarmRestarts 长期训练"
+    echo "   - Scheduler: CosineAnnealingWarmRestarts"
+    echo "   - Epochs: 800"
+    echo "   - Loss: Hybrid (dice=4.0, projection=1.0)"
+    echo ""
 
-# 动态生成实验名称（反映实际参数配置）
-if [ "$LOSS_TYPE" = "hybrid" ]; then
-    EXPERIMENT_NAME="Hybrid_a${FOCAL_ALPHA}_g${FOCAL_GAMMA}_d${DICE_WEIGHT}_p${PROJECTION_WEIGHT}_${PROJECTION_MODE}"
-elif [ "$LOSS_TYPE" = "projection" ]; then
-    EXPERIMENT_NAME="Projection_${PROJECTION_MODE}"
+    EPOCHS=800
+    LOSS_TYPE="hybrid"
+    DICE_WEIGHT=4.0
+    PROJECTION_WEIGHT=1.0
+    SCHEDULER="CosineAnnealingWarmRestarts"
+    EXPERIMENT_NAME="Hybrid_warmrestarts_d4p1"
+
+elif [ "$EXPERIMENT_CONFIG" = "PLAN_C" ]; then
+    echo "📋 使用预设: Plan C - WarmRestarts + 调整loss权重"
+    echo "   - Scheduler: CosineAnnealingWarmRestarts"
+    echo "   - Epochs: 500"
+    echo "   - Loss: Hybrid (dice=2.5, projection=2.0)"
+    echo ""
+
+    EPOCHS=500
+    LOSS_TYPE="hybrid"
+    DICE_WEIGHT=2.5
+    PROJECTION_WEIGHT=2.0
+    SCHEDULER="CosineAnnealingWarmRestarts"
+    EXPERIMENT_NAME="Hybrid_warmrestarts_d2.5p2"
+
 else
-    EXPERIMENT_NAME="BCEDice_a${FOCAL_ALPHA}_g${FOCAL_GAMMA}_d${DICE_WEIGHT}"
+    echo "📋 使用自定义配置"
+    echo ""
+
+    # 自定义参数配置（仅在 CUSTOM 模式下生效）
+    EPOCHS=200
+    LOSS_TYPE="hybrid"
+    DICE_WEIGHT=4.0
+    PROJECTION_WEIGHT=1.0
+    SCHEDULER="CosineAnnealingLR"  # CosineAnnealingLR | CosineAnnealingWarmRestarts | StepLR
+
+    # 动态生成实验名称
+    if [ "$SCHEDULER" = "CosineAnnealingWarmRestarts" ]; then
+        SCHED_SUFFIX="warmrestarts"
+    else
+        SCHED_SUFFIX="cosine"
+    fi
+
+    if [ "$LOSS_TYPE" = "hybrid" ]; then
+        EXPERIMENT_NAME="Hybrid_${SCHED_SUFFIX}_d${DICE_WEIGHT}_p${PROJECTION_WEIGHT}"
+    elif [ "$LOSS_TYPE" = "projection" ]; then
+        EXPERIMENT_NAME="Projection_${SCHED_SUFFIX}"
+    else
+        EXPERIMENT_NAME="BCEDice_${SCHED_SUFFIX}_d${DICE_WEIGHT}"
+    fi
 fi
+
+# 通用训练参数（所有配置共用）
+DATASET="Pohang-Canal-3k"
+SPLIT_METHOD="50_50_2k_new"
+MODEL="mamba_tiny"
+LR=0.0002  # 2e-4, optimal learning rate
+PEAK_THRESHOLD=0.35
+SAVE_INTERVAL=50
+
+# Loss 参数配置（可被上方预设覆盖）
+FOCAL_ALPHA=0.25
+FOCAL_GAMMA=2.5
+PROJECTION_MODE="max"
+OHEM_RATIO=0.0
 
 # 获取可用 GPU 列表（按空闲显存从大到小排序）
 echo ""
@@ -114,7 +166,8 @@ for GPU_ID in $GPU_LIST; do
     # 依次尝试不同的 batch_size
     for BATCH_SIZE in "${BATCH_SIZES[@]}"; do
         echo ""
-        echo "📝 配置: GPU=$GPU_ID, BS=$BATCH_SIZE, LR=$LR, Exp=$EXPERIMENT_NAME"
+        echo "📝 配置: Config=$EXPERIMENT_CONFIG, GPU=$GPU_ID, BS=$BATCH_SIZE, LR=$LR"
+        echo "   实验名: $EXPERIMENT_NAME"
 
         # 生成实验目录名（与 train.py 的 create_experiment_dir 保持一致）
         DT_STRING=$(date +%Y%m%d_%H%M%S)
@@ -132,11 +185,13 @@ for GPU_ID in $GPU_LIST; do
         # 生成日志文件名（保存在实验目录下）
         LOG_FILE="$SAVE_DIR/training_mamba_gpu${GPU_ID}_bs${BATCH_SIZE}_${DT_STRING}.log"
 
-        # 启动训练 (Updated 2026-02-03: Added loss type parameters)
+        # 启动训练 (Updated 2026-02-04: Added scheduler parameter)
         echo "🚀 启动训练..."
         echo "  Training script: $MODEL_MAMBA_DIR/train.py"
         echo "  Log file: $LOG_FILE"
         echo "  Loss type: $LOSS_TYPE"
+        echo "  Scheduler: $SCHEDULER"
+        echo "  Epochs: $EPOCHS"
         CUDA_VISIBLE_DEVICES=$GPU_ID python "$MODEL_MAMBA_DIR/train.py" \
             --root "$PROJECT_ROOT/dataset" \
             --dataset $DATASET \
@@ -146,6 +201,7 @@ for GPU_ID in $GPU_LIST; do
             --test_batch_size $BATCH_SIZE \
             --epochs $EPOCHS \
             --lr $LR \
+            --scheduler $SCHEDULER \
             --peak_threshold $PEAK_THRESHOLD \
             --save_interval $SAVE_INTERVAL \
             --experiment_name $EXPERIMENT_NAME \
