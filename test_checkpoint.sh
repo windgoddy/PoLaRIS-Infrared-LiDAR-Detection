@@ -110,6 +110,7 @@ elif [[ "$CHECKPOINT" == *"16bit"* ]]; then
     IMAGE_FOLDER="images"
     USE_LIDAR="True"
     NORMALIZE_16BIT="True"
+    IN_CHANNELS_OVERRIDE=2  # 16bit模型使用2通道（红外+LiDAR）
 elif [[ "$CHECKPOINT" == *"8bit"* || "$CHECKPOINT" == *"baseline1"* || "$CHECKPOINT" == *"DNANet_baseline_8bit"* ]]; then
     DATASET="Pohang-Canal-3k"
     SPLIT_METHOD="50_50_2k_new"
