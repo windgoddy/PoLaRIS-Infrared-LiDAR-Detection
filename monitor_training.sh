@@ -14,6 +14,7 @@
 set -e
 
 # 默认参数
+GPU=0                 # GPU ID
 INTERVAL=50           # 测试间隔（每N个epoch测试一次）
 EVAL_STRATEGY="dynamic"  # 评估策略：dynamic|fixed|auto
 BATCH_SIZE=1          # 批次大小（dynamic扫描建议用1避免OOM）
@@ -30,6 +31,7 @@ if [ $# -lt 1 ]; then
     echo "  experiment_dir          实验目录路径（支持通配符）"
     echo ""
     echo "可选参数:"
+    echo "  --gpu N                 GPU ID (default: 0)"
     echo "  --interval N            测试间隔epoch数 (default: 50)"
     echo "  --eval_strategy STR     评估策略 (dynamic|fixed|auto, default: dynamic)"
     echo "  --batch_size N          批次大小 (default: 1)"
@@ -49,6 +51,10 @@ shift
 # 解析可选参数
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --gpu)
+            GPU="$2"
+            shift 2
+            ;;
         --interval)
             INTERVAL="$2"
             shift 2
@@ -85,8 +91,7 @@ cd "$SCRIPT_DIR"
 echo "==========================================="
 echo "📊 训练监控系统"
 echo "==========================================="
-echo "  实验目录: $EXP_DIR"
-echo "  测试间隔: 每 $INTERVAL epoch"
+echo "  实验目录: $EXP_DIR"echo "  GPU:      $GPU"echo "  测试间隔: 每 $INTERVAL epoch"
 echo "  评估策略: $EVAL_STRATEGY"
 echo "  批次大小: $BATCH_SIZE"
 if [ "$EVAL_STRATEGY" = "fixed" ]; then
@@ -239,12 +244,12 @@ for ckpt in $CHECKPOINTS; do
 
     # 运行测试
     if [ "$EVAL_STRATEGY" = "fixed" ]; then
-        bash test_checkpoint.sh "$ckpt" 0 \
+        bash test_checkpoint.sh "$ckpt" "$GPU" \
             --eval_strategy fixed \
             --threshold "$THRESHOLD" \
             --batch_size "$BATCH_SIZE"
     else
-        bash test_checkpoint.sh "$ckpt" 0 \
+        bash test_checkpoint.sh "$ckpt" "$GPU" \
             --eval_strategy "$EVAL_STRATEGY" \
             --batch_size "$BATCH_SIZE"
     fi
