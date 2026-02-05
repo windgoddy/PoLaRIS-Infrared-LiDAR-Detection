@@ -92,6 +92,11 @@ echo ""
 echo "🚀 开始训练..."
 echo ""
 
+# 创建实验目录（Python 期望目录已存在）
+mkdir -p "result/$EXPERIMENT_NAME"
+echo "✓ 已创建实验目录: result/$EXPERIMENT_NAME"
+echo ""
+
 CUDA_VISIBLE_DEVICES=$GPU python train.py \
     --model "$MODEL_TYPE" \
     --dataset "$DATASET" \

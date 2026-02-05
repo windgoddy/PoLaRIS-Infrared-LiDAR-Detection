@@ -81,6 +81,11 @@ echo "  如果达成:         启动完整训练 (500 epochs)"
 echo ""
 read -p "按回车键开始训练，或 Ctrl+C 取消..."
 
+# 创建实验目录（Python 期望目录已存在）
+mkdir -p "result/$EXPERIMENT_NAME"
+echo "✓ 已创建实验目录: result/$EXPERIMENT_NAME"
+echo ""
+
 # 运行训练
 CUDA_VISIBLE_DEVICES=$GPU python train.py \
     --model "$MODEL_TYPE" \
