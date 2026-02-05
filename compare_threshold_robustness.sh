@@ -58,8 +58,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 # 使用默认值（如果未通过参数指定）
-MAMBA_CHECKPOINT="${MAMBA_CHECKPOINT:-model_Mamba/result/Hybrid_warmrestarts_d2.5p2_Pohang-Canal-3k_mamba_tiny_20260204_163514/latest_best_model.pth}"
-DNANET_CHECKPOINT="${DNANET_CHECKPOINT:-result/DNANet_baseline_8bit_Pohang-Canal-3k_DNANet_03_02_2026_19_32_11_wDS/latest_best_model.pth.tar}"
+MAMBA_CHECKPOINT="model_Mamba/result/Hybrid_warmrestarts_d2.5p2_Pohang-Canal-3k_mamba_tiny_20260204_163514/latest_best_model.pth"
+DNANET_CHECKPOINT="result/DNANet_baseline_8bit_Pohang-Canal-3k_DNANet_03_02_2026_19_32_11_wDS/latest_best_model.pth.tar"
 
 # 测试阈值列表（如果未通过参数指定，使用默认值）
 if [ ${#THRESHOLDS[@]} -eq 0 ]; then
