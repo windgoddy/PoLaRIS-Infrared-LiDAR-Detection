@@ -16,14 +16,64 @@ set -e
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$SCRIPT_DIR"
 
+# ============================================================
+# 参数解析（必须在使用参数之前）
+# ============================================================
+
+# 默认参数
+GPU=0
+MAMBA_CHECKPOINT=""
+DNANET_CHECKPOINT=""
+BATCH_SIZE=1
+THRESHOLDS=()
+
+# 解析命令行参数
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --gpu)
+            GPU="$2"
+            shift 2
+            ;;
+        --mamba)
+            MAMBA_CHECKPOINT="$2"
+            shift 2
+            ;;
+        --dnanet)
+            DNANET_CHECKPOINT="$2"
+            shift 2
+            ;;
+        --thresholds)
+            IFS=',' read -ra THRESHOLDS <<< "$2"
+            shift 2
+            ;;
+        --batch_size)
+            BATCH_SIZE="$2"
+            shift 2
+            ;;
+        *)
+            echo "⚠️  未知参数: $1（忽略）"
+            shift
+            ;;
+    esac
+done
+
+# 使用默认值（如果未通过参数指定）
+MAMBA_CHECKPOINT="${MAMBA_CHECKPOINT:-model_Mamba/result/Hybrid_warmrestarts_d2.5p2_Pohang-Canal-3k_mamba_tiny_20260204_163514/latest_best_model.pth}"
+DNANET_CHECKPOINT="${DNANET_CHECKPOINT:-result/DNANet_baseline_8bit_Pohang-Canal-3k_DNANet_03_02_2026_19_32_11_wDS/latest_best_model.pth.tar}"
+
+# 测试阈值列表（如果未通过参数指定，使用默认值）
+if [ ${#THRESHOLDS[@]} -eq 0 ]; then
+    THRESHOLDS=(0.3 0.4 0.5 0.6 0.7)
+fi
+
+# ============================================================
+# 开始执行
+# ============================================================
+
 echo "=========================================="
 echo "🎯 阈值鲁棒性对比实验"
 echo "=========================================="
 echo ""
-
-# 模型路径配置（如果未通过参数指定，使用默认值）
-MAMBA_CHECKPOINT="${MAMBA_CHECKPOINT:-model_Mamba/result/Hybrid_a0.25_g2.5_d4.0_p1.0_max_Pohang-Canal-3k_mamba_tiny_20260203_230723/latest_best_model.pth}"
-DNANET_CHECKPOINT="${DNANET_CHECKPOINT:-result/DNANet_baseline_8bit_Pohang-Canal-3k_DNANet_03_02_2026_19_32_11_wDS/latest_best_model.pth.tar}"
 
 # 检查模型文件是否存在
 if [ ! -f "$MAMBA_CHECKPOINT" ]; then
@@ -40,11 +90,6 @@ echo "✓ GPU:    $GPU"
 echo "✓ Mamba:  $(basename "$(dirname "$MAMBA_CHECKPOINT")")"
 echo "✓ DNANet: $(basename "$(dirname "$DNANET_CHECKPOINT")")"
 echo ""
-
-# 测试阈值列表（如果未通过参数指定，使用默认值）
-if [ ${#THRESHOLDS[@]} -eq 0 ]; then
-    THRESHOLDS=(0.3 0.4 0.5 0.6 0.7)
-fi
 
 # 结果目录
 RESULT_DIR="threshold_robustness_comparison"
