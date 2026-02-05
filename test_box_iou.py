@@ -481,7 +481,8 @@ def test_model(model, test_loader, use_lidar_loader, threshold, device, apply_si
                     torch.cuda.empty_cache()
             else:
                 # Traditional fixed threshold evaluation
-                miou_metric.update(pred, labels)
+                # ⚠️ CRITICAL FIX: 禁用自适应阈值，确保与 box IoU 使用相同策略
+                miou_metric.update(pred, labels, depth_map=None, use_adaptive_threshold=False)
 
                 batch_box_iou = calculate_mask_to_box_iou(pred, labels, threshold=threshold)
                 box_iou_sum += batch_box_iou
