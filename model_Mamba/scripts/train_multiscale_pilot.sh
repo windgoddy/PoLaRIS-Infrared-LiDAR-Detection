@@ -46,10 +46,8 @@ BATCH_SIZE=4
 
 # 训练配置
 LR=0.0001
-OPTIMIZER="adamw"
+OPTIMIZER="AdamW"
 SCHEDULER="CosineAnnealingWarmRestarts"  # 使用Plan C的调度器
-T_0=25  # 50 epochs → 2次restart
-T_MULT=1
 
 # Loss配置（使用Plan C的配置）
 LOSS_TYPE="hybrid"
@@ -72,7 +70,7 @@ echo "配置信息:"
 echo "  GPU:              $GPU"
 echo "  模型:             $MODEL_TYPE (with Deep Supervision)"
 echo "  训练轮数:         $EPOCHS epochs (快速验证)"
-echo "  学习率调度:       $SCHEDULER (T_0=$T_0)"
+echo "  学习率调度:       $SCHEDULER"
 echo "  Loss类型:         $LOSS_TYPE (dice=$DICE_WEIGHT, proj=$PROJECTION_WEIGHT)"
 echo "  实验名称:         $EXPERIMENT_NAME"
 echo ""
@@ -88,20 +86,18 @@ CUDA_VISIBLE_DEVICES=$GPU python train.py \
     --model "$MODEL_TYPE" \
     --dataset "$DATASET" \
     --split_method "$SPLIT_METHOD" \
-    --batch_size $BATCH_SIZE \
+    --train_batch_size $BATCH_SIZE \
+    --test_batch_size $BATCH_SIZE \
     --epochs $EPOCHS \
     --lr $LR \
     --optimizer "$OPTIMIZER" \
     --scheduler "$SCHEDULER" \
-    --T_0 $T_0 \
-    --T_mult $T_MULT \
     --loss_type "$LOSS_TYPE" \
     --dice_weight $DICE_WEIGHT \
     --projection_weight $PROJECTION_WEIGHT \
     --use_lidar $USE_LIDAR \
     --experiment_name "$EXPERIMENT_NAME" \
     --save_dir "result/$EXPERIMENT_NAME" \
-    --eval_interval 10 \
     --save_interval 10
 
 # ============================================================

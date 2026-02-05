@@ -48,10 +48,8 @@ BATCH_SIZE=4
 
 # 训练配置
 LR=0.0001
-OPTIMIZER="adamw"
+OPTIMIZER="AdamW"
 SCHEDULER="CosineAnnealingWarmRestarts"
-T_0=50  # 500 epochs → 10次restart
-T_MULT=1
 
 # Loss配置
 LOSS_TYPE="hybrid"
@@ -98,20 +96,18 @@ CUDA_VISIBLE_DEVICES=$GPU python train.py \
     --model "$MODEL_TYPE" \
     --dataset "$DATASET" \
     --split_method "$SPLIT_METHOD" \
-    --batch_size $BATCH_SIZE \
+    --train_batch_size $BATCH_SIZE \
+    --test_batch_size $BATCH_SIZE \
     --epochs $EPOCHS \
     --lr $LR \
     --optimizer "$OPTIMIZER" \
     --scheduler "$SCHEDULER" \
-    --T_0 $T_0 \
-    --T_mult $T_MULT \
     --loss_type "$LOSS_TYPE" \
     --dice_weight $DICE_WEIGHT \
     --projection_weight $PROJECTION_WEIGHT \
     --use_lidar $USE_LIDAR \
     --experiment_name "$EXPERIMENT_NAME" \
     --save_dir "result/$EXPERIMENT_NAME" \
-    --eval_interval 50 \
     --save_interval 50
 
 # ============================================================
