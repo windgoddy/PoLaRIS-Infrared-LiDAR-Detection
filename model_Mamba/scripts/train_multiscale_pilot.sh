@@ -88,6 +88,7 @@ echo ""
 
 # 运行训练
 CUDA_VISIBLE_DEVICES=$GPU python train.py \
+    --root "../dataset" \
     --model "$MODEL_TYPE" \
     --dataset "$DATASET" \
     --split_method "$SPLIT_METHOD" \

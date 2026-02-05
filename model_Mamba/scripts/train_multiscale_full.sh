@@ -98,6 +98,7 @@ echo "✓ 已创建实验目录: result/$EXPERIMENT_NAME"
 echo ""
 
 CUDA_VISIBLE_DEVICES=$GPU python train.py \
+    --root "../dataset" \
     --model "$MODEL_TYPE" \
     --dataset "$DATASET" \
     --split_method "$SPLIT_METHOD" \
