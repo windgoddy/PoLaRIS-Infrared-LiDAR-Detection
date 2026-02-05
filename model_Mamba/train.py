@@ -43,6 +43,12 @@ from model.load_param_data import load_dataset
 
 # Mamba model and loss (from model_Mamba/)
 from model_Mamba.core.polaris_mamba import PoLaRIS_Mamba, polaris_mamba_tiny, polaris_mamba_small, polaris_mamba_base
+# [NEW] Multi-scale model with Deep Supervision (2026-02-05)
+from model_Mamba.core.polaris_mamba_multiscale import (
+    PoLaRIS_Mamba_MultiScale,
+    polaris_mamba_tiny_multiscale,
+    polaris_mamba_small_multiscale,
+)
 from model_Mamba.core.loss import GaussianFocalLoss, CombinedLoss, AverageMeter, BCEDiceLoss
 from model_Mamba.core.loss_improved import ImprovedBCEDiceLoss, ConfidenceCalibrationLoss
 from model_Mamba.core.loss_advanced import LossFactory  # 2026-02-03: Multi-loss support
@@ -83,8 +89,9 @@ def parse_args():
 
     # Model configuration
     parser.add_argument('--model', type=str, default='mamba_tiny',
-                        choices=['mamba_tiny', 'mamba_small', 'mamba_base'],
-                        help='Model variant')
+                        choices=['mamba_tiny', 'mamba_small', 'mamba_base',
+                                'mamba_tiny_multiscale', 'mamba_small_multiscale'],
+                        help='Model variant (use *_multiscale for multi-scale fusion + deep supervision)')
     parser.add_argument('--use_lidar', type=str, default='True',
                         help='Whether to use LiDAR gating (True/False)')
 
@@ -365,6 +372,10 @@ class Trainer:
             self.net = polaris_mamba_small(use_lidar=use_lidar)
         elif args.model == 'mamba_base':
             self.net = polaris_mamba_base(use_lidar=use_lidar)
+        elif args.model == 'mamba_tiny_multiscale':
+            self.net = polaris_mamba_tiny_multiscale(use_lidar=use_lidar, use_deep_supervision=True)
+        elif args.model == 'mamba_small_multiscale':
+            self.net = polaris_mamba_small_multiscale(use_lidar=use_lidar, use_deep_supervision=True)
         else:
             raise ValueError(f"Unknown model: {args.model}")
 
@@ -491,10 +502,22 @@ class Trainer:
             heatmap_gt = batch['heatmap'].to(self.device)
 
             # Forward
-            heatmap_pred = self.net(ir_img, lidar_img)
+            output = self.net(ir_img, lidar_img)
 
-            # Loss
-            loss = self.criterion(heatmap_pred, heatmap_gt)
+            # [NEW] Loss calculation with Deep Supervision support
+            if isinstance(output, list):
+                # Deep Supervision: output = [main_pred, aux_pred_s2, aux_pred_s3]
+                heatmap_pred = output[0]  # Main prediction
+                loss_main = self.criterion(heatmap_pred, heatmap_gt)
+                loss_aux2 = self.criterion(output[1], heatmap_gt)
+                loss_aux3 = self.criterion(output[2], heatmap_gt)
+
+                # Weighted combination: main=60%, aux2=25%, aux3=15%
+                loss = loss_main + 0.5 * loss_aux2 + 0.4 * loss_aux3
+            else:
+                # Standard mode: single output
+                heatmap_pred = output
+                loss = self.criterion(heatmap_pred, heatmap_gt)
 
             # Diagnostic: collect statistics from first 5 batches
             if i < 5:
@@ -551,7 +574,13 @@ class Trainer:
                 heatmap_gt = batch['heatmap'].to(self.device)
 
                 # Forward
-                heatmap_pred = self.net(ir_img, lidar_img)
+                output = self.net(ir_img, lidar_img)
+
+                # [NEW] Handle Deep Supervision outputs (only use main prediction for evaluation)
+                if isinstance(output, list):
+                    heatmap_pred = output[0]  # Main prediction only
+                else:
+                    heatmap_pred = output
 
                 # Collect statistics (first 5 batches of every 10th epoch)
                 if epoch % 10 == 0 and batch_idx < 5:
@@ -563,7 +592,7 @@ class Trainer:
                     gt_stats['mean'].append(heatmap_gt.mean().item())
                     gt_stats['num_pos'].append((heatmap_gt > 0.5).sum().item())
 
-                # Loss
+                # Loss (only compute on main prediction during eval)
                 loss = self.criterion(heatmap_pred, heatmap_gt)
                 loss_meter.update(loss.item(), ir_img.size(0))
                 
