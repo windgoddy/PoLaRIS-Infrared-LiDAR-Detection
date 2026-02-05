@@ -61,28 +61,27 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 EXPERIMENT_NAME="MultiScale_Full_d2.5p2_${TIMESTAMP}"
 
 # ============================================================
-# 警告和确认
+# 训练信息显示
 # ============================================================
 
 echo "=========================================="
-echo "⚠️  多尺度Mamba模型完整训练"
+echo "🚀 多尺度Mamba模型完整训练（自动模式）"
 echo "=========================================="
 echo ""
-echo "⚠️  此训练将消耗大量时间和计算资源"
+echo "⚠️  此训练将消耗大量时间和计算资源 (~24-36小时)"
 echo ""
 echo "配置信息:"
 echo "  GPU:              $GPU"
 echo "  模型:             $MODEL_TYPE (with Deep Supervision)"
-echo "  训练轮数:         $EPOCHS epochs (~24-36小时)"
+echo "  训练轮数:         $EPOCHS epochs"
 echo "  实验名称:         $EXPERIMENT_NAME"
 echo ""
-echo "📋 训练前检查清单:"
-echo "  ✓ Pilot training的Box IoU > 0.58?"
-echo "  ✓ GPU显存充足 (建议16GB+)?"
-echo "  ✓ 磁盘空间充足 (需要~10GB)?"
-echo "  ✓ 训练期间不会断电?"
+echo "📋 预期结果:"
+echo "  - Box IoU: 0.60-0.64 (vs 0.574 baseline)"
+echo "  - 极端阈值: <65% (vs 66% baseline)"
 echo ""
-read -p "确认所有条件满足后，按回车键开始训练，或 Ctrl+C 取消..."
+echo "💡 提示: 按 Ctrl+C 可优雅停止训练（会保存 checkpoint）"
+echo ""
 
 # ============================================================
 # 开始训练
