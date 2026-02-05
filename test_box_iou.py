@@ -162,6 +162,14 @@ def detect_model_params(state_dict, model_type):
             has_lidar_gate = any('lidar_gate' in key for key in state_dict.keys())
             params['use_lidar'] = has_lidar_gate
             
+            # Check if this is a multiscale model
+            # Multiscale models have skip connection projections
+            has_skip_proj = any('skip_proj_s' in key for key in state_dict.keys())
+            params['is_multiscale'] = has_skip_proj
+            
+            if has_skip_proj:
+                print(f"  ℹ️  检测到多尺度架构 (skip_proj_s* 层存在)")
+            
             # For data loader: need 2 channels if LiDAR is used
             if has_lidar_gate:
                 params['data_in_channels'] = 2  # IR + Depth
@@ -195,6 +203,8 @@ def create_model(model_type, in_channels, checkpoint, device):
         print(f"    - embed_dim: {detected_params['embed_dim']}")
     if 'use_lidar' in detected_params:
         print(f"    - use_lidar: {detected_params['use_lidar']}")
+    if 'is_multiscale' in detected_params:
+        print(f"    - is_multiscale: {detected_params['is_multiscale']}")
 
     apply_sigmoid = True
 
@@ -213,17 +223,31 @@ def create_model(model_type, in_channels, checkpoint, device):
         model = MS_CAFNet(num_classes=1, input_channels=in_channels)
     elif model_type == 'MS_CAFNet_DualGeo':
         model = MS_CAFNet_DualGeo(num_classes=1, input_channels=in_channels)
-    elif model_type in ['mamba', 'mamba_tiny', 'mamba_small', 'mamba_base']:
+    elif model_type in ['mamba', 'mamba_tiny', 'mamba_small', 'mamba_base', 'mamba_tiny_multiscale']:
         embed_dim = detected_params.get('embed_dim', 96)
         depths_map = {64: [2, 2, 4, 2], 96: [2, 2, 6, 2], 128: [2, 2, 12, 2]}
         depths = depths_map.get(embed_dim, [2, 2, 6, 2])
         use_lidar = detected_params.get('use_lidar', False)
-        model = PoLaRIS_Mamba(
-            in_channels=1,  # Always 1 for IR (patch_embed)
-            embed_dim=embed_dim,
-            depths=depths,
-            use_lidar=use_lidar
-        )
+        is_multiscale = detected_params.get('is_multiscale', False)
+        
+        # Auto-detect multiscale even if model_type is generic 'mamba_tiny'
+        if is_multiscale or model_type == 'mamba_tiny_multiscale':
+            # Import multiscale model
+            from model_Mamba.core.polaris_mamba_multiscale import PoLaRIS_Mamba_MultiScale
+            model = PoLaRIS_Mamba_MultiScale(
+                in_channels=1,  # Always 1 for IR (patch_embed)
+                embed_dim=embed_dim,
+                depths=depths,
+                use_lidar=use_lidar
+            )
+            print(f"  ✓ 使用多尺度 Mamba 模型")
+        else:
+            model = PoLaRIS_Mamba(
+                in_channels=1,  # Always 1 for IR (patch_embed)
+                embed_dim=embed_dim,
+                depths=depths,
+                use_lidar=use_lidar
+            )
         apply_sigmoid = False  # GaussianHead 内部已做 sigmoid
     else:
         raise ValueError(f"Unknown model type: {model_type}")
