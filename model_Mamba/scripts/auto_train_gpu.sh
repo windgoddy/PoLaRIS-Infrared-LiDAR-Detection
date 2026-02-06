@@ -86,7 +86,7 @@ if [ "$EXPERIMENT_CONFIG" = "PLAN_B" ]; then
     EPOCHS=800
     LOSS_TYPE="hybrid"
     DICE_WEIGHT=4.0
-    PROJECTION_WEIGHT=2.0
+    PROJECTION_WEIGHT=1.0
     SCHEDULER="CosineAnnealingWarmRestarts"
     EXPERIMENT_NAME="Hybrid_warmrestarts_d4p1"
 
@@ -109,10 +109,10 @@ else
     echo ""
 
     # 自定义参数配置（仅在 CUSTOM 模式下生效）
-    EPOCHS=200
+    EPOCHS=2000
     LOSS_TYPE="hybrid"
     DICE_WEIGHT=4.0
-    PROJECTION_WEIGHT=2.0
+    PROJECTION_WEIGHT=1.0
     SCHEDULER="CosineAnnealingLR"  # CosineAnnealingLR | CosineAnnealingWarmRestarts | StepLR
 
     # 动态生成实验名称
@@ -138,8 +138,6 @@ MODEL="mamba_tiny"
 LR=0.0002  # 2e-4, optimal learning rate
 PEAK_THRESHOLD=0.35
 SAVE_INTERVAL=50
-BASE_SIZE=256
-CROP_SIZE=256
 
 # Loss 参数配置（可被上方预设覆盖）
 FOCAL_ALPHA=0.25
@@ -156,7 +154,7 @@ echo "GPU 显存状态（从大到小）:"
 nvidia-smi --query-gpu=index,name,memory.free,memory.used --format=csv,noheader
 
 # 尝试不同的 batch_size（从大到小）
-BATCH_SIZES=(16 8 4 2 1)
+BATCH_SIZES=(4 2 1)
 
 # 依次尝试 GPU
 for GPU_ID in $GPU_LIST; do
@@ -199,8 +197,6 @@ for GPU_ID in $GPU_LIST; do
             --dataset $DATASET \
             --split_method $SPLIT_METHOD \
             --model $MODEL \
-            --base_size $BASE_SIZE \
-            --crop_size $CROP_SIZE \
             --train_batch_size $BATCH_SIZE \
             --test_batch_size $BATCH_SIZE \
             --epochs $EPOCHS \

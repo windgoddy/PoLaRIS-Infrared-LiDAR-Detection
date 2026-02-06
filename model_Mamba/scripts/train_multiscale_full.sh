@@ -20,7 +20,7 @@
 #   - 极端阈值: <65% (vs 66% baseline)
 #
 # 用法：
-#   bash train_multiscale_full.sh [GPU_ID]
+#   bash model_Mamba/scripts/train_multiscale_full.sh [GPU_ID]
 #
 # =============================================================================
 
@@ -34,7 +34,7 @@ cd "$SCRIPT_DIR/.."
 # ============================================================
 
 GPU=${1:-0}
-EPOCHS=500  # 完整训练
+EPOCHS=2000  # 完整训练
 
 # 模型配置
 MODEL_TYPE="mamba_tiny_multiscale"
