@@ -44,7 +44,9 @@ USE_DEEP_SUPERVISION=True
 # 数据配置
 DATASET="Pohang-Canal-3k"
 SPLIT_METHOD="50_50_2k_new"
-BATCH_SIZE=4
+BASE_SIZE=256
+CROP_SIZE=256
+BATCH_SIZE=16
 
 # 训练配置
 LR=0.0001
@@ -53,7 +55,7 @@ SCHEDULER="CosineAnnealingWarmRestarts"
 
 # Loss配置
 LOSS_TYPE="hybrid"
-DICE_WEIGHT=2.5
+DICE_WEIGHT=2.0
 PROJECTION_WEIGHT=2.0
 
 # 实验名称
@@ -101,6 +103,8 @@ CUDA_VISIBLE_DEVICES=$GPU python train.py \
     --model "$MODEL_TYPE" \
     --dataset "$DATASET" \
     --split_method "$SPLIT_METHOD" \
+    --base_size $BASE_SIZE \
+    --crop_size $CROP_SIZE \
     --train_batch_size $BATCH_SIZE \
     --test_batch_size $BATCH_SIZE \
     --epochs $EPOCHS \
