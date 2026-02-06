@@ -36,6 +36,7 @@ from model.load_param_data import load_dataset, load_param
 
 # Mamba model
 from model_Mamba.core.polaris_mamba import PoLaRIS_Mamba
+from model_Mamba.dataset.binary_mask_utils import generate_binary_mask_target, load_yolo_labels
 
 
 def parse_args():
@@ -71,10 +72,10 @@ def parse_args():
                         help='Model type (auto-detect from checkpoint if not specified)')
     parser.add_argument('--in_channels', type=int, default=1,
                         help='Number of input channels (1=IR only, 2=IR+Depth)')
-    parser.add_argument('--base_size', type=int, default=512,
-                        help='Base image size')
-    parser.add_argument('--crop_size', type=int, default=480,
-                        help='Crop size for testing')
+    parser.add_argument('--base_size', type=int, default=None,
+                        help='Base image size (if None, use model-specific default)')
+    parser.add_argument('--crop_size', type=int, default=None,
+                        help='Crop size for testing (if None, use model-specific default)')
 
     # 高级参数
     parser.add_argument('--use_lidar_dataloader', type=str, default='False',
@@ -206,7 +207,8 @@ def create_model(model_type, in_channels, checkpoint, device):
     if 'is_multiscale' in detected_params:
         print(f"    - is_multiscale: {detected_params['is_multiscale']}")
 
-    apply_sigmoid = True
+    # Align with train.py: metrics are computed on raw logits (no sigmoid)
+    apply_sigmoid = False
 
     if model_type == 'DNANet':
         nb_filter, num_blocks = load_param('three', 'resnet_18')
@@ -287,6 +289,16 @@ def create_test_loader(args, force_lidar=False):
             in_channels=args.in_channels,
             image_folder=args.image_folder
         )
+        # For Mamba: replace GT mask with label-generated binary mask (align with MambaDataset)
+        if args.model is not None and args.model.startswith('mamba'):
+            testset = MambaLabelMaskWrapper(
+                base_loader=testset,
+                dataset_dir=dataset_dir,
+                downscale=1,
+                fill_mode='box',
+                ellipse_ratio=0.8
+            )
+
         test_loader = DataLoader(
             dataset=testset,
             batch_size=args.batch_size,
@@ -329,7 +341,50 @@ def create_test_loader(args, force_lidar=False):
     return test_loader, use_lidar_loader
 
 
-def test_model(model, test_loader, use_lidar_loader, threshold, device, apply_sigmoid=True, model_type='', eval_strategy='auto'):
+class MambaLabelMaskWrapper(torch.utils.data.Dataset):
+    """
+    Wrap PoLaRISTestLoader and generate binary GT mask from labels/*.txt
+    to align with MambaDataset training logic.
+    """
+    def __init__(self, base_loader, dataset_dir, downscale=1, fill_mode='box', ellipse_ratio=0.8):
+        self.base_loader = base_loader
+        self.dataset_dir = dataset_dir
+        self.downscale = downscale
+        self.fill_mode = fill_mode
+        self.ellipse_ratio = ellipse_ratio
+
+    def __len__(self):
+        return len(self.base_loader)
+
+    def __getitem__(self, index):
+        sample = self.base_loader[index]
+        img = sample['image']
+        img_id = sample.get('img_id')
+
+        # Compute mask size from image tensor
+        if isinstance(img, torch.Tensor):
+            _, h, w = img.shape
+        else:
+            # Fallback for unexpected types
+            h, w = sample['mask'].shape[-2:]
+
+        label_path = os.path.join(self.dataset_dir, 'labels', f'{img_id}.txt')
+        labels = load_yolo_labels(label_path)
+        mask = generate_binary_mask_target(
+            labels,
+            img_size=(h, w),
+            downscale=self.downscale,
+            fill_mode=self.fill_mode,
+            ellipse_ratio=self.ellipse_ratio,
+        )
+        mask = torch.from_numpy(mask).unsqueeze(0).float()
+
+        # Keep original fields, replace mask
+        sample['mask'] = mask
+        return sample
+
+
+def test_model(model, test_loader, use_lidar_loader, threshold, device, apply_sigmoid=False, model_type='', eval_strategy='auto'):
     """测试模型并计算 Mask-to-Box IoU
 
     Args:
@@ -630,6 +685,11 @@ def main():
 
     print(f"  ✓ 模型类型: {args.model}")
 
+    # Auto eval strategy: use dynamic threshold sweep for all models
+    if args.eval_strategy == 'auto':
+        args.eval_strategy = 'dynamic'
+        print("  ✓ 评估策略: auto → dynamic (所有模型启用动态阈值扫描)")
+
     state_dict = checkpoint.get('state_dict') or checkpoint.get('model_state_dict')
     detected_params = detect_model_params(state_dict, args.model)
 
@@ -647,6 +707,17 @@ def main():
         args.use_lidar_dataloader = 'True'
         args.normalize_16bit = 'True'
         force_lidar = True
+
+    # Set model-specific default input sizes if not explicitly provided
+    if args.base_size is None or args.crop_size is None:
+        if args.model.startswith('mamba'):
+            args.base_size = 512
+            args.crop_size = 480
+            print("  ✓ 使用 Mamba 训练默认输入尺寸: base_size=512, crop_size=480")
+        else:
+            args.base_size = 256
+            args.crop_size = 256
+            print("  ✓ 使用 DNANet/CAFNet 训练默认输入尺寸: base_size=256, crop_size=256")
 
     model, apply_sigmoid = create_model(args.model, args.in_channels, checkpoint, device)
 

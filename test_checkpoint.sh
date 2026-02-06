@@ -147,8 +147,6 @@ python test_box_iou.py \
     --dataset "$DATASET" \
     --split_method "$SPLIT_METHOD" \
     --image_folder "$IMAGE_FOLDER" \
-    --base_size 512 \
-    --crop_size 480 \
     "${EXTRA_ARGS[@]}"
 
 echo ""
