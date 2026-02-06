@@ -96,10 +96,11 @@ class ROCMetric():
 
 
 class PD_FA():
-    def __init__(self, nclass, bins):
+    def __init__(self, nclass, bins, img_size=None):
         super(PD_FA, self).__init__()
         self.nclass = nclass
         self.bins = bins
+        self.img_size = img_size
         self.image_area_total = []
         self.image_area_match = []
         self.FA = np.zeros(self.bins+1)
@@ -109,10 +110,20 @@ class PD_FA():
 
         for iBin in range(self.bins+1):
             score_thresh = iBin * (255/self.bins)
-            predits  = np.array((preds > score_thresh).cpu()).astype('int64')
-            predits  = np.reshape (predits,  (256,256))
-            labelss = np.array((labels).cpu()).astype('int64') # P
-            labelss = np.reshape (labelss , (256,256))
+            predits = np.array((preds > score_thresh).cpu()).astype('int64')
+            labelss = np.array((labels).cpu()).astype('int64')  # P
+
+            # Infer spatial size dynamically (fallback to img_size if provided)
+            if predits.ndim >= 2:
+                h, w = predits.shape[-2], predits.shape[-1]
+            elif self.img_size is not None:
+                h = w = self.img_size
+            else:
+                raise ValueError("PD_FA: cannot infer image size from preds")
+
+            predits = np.reshape(predits, (h, w))
+            labelss = np.reshape(labelss, (h, w))
+            self._last_area = h * w
 
             image = measure.label(predits, connectivity=2)
             coord_image = measure.regionprops(image)
@@ -148,7 +159,14 @@ class PD_FA():
 
     def get(self,img_num):
 
-        Final_FA =  self.FA / ((256 * 256) * img_num)
+        if self.img_size is not None:
+            area = self.img_size * self.img_size
+        else:
+            # Use inferred size from last update (if available)
+            area = getattr(self, '_last_area', None)
+            if area is None:
+                raise ValueError("PD_FA: image area is unknown. Provide img_size or call update first.")
+        Final_FA = self.FA / (area * img_num)
         Final_PD =  self.PD /self.target
 
         return Final_FA,Final_PD

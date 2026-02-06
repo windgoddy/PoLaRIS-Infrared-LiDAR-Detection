@@ -711,9 +711,9 @@ def main():
     # Set model-specific default input sizes if not explicitly provided
     if args.base_size is None or args.crop_size is None:
         if args.model.startswith('mamba'):
-            args.base_size = 512
-            args.crop_size = 480
-            print("  ✓ 使用 Mamba 训练默认输入尺寸: base_size=512, crop_size=480")
+            args.base_size = 256
+            args.crop_size = 256
+            print("  ✓ 使用 Mamba 训练默认输入尺寸: base_size=256, crop_size=256")
         else:
             args.base_size = 256
             args.crop_size = 256

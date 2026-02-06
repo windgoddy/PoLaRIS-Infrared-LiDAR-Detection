@@ -543,9 +543,14 @@ def save_Pred_GT(pred, labels, target_image_path, val_img_ids, num, suffix):
     labelsss = labels * 255
     labelsss = np.uint8(labelsss.cpu())
 
-    img = Image.fromarray(predsss.reshape(256, 256))
+    if predsss.ndim >= 2:
+        h, w = predsss.shape[-2], predsss.shape[-1]
+    else:
+        raise ValueError("save_Pred_GT: invalid pred shape")
+
+    img = Image.fromarray(predsss.reshape(h, w))
     img.save(target_image_path + '/' + '%s_Pred' % (val_img_ids[num]) +suffix)
-    img = Image.fromarray(labelsss.reshape(256, 256))
+    img = Image.fromarray(labelsss.reshape(h, w))
     img.save(target_image_path + '/' + '%s_GT' % (val_img_ids[num]) + suffix)
 
 
@@ -554,7 +559,12 @@ def save_Pred_GT_visulize(pred, img_demo_dir, img_demo_index, suffix):
     predsss = np.array((pred > 0).cpu()).astype('int64') * 255
     predsss = np.uint8(predsss)
 
-    img = Image.fromarray(predsss.reshape(256, 256))
+    if predsss.ndim >= 2:
+        h, w = predsss.shape[-2], predsss.shape[-1]
+    else:
+        raise ValueError("save_Pred_GT_visulize: invalid pred shape")
+
+    img = Image.fromarray(predsss.reshape(h, w))
     img.save(img_demo_dir + '/' + '%s_Pred' % (img_demo_index) +suffix)
 
     plt.figure(figsize=(10, 6))
@@ -581,9 +591,14 @@ def save_and_visulize_demo(pred, labels, target_image_path, val_img_ids, num, su
     labelsss = labels * 255
     labelsss = np.uint8(labelsss.cpu())
 
-    img = Image.fromarray(predsss.reshape(256, 256))
+    if predsss.ndim >= 2:
+        h, w = predsss.shape[-2], predsss.shape[-1]
+    else:
+        raise ValueError("save_and_visulize_demo: invalid pred shape")
+
+    img = Image.fromarray(predsss.reshape(h, w))
     img.save(target_image_path + '/' + '%s_Pred' % (val_img_ids[num]) +suffix)
-    img = Image.fromarray(labelsss.reshape(256, 256))
+    img = Image.fromarray(labelsss.reshape(h, w))
     img.save(target_image_path + '/' + '%s_GT' % (val_img_ids[num]) + suffix)
 
     return

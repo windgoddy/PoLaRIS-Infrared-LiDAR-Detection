@@ -110,10 +110,10 @@ def parse_args():
                         help='Number of input channels (1=IR, 2=IR+Depth)')
 
     # Data preprocessing
-    parser.add_argument('--base_size', type=int, default=512,
-                        help='Base image size')
-    parser.add_argument('--crop_size', type=int, default=480,
-                        help='Crop size for training')
+    parser.add_argument('--base_size', type=int, default=256,
+                        help='Base image size (256 for scale-aligned training)')
+    parser.add_argument('--crop_size', type=int, default=256,
+                        help='Crop size for training (match base_size)')
     parser.add_argument('--normalize_16bit', type=str, default='True',
                         help='Use Min-Max normalization for 16-bit images')
 
