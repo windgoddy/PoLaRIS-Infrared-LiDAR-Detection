@@ -38,6 +38,7 @@ if PROJECT_ROOT not in sys.path:
 
 # PoLaRIS utilities (from project root)
 from model.utils_lidar import PoLaRISTrainLoader, PoLaRISTestLoader
+from model.utils import TrainSetLoader, TestSetLoader  # Traditional 8-bit loader
 from model.metric import ROCMetric, mIoU
 from model.load_param_data import load_dataset
 
@@ -116,6 +117,17 @@ def parse_args():
                         help='Crop size for training (match base_size)')
     parser.add_argument('--normalize_16bit', type=str, default='True',
                         help='Use Min-Max normalization for 16-bit images')
+    parser.add_argument('--normalize_mode', type=str, default='minmax',
+                        choices=['minmax', 'global', 'percentile', 'clahe'],
+                        help='Normalization mode for 16-bit images: '
+                             'minmax (adaptive per image, default), '
+                             'global (fixed range), '
+                             'percentile (clip outliers), '
+                             'clahe (histogram equalization)')
+    parser.add_argument('--use_polaris_loader', type=str, default='True',
+                        help='Use PoLaRISTrainLoader (True) or TrainSetLoader (False). '
+                             'PoLaRISTrainLoader: supports 16-bit + LiDAR. '
+                             'TrainSetLoader: 8-bit only, for fair comparison with DNANet.')
 
     # Gaussian target generation
     parser.add_argument('--gaussian_iou', type=float, default=0.7,
@@ -212,14 +224,16 @@ def parse_args():
 
 class MambaDataset(Dataset):
     """
-    Wrapper around PoLaRISTrainLoader that generates Gaussian heatmap targets.
+    Wrapper around DataLoader that generates Gaussian heatmap targets.
+    Supports both PoLaRISTrainLoader (dict output) and TrainSetLoader (tuple output).
     """
-    def __init__(self, base_loader, dataset_dir, gaussian_iou=0.7, downscale=1):
+    def __init__(self, base_loader, dataset_dir, gaussian_iou=0.7, downscale=1, use_polaris_loader=True):
         self.base_loader = base_loader
         self.dataset_dir = dataset_dir
         self.gaussian_iou = gaussian_iou
         self.downscale = downscale
         self.img_ids = base_loader._items
+        self.use_polaris_loader = use_polaris_loader
 
     def __len__(self):
         return len(self.base_loader)
@@ -228,12 +242,19 @@ class MambaDataset(Dataset):
         # Get sample from base loader
         sample = self.base_loader[index]
 
-        # Extract image (C, H, W) where C=1 or 2
-        img = sample['image']
-        img_id = sample['img_id']
+        # Handle different loader output formats
+        if self.use_polaris_loader:
+            # PoLaRISTrainLoader returns dict: {'image', 'mask', 'oracle_mask', 'img_id', ...}
+            img = sample['image']
+            img_id = sample['img_id']
+        else:
+            # TrainSetLoader returns tuple: (img, mask, oracle_mask)
+            img = sample[0]
+            # Get img_id from base_loader's item list
+            img_id = self.base_loader._items[index]
 
         # Separate IR and LiDAR channels
-        # PoLaRISTrainLoader stacks [IR, Depth] when in_channels=2
+        # Both loaders stack [IR, Depth] when in_channels=2
         if img.shape[0] == 2:
             # in_channels=2: image = [IR, Depth]
             ir_img = img[0:1, :, :]      # (1, H, W)
@@ -309,29 +330,77 @@ class Trainer:
         print(f"✓ Train samples: {len(train_img_ids)}")
         print(f"✓ Val samples: {len(val_img_ids)}")
 
-        # Base loaders
-        base_train_loader = PoLaRISTrainLoader(
-            dataset_dir=dataset_dir,
-            img_id=train_img_ids,
-            base_size=args.base_size,
-            crop_size=args.crop_size,
-            transform=None,
-            suffix=args.suffix,
-            normalize_16bit=(args.normalize_16bit == 'True'),
-            in_channels=args.in_channels,
-            image_folder=args.image_folder,
-        )
-        base_test_loader = PoLaRISTestLoader(
-            dataset_dir=dataset_dir,
-            img_id=val_img_ids,
-            base_size=args.base_size,
-            crop_size=args.crop_size,
-            transform=None,
-            suffix=args.suffix,
-            normalize_16bit=(args.normalize_16bit == 'True'),
-            in_channels=args.in_channels,
-            image_folder=args.image_folder,
-        )
+        # Choose DataLoader based on use_polaris_loader flag
+        use_polaris_loader = (args.use_polaris_loader == 'True')
+        
+        if use_polaris_loader:
+            print(f"✓ Using PoLaRISTrainLoader (16-bit + LiDAR support)")
+            # Base loaders with 16-bit and LiDAR support
+            base_train_loader = PoLaRISTrainLoader(
+                dataset_dir=dataset_dir,
+                img_id=train_img_ids,
+                base_size=args.base_size,
+                crop_size=args.crop_size,
+                transform=None,
+                suffix=args.suffix,
+                normalize_16bit=(args.normalize_16bit == 'True'),
+                normalize_mode=args.normalize_mode,
+                in_channels=args.in_channels,
+                image_folder=args.image_folder,
+            )
+            base_test_loader = PoLaRISTestLoader(
+                dataset_dir=dataset_dir,
+                img_id=val_img_ids,
+                base_size=args.base_size,
+                crop_size=args.crop_size,
+                transform=None,
+                suffix=args.suffix,
+                normalize_16bit=(args.normalize_16bit == 'True'),
+                normalize_mode=args.normalize_mode,
+                in_channels=args.in_channels,
+                image_folder=args.image_folder,
+            )
+                suffix=args.suffix,
+                normalize_16bit=(args.normalize_16bit == 'True'),
+                in_channels=args.in_channels,
+                image_folder=args.image_folder,
+            )
+        else:
+            print(f"✓ Using TrainSetLoader (8-bit only, DNANet-compatible)")
+            # Traditional loaders for 8-bit images (fair comparison with DNANet)
+            from torchvision import transforms
+            
+            if args.in_channels == 1:
+                input_transform = transforms.Compose([
+                    transforms.ToTensor(),
+                    transforms.Normalize([0.5], [0.5])
+                ])
+            else:
+                input_transform = transforms.Compose([
+                    transforms.ToTensor(),
+                    transforms.Normalize([.485, .456, .406], [.229, .224, .225])
+                ])
+            
+            base_train_loader = TrainSetLoader(
+                dataset_dir=dataset_dir,
+                img_id=train_img_ids,
+                base_size=args.base_size,
+                crop_size=args.crop_size,
+                transform=input_transform,
+                suffix=args.suffix,
+                in_channels=args.in_channels,
+                image_folder=args.image_folder,
+            )
+            base_test_loader = TestSetLoader(
+                dataset_dir=dataset_dir,
+                img_id=val_img_ids,
+                base_size=args.base_size,
+                crop_size=args.crop_size,
+                transform=input_transform,
+                suffix=args.suffix,
+                in_channels=args.in_channels,
+                image_folder=args.image_folder,
+            )
 
         # Wrap with Gaussian target generation
         self.trainset = MambaDataset(
@@ -339,12 +408,14 @@ class Trainer:
             dataset_dir,
             gaussian_iou=args.gaussian_iou,
             downscale=args.heatmap_downscale,
+            use_polaris_loader=use_polaris_loader,
         )
         self.testset = MambaDataset(
             base_test_loader,
             dataset_dir,
             gaussian_iou=args.gaussian_iou,
             downscale=args.heatmap_downscale,
+            use_polaris_loader=use_polaris_loader,
         )
 
         # Data loaders

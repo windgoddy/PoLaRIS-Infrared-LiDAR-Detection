@@ -44,7 +44,17 @@ class PoLaRISTrainLoader(Dataset):
     NUM_CLASS = 1
 
     def __init__(self, dataset_dir, img_id=None, base_size=512, crop_size=480,
-                 transform=None, suffix='.png', normalize_16bit=True, in_channels=1, image_folder='images', oracle_masks_folder='oracle_masks'):
+                 transform=None, suffix='.png', normalize_16bit=True, normalize_mode='minmax', 
+                 in_channels=1, image_folder='images', oracle_masks_folder='oracle_masks'):
+        """
+        Args:
+            normalize_16bit: bool or str, whether to normalize 16-bit images (True/False or 'True'/'False')
+            normalize_mode: str, normalization strategy for 16-bit images:
+                - 'minmax': Min-Max normalization (default, adaptive per image)
+                - 'global': Global scaling with fixed range
+                - 'percentile': Percentile-based clipping (reduces outlier impact)
+                - 'clahe': CLAHE (Contrast Limited Adaptive Histogram Equalization)
+        """
         super(PoLaRISTrainLoader, self).__init__()
 
         self.transform = transform
@@ -64,7 +74,14 @@ class PoLaRISTrainLoader(Dataset):
         self.base_size = base_size
         self.crop_size = crop_size
         self.suffix = suffix
-        self.normalize_16bit = normalize_16bit
+        
+        # Handle normalize_16bit as bool or string
+        if isinstance(normalize_16bit, str):
+            self.normalize_16bit = (normalize_16bit.lower() == 'true')
+        else:
+            self.normalize_16bit = normalize_16bit
+        
+        self.normalize_mode = normalize_mode
         self.in_channels = in_channels
 
         print(f"[PoLaRISTrainLoader] Initialized with {len(self._items)} samples")
@@ -72,7 +89,8 @@ class PoLaRISTrainLoader(Dataset):
         print(f"  - LiDAR: {self.lidar_roi}")
         print(f"  - Oracle Masks: {self.oracle_masks}")
         print(f"  - Depth Maps: {self.depth_maps}")
-        print(f"  - 16-bit normalization: {normalize_16bit}")
+        print(f"  - 16-bit normalization: {self.normalize_16bit}")
+        print(f"  - Normalization mode: {self.normalize_mode}")
         print(f"  - Input channels: {in_channels}")
 
     def _load_image(self, img_path):
@@ -93,14 +111,50 @@ class PoLaRISTrainLoader(Dataset):
             img_array = np.array(img, dtype=np.float32)
             
             if self.normalize_16bit:
-                # Min-Max normalization to 0-255 range
-                # This preserves dynamic range better than direct division
-                img_min = img_array.min()
-                img_max = img_array.max()
-                if img_max > img_min:
-                    img_array = (img_array - img_min) / (img_max - img_min) * 255.0
+                if self.normalize_mode == 'minmax':
+                    # Min-Max normalization (adaptive per image)
+                    img_min = img_array.min()
+                    img_max = img_array.max()
+                    if img_max > img_min:
+                        img_array = (img_array - img_min) / (img_max - img_min) * 255.0
+                    else:
+                        img_array = np.zeros_like(img_array)
+                
+                elif self.normalize_mode == 'global':
+                    # Global scaling with fixed range
+                    img_array = img_array / 65535.0 * 255.0
+                
+                elif self.normalize_mode == 'percentile':
+                    # Percentile-based clipping (reduces outlier impact)
+                    p_low = np.percentile(img_array, 1)
+                    p_high = np.percentile(img_array, 99)
+                    img_array = np.clip(img_array, p_low, p_high)
+                    if p_high > p_low:
+                        img_array = (img_array - p_low) / (p_high - p_low) * 255.0
+                    else:
+                        img_array = np.zeros_like(img_array)
+                
+                elif self.normalize_mode == 'clahe':
+                    # CLAHE (Contrast Limited Adaptive Histogram Equalization)
+                    # First normalize to 0-255 uint8
+                    img_min = img_array.min()
+                    img_max = img_array.max()
+                    if img_max > img_min:
+                        img_norm = ((img_array - img_min) / (img_max - img_min) * 255.0).astype(np.uint8)
+                    else:
+                        img_norm = np.zeros_like(img_array, dtype=np.uint8)
+                    # Apply CLAHE
+                    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                    img_array = clahe.apply(img_norm).astype(np.float32)
+                
                 else:
-                    img_array = np.zeros_like(img_array)
+                    # Fallback to minmax
+                    img_min = img_array.min()
+                    img_max = img_array.max()
+                    if img_max > img_min:
+                        img_array = (img_array - img_min) / (img_max - img_min) * 255.0
+                    else:
+                        img_array = np.zeros_like(img_array)
             else:
                 # Simple scaling (may lose detail in dark regions)
                 img_array = img_array / 65535.0 * 255.0
@@ -322,7 +376,8 @@ class PoLaRISTestLoader(Dataset):
     NUM_CLASS = 1
 
     def __init__(self, dataset_dir, img_id=None, base_size=512, crop_size=480,
-                 transform=None, suffix='.png', normalize_16bit=True, in_channels=1, image_folder='images'):
+                 transform=None, suffix='.png', normalize_16bit=True, normalize_mode='minmax',
+                 in_channels=1, image_folder='images'):
         super(PoLaRISTestLoader, self).__init__()
 
         self.transform = transform
@@ -341,11 +396,19 @@ class PoLaRISTestLoader(Dataset):
         self.base_size = base_size
         self.crop_size = crop_size
         self.suffix = suffix
-        self.normalize_16bit = normalize_16bit
+        
+        # Handle normalize_16bit as bool or string
+        if isinstance(normalize_16bit, str):
+            self.normalize_16bit = (normalize_16bit.lower() == 'true')
+        else:
+            self.normalize_16bit = normalize_16bit
+        
+        self.normalize_mode = normalize_mode
         self.in_channels = in_channels
 
         print(f"[PoLaRISTestLoader] Initialized with {len(self._items)} samples")
         print(f"  - Input channels: {in_channels}")
+        print(f"  - Normalization mode: {normalize_mode}")
 
     def _load_image(self, img_path):
         """Load infrared image with 16-bit support"""
@@ -357,12 +420,44 @@ class PoLaRISTestLoader(Dataset):
             img_array = np.array(img, dtype=np.float32)
             
             if self.normalize_16bit:
-                img_min = img_array.min()
-                img_max = img_array.max()
-                if img_max > img_min:
-                    img_array = (img_array - img_min) / (img_max - img_min) * 255.0
+                if self.normalize_mode == 'minmax':
+                    img_min = img_array.min()
+                    img_max = img_array.max()
+                    if img_max > img_min:
+                        img_array = (img_array - img_min) / (img_max - img_min) * 255.0
+                    else:
+                        img_array = np.zeros_like(img_array)
+                
+                elif self.normalize_mode == 'global':
+                    img_array = img_array / 65535.0 * 255.0
+                
+                elif self.normalize_mode == 'percentile':
+                    p_low = np.percentile(img_array, 1)
+                    p_high = np.percentile(img_array, 99)
+                    img_array = np.clip(img_array, p_low, p_high)
+                    if p_high > p_low:
+                        img_array = (img_array - p_low) / (p_high - p_low) * 255.0
+                    else:
+                        img_array = np.zeros_like(img_array)
+                
+                elif self.normalize_mode == 'clahe':
+                    img_min = img_array.min()
+                    img_max = img_array.max()
+                    if img_max > img_min:
+                        img_norm = ((img_array - img_min) / (img_max - img_min) * 255.0).astype(np.uint8)
+                    else:
+                        img_norm = np.zeros_like(img_array, dtype=np.uint8)
+                    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                    img_array = clahe.apply(img_norm).astype(np.float32)
+                
                 else:
-                    img_array = np.zeros_like(img_array)
+                    # Fallback to minmax
+                    img_min = img_array.min()
+                    img_max = img_array.max()
+                    if img_max > img_min:
+                        img_array = (img_array - img_min) / (img_max - img_min) * 255.0
+                    else:
+                        img_array = np.zeros_like(img_array)
             else:
                 img_array = img_array / 65535.0 * 255.0
             
