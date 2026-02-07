@@ -333,7 +333,7 @@ def create_loss_functions(args):
     else:
         loss_type = 'bce_dice'
 
-    loss_fn = LossFactory.create_loss(loss_type, loss_config)
+    loss_fn = LossFactory.create(loss_type, **loss_config)
 
     print(f"\n📉 损失函数配置:")
     print(f"  ✓ Type: {loss_type}")
