@@ -23,6 +23,7 @@ DNANet vs Mamba 预测对比可视化脚本
 """
 
 import torch
+import torch.nn as nn
 import numpy as np
 import cv2
 import os
@@ -32,14 +33,17 @@ from PIL import Image
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from pathlib import Path
+from torch.utils.data import DataLoader
+import torchvision.transforms as transforms
 
 # Add project root to path
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from model.utils_lidar import PoLaRISTestLoader
+from model.utils_lidar import PoLaRISTestLoader, polaris_collate_fn
 from model.load_param_data import load_dataset, load_param
+from model.utils import TestSetLoader
 
 # Mamba models
 from model_Mamba.core.polaris_mamba import PoLaRIS_Mamba
@@ -79,12 +83,26 @@ def load_dnanet_model(checkpoint_path, device):
     """加载 DNANet 模型"""
     checkpoint = torch.load(checkpoint_path, map_location=device)
 
+    # 兼容不同的键名（参考 test_box_iou.py）
+    state_dict = checkpoint.get('state_dict') or checkpoint.get('model_state_dict')
+    if state_dict is None:
+        raise KeyError("Checkpoint missing state_dict/model_state_dict")
+
     # 检测 in_channels
-    first_conv_weight = checkpoint['model_state_dict']['conv0_0.0.conv1.weight']
-    in_channels = first_conv_weight.shape[1]
+    first_conv_key = None
+    for key in state_dict.keys():
+        if 'conv0_0' in key and 'weight' in key and 'conv0_0.0' in key:
+            first_conv_key = key
+            break
+
+    if first_conv_key:
+        first_conv_weight = state_dict[first_conv_key]
+        in_channels = first_conv_weight.shape[1]
+    else:
+        in_channels = 3  # 默认值
 
     # 检测 deep_supervision
-    deep_supervision = 'final2.weight' in checkpoint['model_state_dict']
+    deep_supervision = any('final1.' in key for key in state_dict.keys())
 
     # 获取网络参数（参考 test_box_iou.py）
     nb_filter, num_blocks = load_param('three', 'resnet_18')
@@ -97,12 +115,12 @@ def load_dnanet_model(checkpoint_path, device):
         nb_filter=nb_filter,
         deep_supervision=deep_supervision
     )
-    model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    model.load_state_dict(state_dict, strict=False)
     model = model.to(device)
     model.eval()
 
     print(f"✅ DNANet loaded: in_channels={in_channels}, deep_supervision={deep_supervision}")
-    print(f"   Checkpoint IoU: {checkpoint.get('best_iou', 'N/A')}")
+    print(f"   Checkpoint IoU: {checkpoint.get('mean_IOU', checkpoint.get('best_iou', 'N/A'))}")
 
     return model, in_channels
 
@@ -111,14 +129,19 @@ def load_mamba_model(checkpoint_path, device):
     """加载 Mamba 模型"""
     checkpoint = torch.load(checkpoint_path, map_location=device)
 
+    # 兼容不同的键名
+    state_dict = checkpoint.get('state_dict') or checkpoint.get('model_state_dict')
+    if state_dict is None:
+        raise KeyError("Checkpoint missing state_dict/model_state_dict")
+
     # 检测模型配置
-    patch_embed_weight = checkpoint['model_state_dict']['patch_embed.proj.weight']
+    patch_embed_weight = state_dict['patch_embed.proj.weight']
     ir_channels = patch_embed_weight.shape[1]
     embed_dim = patch_embed_weight.shape[0]
 
     # 检测是否使用 LiDAR
-    use_lidar = any('lidar_gate' in k for k in checkpoint['model_state_dict'].keys())
-    is_multiscale = any('skip_proj_s' in k for k in checkpoint['model_state_dict'].keys())
+    use_lidar = any('lidar_gate' in k for k in state_dict.keys())
+    is_multiscale = any('skip_proj_s' in k for k in state_dict.keys())
 
     # 根据 embed_dim 推断 depths (参考 test_box_iou.py)
     depths_map = {64: [2, 2, 4, 2], 96: [2, 2, 6, 2], 128: [2, 2, 12, 2]}
@@ -142,13 +165,34 @@ def load_mamba_model(checkpoint_path, device):
         )
         print(f"✅ Mamba (Standard) loaded: embed_dim={embed_dim}, depths={depths}, LiDAR={use_lidar}")
 
-    model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    model.load_state_dict(state_dict, strict=False)
     model = model.to(device)
     model.eval()
 
-    print(f"   Checkpoint IoU: {checkpoint.get('best_iou', 'N/A')}")
+    print(f"   Checkpoint IoU: {checkpoint.get('mean_IOU', checkpoint.get('best_iou', 'N/A'))}")
 
     return model, use_lidar
+
+
+def denormalize_dnanet_image(img_tensor, in_channels=3):
+    """
+    反归一化 DNANet 输入图像
+    DNANet 使用 ImageNet 归一化: mean=[.485, .456, .406], std=[.229, .224, .225]
+    """
+    if in_channels == 3:
+        mean = np.array([0.485, 0.456, 0.406]).reshape(3, 1, 1)
+        std = np.array([0.229, 0.224, 0.225]).reshape(3, 1, 1)
+    else:  # in_channels == 1
+        mean = np.array([0.5]).reshape(1, 1, 1)
+        std = np.array([0.5]).reshape(1, 1, 1)
+
+    # img_tensor: (C, H, W)
+    img_np = img_tensor.cpu().numpy()
+    img_denorm = img_np * std + mean
+    img_denorm = np.clip(img_denorm, 0, 1)
+
+    # 返回第一个通道作为灰度图
+    return img_denorm[0]
 
 
 def calculate_iou(pred, gt, threshold=0.5):
@@ -331,20 +375,37 @@ def main():
     _, test_img_ids, _ = load_dataset(args.root, args.dataset, args.split_method)
     print(f"✅ Total test samples: {len(test_img_ids)}\n")
 
-    # 创建 DataLoader
-    # DNANet DataLoader (传统 3 通道)
-    from model.load_param_data import test_dataloader
-    dnanet_loader = test_dataloader(
-        root=args.root,
-        dataset=args.dataset,
-        split_method=args.split_method,
+    # 创建 DNANet DataLoader (传统 3 通道)
+    if dnanet_channels == 1:
+        input_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize([0.5], [0.5])
+        ])
+    else:
+        input_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize([.485, .456, .406], [.229, .224, .225])
+        ])
+
+    dnanet_dataset = TestSetLoader(
+        dataset_dir,
+        img_id=test_img_ids,
         base_size=256,
         crop_size=256,
-        batch_size=1,
+        transform=input_transform,
+        suffix='.png'
     )
 
-    # Mamba DataLoader (2 通道: IR + Depth)
-    mamba_loader = PoLaRISTestLoader(
+    dnanet_loader = DataLoader(
+        dataset=dnanet_dataset,
+        batch_size=1,
+        shuffle=False,
+        num_workers=0,
+        drop_last=False
+    )
+
+    # 创建 Mamba DataLoader (2 通道: IR + Depth)
+    mamba_dataset = PoLaRISTestLoader(
         dataset_dir=dataset_dir,
         img_id=test_img_ids,
         base_size=256,
@@ -352,6 +413,18 @@ def main():
         in_channels=2,
         normalize_16bit=True,
     )
+
+    mamba_loader = DataLoader(
+        dataset=mamba_dataset,
+        batch_size=1,
+        shuffle=False,
+        num_workers=0,
+        drop_last=False,
+        collate_fn=polaris_collate_fn
+    )
+
+    print(f"✅ DNANet DataLoader: {len(dnanet_loader)} batches")
+    print(f"✅ Mamba DataLoader: {len(mamba_loader)} batches\n")
 
     # 存储结果
     results = []
@@ -362,11 +435,14 @@ def main():
 
     # 推理
     with torch.no_grad():
-        for idx, (dnanet_sample, mamba_sample) in enumerate(tqdm(zip(dnanet_loader, mamba_loader),
-                                                                   total=min(len(dnanet_loader), len(mamba_loader)))):
+        for idx, (dnanet_batch, mamba_batch) in enumerate(tqdm(
+            zip(dnanet_loader, mamba_loader),
+            total=min(len(dnanet_loader), len(mamba_loader)),
+            desc="Testing"
+        )):
             # DNANet 推理
-            dnanet_data = dnanet_sample['image'].to(device)  # (1, 3, H, W)
-            dnanet_label = dnanet_sample['label'].cpu().numpy()[0, 0]  # (H, W)
+            dnanet_data = dnanet_batch['image'].to(device)  # (1, 3, H, W)
+            dnanet_label = dnanet_batch['label'].cpu().numpy()[0, 0]  # (H, W)
 
             dnanet_pred = dnanet_model(dnanet_data)
             if isinstance(dnanet_pred, (list, tuple)):
@@ -374,9 +450,12 @@ def main():
             dnanet_pred = torch.sigmoid(dnanet_pred)
             dnanet_pred_np = dnanet_pred.cpu().numpy()[0, 0]  # (H, W)
 
+            # 反归一化 IR 图像（用于显示）
+            ir_img = denormalize_dnanet_image(dnanet_data[0], dnanet_channels)
+
             # Mamba 推理
-            mamba_data = mamba_sample['image'].to(device)  # (1, 2, H, W)
-            mamba_label = mamba_sample['label'].cpu().numpy()[0, 0]  # (H, W)
+            mamba_data = mamba_batch['image'].to(device)  # (1, 2, H, W)
+            mamba_label = mamba_batch['label'].cpu().numpy()[0, 0]  # (H, W)
 
             # Split IR and Depth
             ir_input = mamba_data[:, 0:1, :, :]
@@ -395,13 +474,13 @@ def main():
             dnanet_box_iou = calculate_box_iou(dnanet_pred_np, dnanet_label, args.threshold)
             mamba_box_iou = calculate_box_iou(mamba_pred_np, mamba_label, args.threshold)
 
-            # IR 图像（从 DNANet 的输入中提取）
-            ir_img = dnanet_data[0, 0].cpu().numpy()  # 取第一个通道
+            # 获取 img_id（从 test_img_ids 列表）
+            img_id = test_img_ids[idx]
 
             # 存储结果
             results.append({
                 'idx': idx,
-                'img_id': mamba_sample['img_id'],
+                'img_id': img_id,
                 'ir_img': ir_img,
                 'gt_mask': dnanet_label,
                 'dnanet_pred': dnanet_pred_np,
@@ -411,10 +490,6 @@ def main():
                 'dnanet_box_iou': dnanet_box_iou,
                 'mamba_box_iou': mamba_box_iou,
             })
-
-            # 限制样本数量
-            if len(results) >= len(test_img_ids):
-                break
 
     print(f"\n✅ Processed {len(results)} samples\n")
 
@@ -450,7 +525,7 @@ def main():
         ('Low IoU', selected_low, 'low_iou'),
     ]:
         print(f"\n{category}:")
-        for r in tqdm(samples):
+        for r in tqdm(samples, desc=f"  {category}"):
             output_path = output_dir / subdir / f"{r['img_id']}.png"
             visualize_comparison(
                 r['ir_img'],
@@ -491,6 +566,18 @@ def main():
         f.write(f"  Median Seg IoU: {np.median([r['mamba_seg_iou'] for r in results]):.4f}\n")
         f.write(f"  Median Box IoU: {np.median([r['mamba_box_iou'] for r in results]):.4f}\n\n")
 
+        f.write("Gap Analysis (Box IoU - Seg IoU):\n")
+        dnanet_gap = np.mean([r['dnanet_box_iou'] - r['dnanet_seg_iou'] for r in results])
+        mamba_gap = np.mean([r['mamba_box_iou'] - r['mamba_seg_iou'] for r in results])
+        f.write(f"  DNANet Gap: {dnanet_gap:.4f}\n")
+        f.write(f"  Mamba Gap:  {mamba_gap:.4f}\n")
+        f.write(f"  → Mamba gap is {'LARGER' if mamba_gap > dnanet_gap else 'SMALLER'} ")
+        f.write(f"(diff: {abs(mamba_gap - dnanet_gap):.4f})\n")
+        if mamba_gap > dnanet_gap:
+            f.write(f"  → 说明: Mamba 边界定位好但内部填充弱（可能更符合物理形状）\n\n")
+        else:
+            f.write(f"  → 说明: Mamba 内部填充与 DNANet 相当或更好\n\n")
+
         f.write("Sample Distribution:\n")
         f.write(f"  High IoU (>0.8):     {len(high_iou)} ({len(high_iou)/len(results)*100:.1f}%)\n")
         f.write(f"  Medium IoU (0.5-0.8): {len(medium_iou)} ({len(medium_iou)/len(results)*100:.1f}%)\n")
@@ -500,7 +587,9 @@ def main():
         f.write("  1. 在 Overlay 图中，Mamba 的预测是否更符合物理形状（而非矩形）？\n")
         f.write("  2. DNANet 是否在角落区域有过多的假阳性（红色区域）？\n")
         f.write("  3. 低 IoU 样本的共同特征是什么（小目标/边缘/遮挡）？\n")
-        f.write("  4. Mamba 的 Box IoU 与 Seg IoU 差距是否比 DNANet 更大（说明边界定位好但内部填充弱）？\n")
+        f.write(f"  4. Mamba 的 Box-Seg Gap 是否比 DNANet 更大？\n")
+        f.write(f"     → Answer: {'YES' if mamba_gap > dnanet_gap else 'NO'} ")
+        f.write(f"(Mamba: {mamba_gap:.4f}, DNANet: {dnanet_gap:.4f})\n")
 
     print(f"\n✅ Report saved to: {report_path}")
     print(f"✅ Visualizations saved to: {output_dir}")
