@@ -107,7 +107,7 @@ case $MODEL_TYPE in
         ;;
 esac
 
-EPOCHS=500
+EPOCHS=2000
 
 # 根据模式设置配置
 case $MODE in

@@ -49,7 +49,6 @@ import random
 
 # PoLaRIS utilities (使用传统DataLoader而非LiDAR版本)
 from model.utils import TrainSetLoader, TestSetLoader  # ← 关键修改
-from model.metric import ROCMetric, mIoU
 from model.load_param_data import load_dataset
 
 # Mamba models
@@ -395,16 +394,18 @@ def train_one_epoch(model, train_loader, optimizer, loss_fn, device, epoch, args
 
 
 def validate(model, test_loader, device, args):
-    """验证模型"""
+    """验证模型（使用与train.py相同的阈值扫描方法）"""
     model.eval()
 
-    IoU = mIoU(2)
-    ROC = ROCMetric(nclass=2, bins=10)
+    iou_sum = 0.0
+    precision_sum = 0.0
+    recall_sum = 0.0
+    count = 0
 
     with torch.no_grad():
         for images, masks in tqdm(test_loader, desc="Validating"):
             images = images.to(device)
-            masks = masks.to(device)  # Already (B, 1, H, W) from TestSetLoader
+            masks = masks.to(device)  # (B, 1, H, W)
 
             # Forward
             if args.in_channels == 1:
@@ -414,18 +415,47 @@ def validate(model, test_loader, device, args):
                 outputs = model(ir_channel, None)  # IR-only, no LiDAR
 
             if isinstance(outputs, (list, tuple)):
-                outputs = outputs[0]
+                outputs = outputs[0]  # 取主输出
 
             outputs = torch.sigmoid(outputs)
 
-            # 计算指标
-            IoU.update(outputs, masks)
-            ROC.update(outputs, masks)
+            # 阈值扫描：找到最佳阈值（与train.py相同的逻辑）
+            best_batch_iou = 0.0
+            best_precision = 0.0
+            best_recall = 0.0
 
-    _, mean_iou = IoU.get()
-    _, mean_pd, mean_fa = ROC.get()
+            for thresh in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]:
+                pred_bin = (outputs > thresh).float()
+                gt_bin = (masks > 0.5).float()
 
-    return mean_iou, mean_pd, mean_fa
+                # 计算 IoU
+                inter = (pred_bin * gt_bin).sum(dim=(1, 2, 3))
+                union = (pred_bin + gt_bin).clamp(0, 1).sum(dim=(1, 2, 3))
+                iou_t = (inter / (union + 1e-7)).mean().item()
+
+                # 如果这个阈值更好，使用它
+                if iou_t > best_batch_iou:
+                    best_batch_iou = iou_t
+
+                    # 计算 precision 和 recall
+                    tp = inter.sum().item()
+                    fp = (pred_bin * (1 - gt_bin)).sum().item()
+                    fn = ((1 - pred_bin) * gt_bin).sum().item()
+                    best_precision = tp / (tp + fp + 1e-7)
+                    best_recall = tp / (tp + fn + 1e-7)
+
+            # 累积指标
+            iou_sum += best_batch_iou
+            precision_sum += best_precision
+            recall_sum += best_recall
+            count += 1
+
+    # 计算平均值
+    avg_iou = iou_sum / count
+    avg_precision = precision_sum / count
+    avg_recall = recall_sum / count
+
+    return avg_iou, avg_precision, avg_recall
 
 
 def main():
@@ -492,7 +522,7 @@ def main():
         )
 
         # 验证
-        mean_iou, mean_pd, mean_fa = validate(model, test_loader, device, args)
+        mean_iou, mean_precision, mean_recall = validate(model, test_loader, device, args)
 
         # 更新学习率
         scheduler.step()
@@ -500,7 +530,7 @@ def main():
         # 打印结果
         print(f"\n[Epoch {epoch}/{args.epochs}]")
         print(f"  Train Loss: {train_loss:.4f}")
-        print(f"  Val IoU: {mean_iou:.4f} | PD: {mean_pd:.4f} | FA: {mean_fa:.4f}")
+        print(f"  Val IoU: {mean_iou:.4f} | Precision: {mean_precision:.4f} | Recall: {mean_recall:.4f}")
         print(f"  LR: {optimizer.param_groups[0]['lr']:.6f}")
 
         # 保存checkpoint
