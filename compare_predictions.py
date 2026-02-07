@@ -456,9 +456,9 @@ def main():
             ir_img = denormalize_dnanet_image(dnanet_data[0], dnanet_channels)
 
             # Mamba 推理
-            # PoLaRISTestLoader 返回 dict
+            # PoLaRISTestLoader 返回 dict，键名是 'mask' 不是 'label'
             mamba_data = mamba_batch['image'].to(device)  # (1, 2, H, W)
-            mamba_label = mamba_batch['label'].cpu().numpy()[0, 0]  # (H, W)
+            mamba_label = mamba_batch['mask'].cpu().numpy()[0, 0]  # (H, W)
 
             # Split IR and Depth
             ir_input = mamba_data[:, 0:1, :, :]
