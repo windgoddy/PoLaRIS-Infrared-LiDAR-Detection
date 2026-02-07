@@ -351,10 +351,12 @@ def train_one_epoch(model, train_loader, optimizer, loss_fn, device, epoch, args
 
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}")
 
-    for batch_idx, (images, masks) in enumerate(pbar):
-        # TrainSetLoader返回 (img, mask) tuple
+    for batch_idx, (images, masks, oracle_masks) in enumerate(pbar):
+        # TrainSetLoader返回 (img, mask, oracle_mask) 三个值
+        # 注意：masks和oracle_masks已经是(B, 1, H, W)格式，不需要unsqueeze
         images = images.to(device)  # (B, C, H, W) - 已归一化
-        masks = masks.to(device).unsqueeze(1)  # (B, 1, H, W)
+        masks = masks.to(device)  # (B, 1, H, W)
+        oracle_masks = oracle_masks.to(device)  # (B, 1, H, W)
 
         # Forward
         if args.in_channels == 1:
@@ -372,8 +374,8 @@ def train_one_epoch(model, train_loader, optimizer, loss_fn, device, epoch, args
         optimizer.zero_grad()
 
         # LossFactory返回的loss可以直接调用
-        # 对于hybrid loss，它会自动处理masks作为oracle_mask
-        batch_loss = loss_fn(outputs, masks, oracle_mask=masks)
+        # 对于hybrid loss，需要oracle_mask用于projection loss
+        batch_loss = loss_fn(outputs, masks, oracle_mask=oracle_masks)
 
         batch_loss.backward()
         optimizer.step()
@@ -402,7 +404,7 @@ def validate(model, test_loader, device, args):
     with torch.no_grad():
         for images, masks in tqdm(test_loader, desc="Validating"):
             images = images.to(device)
-            masks = masks.to(device).unsqueeze(1)
+            masks = masks.to(device)  # Already (B, 1, H, W) from TestSetLoader
 
             # Forward
             if args.in_channels == 1:
