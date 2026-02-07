@@ -136,3 +136,15 @@ result/**/*
 result_good/
 result_good/**/*
 
+# Additional file types to ignore
+*.txt
+*.tar
+*.json
+*.csv
+*.png
+*.backup
+
+# Specific directories and files
+dataset/009043/
+dataset/009043/**/*
+model_Mamba/dataset/smart_mask_utils.py

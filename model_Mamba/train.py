@@ -360,11 +360,6 @@ class Trainer:
                 in_channels=args.in_channels,
                 image_folder=args.image_folder,
             )
-                suffix=args.suffix,
-                normalize_16bit=(args.normalize_16bit == 'True'),
-                in_channels=args.in_channels,
-                image_folder=args.image_folder,
-            )
         else:
             print(f"✓ Using TrainSetLoader (8-bit only, DNANet-compatible)")
             # Traditional loaders for 8-bit images (fair comparison with DNANet)
