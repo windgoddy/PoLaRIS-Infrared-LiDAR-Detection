@@ -441,8 +441,10 @@ def main():
             desc="Testing"
         )):
             # DNANet 推理
-            dnanet_data = dnanet_batch['image'].to(device)  # (1, 3, H, W)
-            dnanet_label = dnanet_batch['label'].cpu().numpy()[0, 0]  # (H, W)
+            # TestSetLoader 返回 (img, mask) tuple
+            dnanet_data, dnanet_mask = dnanet_batch
+            dnanet_data = dnanet_data.to(device)  # (1, 3, H, W)
+            dnanet_label = dnanet_mask.cpu().numpy()[0, 0]  # (H, W)
 
             dnanet_pred = dnanet_model(dnanet_data)
             if isinstance(dnanet_pred, (list, tuple)):
@@ -454,6 +456,7 @@ def main():
             ir_img = denormalize_dnanet_image(dnanet_data[0], dnanet_channels)
 
             # Mamba 推理
+            # PoLaRISTestLoader 返回 dict
             mamba_data = mamba_batch['image'].to(device)  # (1, 2, H, W)
             mamba_label = mamba_batch['label'].cpu().numpy()[0, 0]  # (H, W)
 
@@ -510,9 +513,20 @@ def main():
     # 选择代表性样本
     samples_per_category = args.num_samples // 3
 
+    # 检查样本数量并给出警告
+    if len(high_iou) < samples_per_category:
+        print(f"⚠️  Warning: Only {len(high_iou)} high IoU samples available (requested {samples_per_category})")
+    if len(medium_iou) < samples_per_category:
+        print(f"⚠️  Warning: Only {len(medium_iou)} medium IoU samples available (requested {samples_per_category})")
+    if len(low_iou) < samples_per_category:
+        print(f"⚠️  Warning: Only {len(low_iou)} low IoU samples available (requested {samples_per_category})")
+
     selected_high = sorted(high_iou, key=lambda x: x['mamba_seg_iou'], reverse=True)[:samples_per_category]
     selected_medium = sorted(medium_iou, key=lambda x: abs(x['mamba_seg_iou'] - 0.65))[:samples_per_category]
     selected_low = sorted(low_iou, key=lambda x: x['mamba_seg_iou'])[:samples_per_category]
+
+    print(f"\n✅ Selected samples: High={len(selected_high)}, Medium={len(selected_medium)}, Low={len(selected_low)}")
+    print()
 
     # 生成可视化
     print("=" * 60)
