@@ -73,6 +73,10 @@ def parse_args():
     parser.add_argument('--threshold', type=float, default=0.5,
                         help='Binary threshold for predictions')
 
+    # DNANet dataset settings
+    parser.add_argument('--dnanet_image_folder', type=str, default='images-8bit',
+                        help='DNANet image folder (match training config)')
+
     # Hardware
     parser.add_argument('--gpu', type=int, default=0)
 
@@ -397,7 +401,7 @@ def main():
         transform=input_transform,
         suffix='.png',
         in_channels=dnanet_channels,
-        image_folder='images'
+        image_folder=args.dnanet_image_folder
     )
 
     dnanet_loader = DataLoader(
