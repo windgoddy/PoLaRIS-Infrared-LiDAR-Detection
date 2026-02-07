@@ -373,9 +373,9 @@ def train_one_epoch(model, train_loader, optimizer, loss_fn, device, epoch, args
         # 计算损失
         optimizer.zero_grad()
 
-        # LossFactory返回的loss可以直接调用
-        # 对于hybrid loss，需要oracle_mask用于projection loss
-        batch_loss = loss_fn(outputs, masks, oracle_mask=oracle_masks)
+        # HybridLoss只需要 pred 和 target 两个参数
+        # Projection loss 直接使用 masks 来计算边界框约束
+        batch_loss = loss_fn(outputs, masks)
 
         batch_loss.backward()
         optimizer.step()
