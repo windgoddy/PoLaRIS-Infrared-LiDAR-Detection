@@ -50,6 +50,12 @@ from model_Mamba.core.polaris_mamba_multiscale import (
     polaris_mamba_tiny_multiscale,
     polaris_mamba_small_multiscale,
 )
+# [NEW] Progressive Decoder model (2026-02-07)
+from model_Mamba.core.polaris_mamba_progressive import (
+    PoLaRIS_Mamba_Progressive,
+    polaris_mamba_tiny_progressive,
+    polaris_mamba_small_progressive,
+)
 from model_Mamba.core.loss import GaussianFocalLoss, CombinedLoss, AverageMeter, BCEDiceLoss
 from model_Mamba.core.loss_improved import ImprovedBCEDiceLoss, ConfidenceCalibrationLoss
 from model_Mamba.core.loss_advanced import LossFactory  # 2026-02-03: Multi-loss support
@@ -91,8 +97,9 @@ def parse_args():
     # Model configuration
     parser.add_argument('--model', type=str, default='mamba_tiny',
                         choices=['mamba_tiny', 'mamba_small', 'mamba_base',
-                                'mamba_tiny_multiscale', 'mamba_small_multiscale'],
-                        help='Model variant (use *_multiscale for multi-scale fusion + deep supervision)')
+                                'mamba_tiny_multiscale', 'mamba_small_multiscale',
+                                'mamba_tiny_progressive', 'mamba_small_progressive'],
+                        help='Model variant (use *_multiscale for multi-scale, *_progressive for U-Net style decoder)')
     parser.add_argument('--use_lidar', type=str, default='True',
                         help='Whether to use LiDAR gating (True/False)')
 
@@ -442,6 +449,10 @@ class Trainer:
             self.net = polaris_mamba_tiny_multiscale(use_lidar=use_lidar, use_deep_supervision=True)
         elif args.model == 'mamba_small_multiscale':
             self.net = polaris_mamba_small_multiscale(use_lidar=use_lidar, use_deep_supervision=True)
+        elif args.model == 'mamba_tiny_progressive':
+            self.net = polaris_mamba_tiny_progressive(use_lidar=use_lidar, use_deep_supervision=False)
+        elif args.model == 'mamba_small_progressive':
+            self.net = polaris_mamba_small_progressive(use_lidar=use_lidar, use_deep_supervision=False)
         else:
             raise ValueError(f"Unknown model: {args.model}")
 

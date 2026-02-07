@@ -26,10 +26,12 @@
 #     0,1,2...    - 手动指定GPU ID
 #
 #   model_type选项（可选）：
-#     mamba_tiny_multiscale - 小模型+多尺度（默认，embed_dim=64）
-#     mamba_tiny            - 小模型（embed_dim=64）
-#     mamba_small           - 中等模型（embed_dim=96）
-#     mamba_base            - 大模型（embed_dim=128）
+#     mamba_tiny_multiscale   - 小模型+多尺度融合（默认，embed_dim=64，patch_size=4）
+#     mamba_tiny_progressive  - 小模型+渐进式解码器（embed_dim=64，patch_size=2，U-Net风格）
+#     mamba_tiny              - 小模型（embed_dim=64）
+#     mamba_small             - 中等模型（embed_dim=96）
+#     mamba_small_progressive - 中等模型+渐进式解码器（embed_dim=96，patch_size=2）
+#     mamba_base              - 大模型（embed_dim=128）
 #
 #   bit_depth选项（可选）：
 #     16          - 使用16位图像（默认，images文件夹）
@@ -40,13 +42,14 @@
 #     traditional - 使用TrainSetLoader（8-bit only，DNANet兼容）
 #
 #   示例：
-#     bash model_Mamba/scripts/train_multiscale_full.sh                                 # LiDAR，自动GPU，默认模型，16bit，polaris loader
-#     bash model_Mamba/scripts/train_multiscale_full.sh lidar auto auto 8               # LiDAR，自动GPU，默认模型，8bit，polaris loader
-#     bash model_Mamba/scripts/train_multiscale_full.sh lidar auto auto 8 traditional   # LiDAR，8bit，traditional loader
-#     bash model_Mamba/scripts/train_multiscale_full.sh ir_only                         # IR-only，自动GPU，默认模型，16bit
-#     bash model_Mamba/scripts/train_multiscale_full.sh lidar 0                         # LiDAR，GPU 0，默认模型，16bit
-#     bash model_Mamba/scripts/train_multiscale_full.sh ir_only auto mamba_small        # IR-only，自动GPU，中等模型，16bit
-#     bash model_Mamba/scripts/train_multiscale_full.sh lidar 1 mamba_base 8            # LiDAR，GPU 1，大模型，8bit
+#     bash model_Mamba/scripts/train_multiscale_full.sh                                      # LiDAR，自动GPU，默认模型，16bit，polaris loader
+#     bash model_Mamba/scripts/train_multiscale_full.sh lidar auto auto 8                    # LiDAR，自动GPU，默认模型，8bit，polaris loader
+#     bash model_Mamba/scripts/train_multiscale_full.sh lidar auto auto 8 traditional        # LiDAR，8bit，traditional loader
+#     bash model_Mamba/scripts/train_multiscale_full.sh ir_only                              # IR-only，自动GPU，默认模型，16bit
+#     bash model_Mamba/scripts/train_multiscale_full.sh ir_only auto mamba_tiny_progressive  # IR-only，渐进式解码器（推荐）
+#     bash model_Mamba/scripts/train_multiscale_full.sh lidar 0                              # LiDAR，GPU 0，默认模型，16bit
+#     bash model_Mamba/scripts/train_multiscale_full.sh ir_only auto mamba_small             # IR-only，自动GPU，中等模型，16bit
+#     bash model_Mamba/scripts/train_multiscale_full.sh lidar 1 mamba_base 8                 # LiDAR，GPU 1，大模型，8bit
 #
 #   示例：
 #       python model_Mamba/train.py \
@@ -144,12 +147,12 @@ fi
 
 # 验证模型类型
 case $MODEL_TYPE in
-    "mamba_tiny"|"mamba_tiny_multiscale"|"mamba_small"|"mamba_base")
+    "mamba_tiny"|"mamba_tiny_multiscale"|"mamba_tiny_progressive"|"mamba_small"|"mamba_small_progressive"|"mamba_base")
         # 有效的模型类型
         ;;
     *)
         echo "❌ 错误: 未知模型类型 '$MODEL_TYPE'"
-        echo "支持的模型: mamba_tiny | mamba_tiny_multiscale | mamba_small | mamba_base"
+        echo "支持的模型: mamba_tiny | mamba_tiny_multiscale | mamba_tiny_progressive | mamba_small | mamba_small_progressive | mamba_base"
         exit 1
         ;;
 esac
@@ -241,11 +244,11 @@ PROJECTION_WEIGHT=2.0
 
 # 模型大小信息（用于显示和命名）
 case $MODEL_TYPE in
-    "mamba_tiny"|"mamba_tiny_multiscale")
+    "mamba_tiny"|"mamba_tiny_multiscale"|"mamba_tiny_progressive")
         MODEL_SIZE="tiny"
         EMBED_DIM=64
         ;;
-    "mamba_small")
+    "mamba_small"|"mamba_small_progressive")
         MODEL_SIZE="small"
         EMBED_DIM=96
         ;;
