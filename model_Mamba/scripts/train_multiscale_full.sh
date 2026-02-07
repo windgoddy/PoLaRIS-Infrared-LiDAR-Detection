@@ -41,12 +41,17 @@
 #     polaris     - 使用PoLaRISTrainLoader（默认，支持16-bit + LiDAR）
 #     traditional - 使用TrainSetLoader（8-bit only，DNANet兼容）
 #
+#   deep_supervision选项（可选）：
+#     True        - 启用深度监督（辅助损失在D2和D3层，仅对multiscale和progressive模型有效）
+#     False       - 不启用深度监督（默认）
+#
 #   示例：
 #     bash model_Mamba/scripts/train_multiscale_full.sh                                      # LiDAR，自动GPU，默认模型，16bit，polaris loader
 #     bash model_Mamba/scripts/train_multiscale_full.sh lidar auto auto 8                    # LiDAR，自动GPU，默认模型，8bit，polaris loader
 #     bash model_Mamba/scripts/train_multiscale_full.sh lidar auto auto 8 traditional        # LiDAR，8bit，traditional loader
 #     bash model_Mamba/scripts/train_multiscale_full.sh ir_only                              # IR-only，自动GPU，默认模型，16bit
 #     bash model_Mamba/scripts/train_multiscale_full.sh ir_only auto mamba_tiny_progressive  # IR-only，渐进式解码器（推荐）
+#     bash model_Mamba/scripts/train_multiscale_full.sh ir_only auto mamba_tiny_progressive 16 polaris True  # IR-only，渐进式解码器+深度监督
 #     bash model_Mamba/scripts/train_multiscale_full.sh lidar 0                              # LiDAR，GPU 0，默认模型，16bit
 #     bash model_Mamba/scripts/train_multiscale_full.sh ir_only auto mamba_small             # IR-only，自动GPU，中等模型，16bit
 #     bash model_Mamba/scripts/train_multiscale_full.sh lidar 1 mamba_base 8                 # LiDAR，GPU 1，大模型，8bit
@@ -129,6 +134,7 @@ MODEL_TYPE=${3:-mamba_tiny_multiscale}  # 模型类型（可选）
 BIT_DEPTH=${4:-16}  # 图像位深度：8 或 16（可选，默认16bit）
 LOADER_TYPE=${5:-polaris}  # DataLoader类型：polaris 或 traditional（可选，默认polaris）
 NORMALIZE_MODE=${6:-minmax}  # 归一化模式：minmax/global/percentile/clahe（可选，默认minmax）
+DEEP_SUPERVISION=${7:-False}  # 深度监督：True 或 False（可选，默认False）
 
 # 处理"auto"作为GPU参数的情况
 if [ "$MANUAL_GPU" == "auto" ]; then
@@ -189,8 +195,6 @@ case $MODE in
         exit 1
         ;;
 esac
-
-USE_DEEP_SUPERVISION=True
 
 # 数据配置
 DATASET="Pohang-Canal-3k"
@@ -292,7 +296,7 @@ echo "配置信息:"
 echo "  模型:             $MODEL_TYPE (embed_dim=$EMBED_DIM)"
 echo "  输入:             ${IN_CHANNELS}-channel"
 echo "  LiDAR:            $USE_LIDAR"
-echo "  Deep Supervision: $USE_DEEP_SUPERVISION"
+echo "  Deep Supervision: $DEEP_SUPERVISION"
 echo "  训练轮数:         $EPOCHS epochs"
 echo "  Batch Sizes:      尝试 16/8/4/2 (自动降级)"
 echo "  损失权重:         Dice=$DICE_WEIGHT, Projection=$PROJECTION_WEIGHT"
@@ -379,6 +383,7 @@ for GPU_ID in $GPU_LIST; do
             --scheduler "$SCHEDULER" \
             --use_lidar "$USE_LIDAR" \
             --in_channels $IN_CHANNELS \
+            --use_deep_supervision "$DEEP_SUPERVISION" \
             --normalize_16bit "$NORMALIZE_16BIT" \
             --normalize_mode "$NORMALIZE_MODE" \
             --use_polaris_loader "$USE_POLARIS_LOADER" \

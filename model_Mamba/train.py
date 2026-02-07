@@ -102,6 +102,8 @@ def parse_args():
                         help='Model variant (use *_multiscale for multi-scale, *_progressive for U-Net style decoder)')
     parser.add_argument('--use_lidar', type=str, default='True',
                         help='Whether to use LiDAR gating (True/False)')
+    parser.add_argument('--use_deep_supervision', type=str, default='False',
+                        help='Enable deep supervision (aux loss at D2 and D3). Only for *_multiscale and *_progressive models.')
 
     # Dataset configuration
     parser.add_argument('--dataset', type=str, default='Pohang-Canal-3k',
@@ -439,6 +441,7 @@ class Trainer:
 
         # Initialize model
         use_lidar = (args.use_lidar == 'True')
+        use_deep_supervision = (args.use_deep_supervision == 'True')
         if args.model == 'mamba_tiny':
             self.net = polaris_mamba_tiny(use_lidar=use_lidar)
         elif args.model == 'mamba_small':
@@ -446,13 +449,13 @@ class Trainer:
         elif args.model == 'mamba_base':
             self.net = polaris_mamba_base(use_lidar=use_lidar)
         elif args.model == 'mamba_tiny_multiscale':
-            self.net = polaris_mamba_tiny_multiscale(use_lidar=use_lidar, use_deep_supervision=True)
+            self.net = polaris_mamba_tiny_multiscale(use_lidar=use_lidar, use_deep_supervision=use_deep_supervision)
         elif args.model == 'mamba_small_multiscale':
-            self.net = polaris_mamba_small_multiscale(use_lidar=use_lidar, use_deep_supervision=True)
+            self.net = polaris_mamba_small_multiscale(use_lidar=use_lidar, use_deep_supervision=use_deep_supervision)
         elif args.model == 'mamba_tiny_progressive':
-            self.net = polaris_mamba_tiny_progressive(use_lidar=use_lidar, use_deep_supervision=False)
+            self.net = polaris_mamba_tiny_progressive(use_lidar=use_lidar, use_deep_supervision=use_deep_supervision)
         elif args.model == 'mamba_small_progressive':
-            self.net = polaris_mamba_small_progressive(use_lidar=use_lidar, use_deep_supervision=False)
+            self.net = polaris_mamba_small_progressive(use_lidar=use_lidar, use_deep_supervision=use_deep_supervision)
         else:
             raise ValueError(f"Unknown model: {args.model}")
 
