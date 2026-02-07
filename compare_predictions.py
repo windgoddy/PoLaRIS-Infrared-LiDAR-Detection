@@ -424,6 +424,7 @@ def main():
             total=len(dnanet_loader),
             desc="Testing"
         )):
+            img_id = test_img_ids[idx]
             # ========== DNANet 数据 ==========
             # TestSetLoader 返回 (img, mask) tuple
             dnanet_img, dnanet_mask = dnanet_batch
@@ -441,15 +442,21 @@ def main():
                 print(f"  DNANet mask shape: {dnanet_mask.shape}, range: [{dnanet_mask.min():.4f}, {dnanet_mask.max():.4f}]")
                 print(f"  Mamba img shape: {mamba_img.shape}, range: [{mamba_img.min():.4f}, {mamba_img.max():.4f}]")
                 print(f"  GT mask shape: {gt_mask.shape}, sum: {gt_mask.sum():.4f}")
-
-            img_id = test_img_ids[idx]
+                print(f"  img_id: {img_id}")
 
             # ========== DNANet 推理 ==========
             # DNANet 输入已经过 TestSetLoader + transform 正确归一化
             dnanet_pred = dnanet_model(dnanet_img)
-            if isinstance(dnanet_pred, (list, tuple)):
+            if isinstance(dnanet_pred, tuple):
                 dnanet_pred = dnanet_pred[0]
+            if isinstance(dnanet_pred, list):
+                dnanet_pred = dnanet_pred[-1]
+            if idx == 0:
+                print(f"  DNANet logits shape: {dnanet_pred.shape}, range: [{dnanet_pred.min().item():.4f}, {dnanet_pred.max().item():.4f}], mean: {dnanet_pred.mean().item():.4f}")
             dnanet_pred = torch.sigmoid(dnanet_pred)
+            if idx == 0:
+                print(f"  DNANet sigmoid range: [{dnanet_pred.min().item():.4f}, {dnanet_pred.max().item():.4f}], mean: {dnanet_pred.mean().item():.4f}")
+                print(f"  DNANet >{args.threshold:.2f} ratio: {(dnanet_pred > args.threshold).float().mean().item():.6f}")
             dnanet_pred_np = dnanet_pred.cpu().numpy()[0, 0]  # (H, W)
 
             # ========== Mamba 推理 ==========
@@ -458,9 +465,16 @@ def main():
             depth_channel = mamba_img[:, 1:2, :, :]  # (1, 1, H, W)
 
             mamba_pred = mamba_model(ir_channel, depth_channel)
-            if isinstance(mamba_pred, (list, tuple)):
+            if isinstance(mamba_pred, tuple):
                 mamba_pred = mamba_pred[0]
+            if isinstance(mamba_pred, list):
+                mamba_pred = mamba_pred[-1]
+            if idx == 0:
+                print(f"  Mamba logits shape: {mamba_pred.shape}, range: [{mamba_pred.min().item():.4f}, {mamba_pred.max().item():.4f}], mean: {mamba_pred.mean().item():.4f}")
             mamba_pred = torch.sigmoid(mamba_pred)
+            if idx == 0:
+                print(f"  Mamba sigmoid range: [{mamba_pred.min().item():.4f}, {mamba_pred.max().item():.4f}], mean: {mamba_pred.mean().item():.4f}")
+                print(f"  Mamba >{args.threshold:.2f} ratio: {(mamba_pred > args.threshold).float().mean().item():.6f}")
             mamba_pred_np = mamba_pred.cpu().numpy()[0, 0]  # (H, W)
 
             # ========== 计算指标 ==========
