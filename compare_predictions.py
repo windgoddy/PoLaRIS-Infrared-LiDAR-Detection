@@ -88,6 +88,10 @@ def load_dnanet_model(checkpoint_path, device):
     if state_dict is None:
         raise KeyError("Checkpoint missing state_dict/model_state_dict")
 
+    # 处理 DataParallel 前缀
+    if any(k.startswith('module.') for k in state_dict.keys()):
+        state_dict = {k.replace('module.', '', 1): v for k, v in state_dict.items()}
+
     # 检测 in_channels
     first_conv_key = None
     for key in state_dict.keys():
@@ -115,9 +119,16 @@ def load_dnanet_model(checkpoint_path, device):
         nb_filter=nb_filter,
         deep_supervision=deep_supervision
     )
-    model.load_state_dict(state_dict, strict=False)
+    load_result = model.load_state_dict(state_dict, strict=False)
     model = model.to(device)
     model.eval()
+
+    if load_result.missing_keys or load_result.unexpected_keys:
+        print(f"⚠️  DNANet load_state_dict: missing={len(load_result.missing_keys)}, unexpected={len(load_result.unexpected_keys)}")
+        if len(load_result.missing_keys) > 0:
+            print(f"   Missing keys (first 5): {load_result.missing_keys[:5]}")
+        if len(load_result.unexpected_keys) > 0:
+            print(f"   Unexpected keys (first 5): {load_result.unexpected_keys[:5]}")
 
     print(f"✅ DNANet loaded: in_channels={in_channels}, deep_supervision={deep_supervision}")
     print(f"   Checkpoint IoU: {checkpoint.get('mean_IOU', checkpoint.get('best_iou', 'N/A'))}")
@@ -133,6 +144,10 @@ def load_mamba_model(checkpoint_path, device):
     state_dict = checkpoint.get('state_dict') or checkpoint.get('model_state_dict')
     if state_dict is None:
         raise KeyError("Checkpoint missing state_dict/model_state_dict")
+
+    # 处理 DataParallel 前缀
+    if any(k.startswith('module.') for k in state_dict.keys()):
+        state_dict = {k.replace('module.', '', 1): v for k, v in state_dict.items()}
 
     # 检测模型配置
     patch_embed_weight = state_dict['patch_embed.proj.weight']
@@ -165,9 +180,16 @@ def load_mamba_model(checkpoint_path, device):
         )
         print(f"✅ Mamba (Standard) loaded: embed_dim={embed_dim}, depths={depths}, LiDAR={use_lidar}")
 
-    model.load_state_dict(state_dict, strict=False)
+    load_result = model.load_state_dict(state_dict, strict=False)
     model = model.to(device)
     model.eval()
+
+    if load_result.missing_keys or load_result.unexpected_keys:
+        print(f"⚠️  Mamba load_state_dict: missing={len(load_result.missing_keys)}, unexpected={len(load_result.unexpected_keys)}")
+        if len(load_result.missing_keys) > 0:
+            print(f"   Missing keys (first 5): {load_result.missing_keys[:5]}")
+        if len(load_result.unexpected_keys) > 0:
+            print(f"   Unexpected keys (first 5): {load_result.unexpected_keys[:5]}")
 
     print(f"   Checkpoint IoU: {checkpoint.get('mean_IOU', checkpoint.get('best_iou', 'N/A'))}")
 
