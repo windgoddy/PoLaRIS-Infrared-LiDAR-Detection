@@ -360,12 +360,12 @@ def train_one_epoch(model, train_loader, optimizer, loss_fn, device, epoch, args
 
         # Forward
         if args.in_channels == 1:
-            # 单通道输入：直接使用
-            outputs = model(images, depth=None)  # depth=None for IR-only
+            # 单通道输入：直接使用，lidar_img=None
+            outputs = model(images, None)  # IR-only, no LiDAR
         else:
             # 3通道输入：只使用第一个通道（IR）
             ir_channel = images[:, 0:1, :, :]  # (B, 1, H, W)
-            outputs = model(ir_channel, depth=None)
+            outputs = model(ir_channel, None)  # IR-only, no LiDAR
 
         if isinstance(outputs, (list, tuple)):
             outputs = outputs[0]  # 取主输出
@@ -408,10 +408,10 @@ def validate(model, test_loader, device, args):
 
             # Forward
             if args.in_channels == 1:
-                outputs = model(images, depth=None)
+                outputs = model(images, None)  # IR-only, no LiDAR
             else:
                 ir_channel = images[:, 0:1, :, :]
-                outputs = model(ir_channel, depth=None)
+                outputs = model(ir_channel, None)  # IR-only, no LiDAR
 
             if isinstance(outputs, (list, tuple)):
                 outputs = outputs[0]
