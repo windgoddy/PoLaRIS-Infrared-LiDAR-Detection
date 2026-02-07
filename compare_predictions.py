@@ -537,9 +537,8 @@ def main():
                 mamba_pred = mamba_pred[-1]
             if idx == 0:
                 print(f"  Mamba logits shape: {mamba_pred.shape}, range: [{mamba_pred.min().item():.4f}, {mamba_pred.max().item():.4f}], mean: {mamba_pred.mean().item():.4f}")
-            mamba_pred = torch.sigmoid(mamba_pred)
             if idx == 0:
-                print(f"  Mamba sigmoid range: [{mamba_pred.min().item():.4f}, {mamba_pred.max().item():.4f}], mean: {mamba_pred.mean().item():.4f}")
+                print(f"  Mamba output range: [{mamba_pred.min().item():.4f}, {mamba_pred.max().item():.4f}], mean: {mamba_pred.mean().item():.4f}")
                 print(f"  Mamba >{args.threshold:.2f} ratio: {(mamba_pred > args.threshold).float().mean().item():.6f}")
             mamba_pred_np = mamba_pred.cpu().numpy()[0, 0]  # (H, W)
 
