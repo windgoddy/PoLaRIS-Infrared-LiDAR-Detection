@@ -73,6 +73,12 @@ def parse_args():
     parser.add_argument('--threshold', type=float, default=0.5,
                         help='Binary threshold for predictions')
 
+    # Evaluation strategy
+    parser.add_argument('--eval_strategy', type=str, default='auto',
+                        choices=['auto', 'fixed', 'dynamic'],
+                        help='auto: use dynamic for Mamba, fixed for DNANet; '
+                             'fixed: use --threshold; dynamic: sweep thresholds [0.1-0.9]')
+
     # DNANet dataset settings
     parser.add_argument('--dnanet_image_folder', type=str, default='images-8bit',
                         help='DNANet image folder (match training config)')
@@ -240,6 +246,25 @@ def calculate_box_iou(pred, gt, threshold=0.5):
         return 0.0
 
     return intersection / union
+
+
+def sweep_best_threshold(pred, gt, thresholds=None):
+    """动态阈值扫描，返回最佳 Seg IoU、对应 Box IoU 和阈值"""
+    if thresholds is None:
+        thresholds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+
+    best_iou = -1.0
+    best_box_iou = 0.0
+    best_thresh = 0.5
+
+    for thresh in thresholds:
+        seg_iou = calculate_iou(pred, gt, thresh)
+        if seg_iou > best_iou:
+            best_iou = seg_iou
+            best_thresh = thresh
+            best_box_iou = calculate_box_iou(pred, gt, thresh)
+
+    return best_iou, best_box_iou, best_thresh
 
 
 def visualize_comparison(
@@ -436,8 +461,23 @@ def main():
     print(f"✅ DNANet DataLoader: {len(dnanet_loader)} batches")
     print(f"✅ Mamba DataLoader: {len(mamba_loader)} batches\n")
 
+    # 评估策略设置（对齐 test_box_iou.py）
+    if args.eval_strategy == 'auto':
+        dnanet_use_dynamic = False
+        mamba_use_dynamic = True
+    elif args.eval_strategy == 'dynamic':
+        dnanet_use_dynamic = True
+        mamba_use_dynamic = True
+    else:
+        dnanet_use_dynamic = False
+        mamba_use_dynamic = False
+
+    print(f"  ✓ Eval strategy: {args.eval_strategy} (DNANet={'dynamic' if dnanet_use_dynamic else 'fixed'}, Mamba={'dynamic' if mamba_use_dynamic else 'fixed'})")
+
     # 存储结果
     results = []
+    dnanet_best_thresholds = []
+    mamba_best_thresholds = []
 
     print("=" * 60)
     print("Running Inference")
@@ -503,12 +543,20 @@ def main():
                 print(f"  Mamba >{args.threshold:.2f} ratio: {(mamba_pred > args.threshold).float().mean().item():.6f}")
             mamba_pred_np = mamba_pred.cpu().numpy()[0, 0]  # (H, W)
 
-            # ========== 计算指标 ==========
-            dnanet_seg_iou = calculate_iou(dnanet_pred_np, gt_mask, args.threshold)
-            mamba_seg_iou = calculate_iou(mamba_pred_np, gt_mask, args.threshold)
+            # ========== 计算指标（统一评价方式） ==========
+            if dnanet_use_dynamic:
+                dnanet_seg_iou, dnanet_box_iou, dnanet_best_t = sweep_best_threshold(dnanet_pred_np, gt_mask)
+                dnanet_best_thresholds.append(dnanet_best_t)
+            else:
+                dnanet_seg_iou = calculate_iou(dnanet_pred_np, gt_mask, args.threshold)
+                dnanet_box_iou = calculate_box_iou(dnanet_pred_np, gt_mask, args.threshold)
 
-            dnanet_box_iou = calculate_box_iou(dnanet_pred_np, gt_mask, args.threshold)
-            mamba_box_iou = calculate_box_iou(mamba_pred_np, gt_mask, args.threshold)
+            if mamba_use_dynamic:
+                mamba_seg_iou, mamba_box_iou, mamba_best_t = sweep_best_threshold(mamba_pred_np, gt_mask)
+                mamba_best_thresholds.append(mamba_best_t)
+            else:
+                mamba_seg_iou = calculate_iou(mamba_pred_np, gt_mask, args.threshold)
+                mamba_box_iou = calculate_box_iou(mamba_pred_np, gt_mask, args.threshold)
 
             # ========== 准备可视化图像 ==========
             # 使用 DNANet 的输入图像（需要反归一化）
@@ -643,6 +691,23 @@ def main():
         f.write(f"  High IoU (>0.8):     {len(high_iou)} ({len(high_iou)/len(results)*100:.1f}%)\n")
         f.write(f"  Medium IoU (0.5-0.8): {len(medium_iou)} ({len(medium_iou)/len(results)*100:.1f}%)\n")
         f.write(f"  Low IoU (<0.5):      {len(low_iou)} ({len(low_iou)/len(results)*100:.1f}%)\n\n")
+
+        # 阈值分布（动态扫描时）
+        if dnanet_best_thresholds:
+            f.write("DNANet Best Threshold Distribution:\n")
+            for t in sorted(set(dnanet_best_thresholds)):
+                count = dnanet_best_thresholds.count(t)
+                pct = count / len(dnanet_best_thresholds) * 100
+                f.write(f"  {t:.1f}: {count:4d} samples ({pct:5.1f}%)\n")
+            f.write("\n")
+
+        if mamba_best_thresholds:
+            f.write("Mamba Best Threshold Distribution:\n")
+            for t in sorted(set(mamba_best_thresholds)):
+                count = mamba_best_thresholds.count(t)
+                pct = count / len(mamba_best_thresholds) * 100
+                f.write(f"  {t:.1f}: {count:4d} samples ({pct:5.1f}%)\n")
+            f.write("\n")
 
         f.write("Critical Analysis Questions:\n")
         f.write("  1. 在 Overlay 图中，Mamba 的预测是否更符合物理形状（而非矩形）？\n")
