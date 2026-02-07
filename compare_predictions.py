@@ -39,7 +39,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from model.utils_lidar import PoLaRISTestLoader
-from model.load_param_data import load_dataset
+from model.load_param_data import load_dataset, load_param
 
 # Mamba models
 from model_Mamba.core.polaris_mamba import PoLaRIS_Mamba
@@ -47,7 +47,7 @@ from model_Mamba.core.polaris_mamba_multiscale import PoLaRIS_Mamba_MultiScale
 
 # DNANet imports
 sys.path.insert(0, os.path.join(PROJECT_ROOT, 'model'))
-from model.DNANet import DNANet
+from model.model_DNANet import DNANet, Res_CBAM_block
 
 
 def parse_args():
@@ -83,12 +83,25 @@ def load_dnanet_model(checkpoint_path, device):
     first_conv_weight = checkpoint['model_state_dict']['conv0_0.0.conv1.weight']
     in_channels = first_conv_weight.shape[1]
 
-    model = DNANet(in_channels=in_channels, num_classes=1)
+    # 检测 deep_supervision
+    deep_supervision = 'final2.weight' in checkpoint['model_state_dict']
+
+    # 获取网络参数（参考 test_box_iou.py）
+    nb_filter, num_blocks = load_param('three', 'resnet_18')
+
+    model = DNANet(
+        num_classes=1,
+        input_channels=in_channels,
+        block=Res_CBAM_block,
+        num_blocks=num_blocks,
+        nb_filter=nb_filter,
+        deep_supervision=deep_supervision
+    )
     model.load_state_dict(checkpoint['model_state_dict'], strict=False)
     model = model.to(device)
     model.eval()
 
-    print(f"✅ DNANet loaded: in_channels={in_channels}")
+    print(f"✅ DNANet loaded: in_channels={in_channels}, deep_supervision={deep_supervision}")
     print(f"   Checkpoint IoU: {checkpoint.get('best_iou', 'N/A')}")
 
     return model, in_channels
