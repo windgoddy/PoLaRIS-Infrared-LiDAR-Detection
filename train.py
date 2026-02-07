@@ -146,7 +146,7 @@ class Trainer(object):
         print(f"\n[Epoch {epoch}] Test Results:")
         print(f"  Loss              : {test_loss:.4f}")
         print(f"  Segmentation IoU  : {mean_IOU:.4f}")
-        print(f"  Mask-to-Box IoU   : {mean_box_IOU:.4f} (Detection Performance)")
+        print(f"  Mask-to-Box IoU   : {mean_box_IOU:.4f}")
         print(f"  Precision         : {precision[5]:.4f}")
         print(f"  Recall            : {recall[5]:.4f}")
 

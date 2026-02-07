@@ -41,7 +41,9 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from model.utils_lidar import PoLaRISTestLoader, polaris_collate_fn
+from model.utils import TestSetLoader
 from model.load_param_data import load_dataset, load_param
+import torchvision.transforms as transforms
 
 # Mamba models
 from model_Mamba.core.polaris_mamba import PoLaRIS_Mamba
@@ -352,23 +354,52 @@ def main():
     _, test_img_ids, _ = load_dataset(args.root, args.dataset, args.split_method)
     print(f"✅ Total test samples: {len(test_img_ids)}\n")
 
-    # 使用统一的 PoLaRISTestLoader 来确保一致的数据加载
-    # 对于 DNANet: 使用 in_channels=1 只加载 IR 图像
-    # 对于 Mamba: 使用 in_channels=2 加载 IR + Depth
-    print(f"  ✓ 使用 PoLaRISTestLoader 加载数据")
+    # 创建 DNANet DataLoader (使用 TestSetLoader，与训练时一致)
+    print(f"  ✓ 创建 DNANet DataLoader (TestSetLoader)")
+    if dnanet_channels == 1:
+        input_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize([0.5], [0.5])
+        ])
+    else:
+        input_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize([.485, .456, .406], [.229, .224, .225])
+        ])
 
-    unified_dataset = PoLaRISTestLoader(
+    dnanet_dataset = TestSetLoader(
+        dataset_dir,
+        img_id=test_img_ids,
+        base_size=256,
+        crop_size=256,
+        transform=input_transform,
+        suffix='.png',
+        in_channels=dnanet_channels,
+        image_folder='images'
+    )
+
+    dnanet_loader = DataLoader(
+        dataset=dnanet_dataset,
+        batch_size=1,
+        shuffle=False,
+        num_workers=0,
+        drop_last=False
+    )
+
+    # 创建 Mamba DataLoader (使用 PoLaRISTestLoader，与训练时一致)
+    print(f"  ✓ 创建 Mamba DataLoader (PoLaRISTestLoader)")
+    mamba_dataset = PoLaRISTestLoader(
         dataset_dir=dataset_dir,
         img_id=test_img_ids,
         base_size=256,
         crop_size=256,
-        in_channels=2,  # 加载 IR + Depth，DNANet 只使用 IR 通道
+        in_channels=2,
         normalize_16bit=True,
         suffix='.png'
     )
 
-    unified_loader = DataLoader(
-        dataset=unified_dataset,
+    mamba_loader = DataLoader(
+        dataset=mamba_dataset,
         batch_size=1,
         shuffle=False,
         num_workers=0,
@@ -376,7 +407,8 @@ def main():
         collate_fn=polaris_collate_fn
     )
 
-    print(f"✅ DataLoader 创建完成: {len(unified_loader)} batches\n")
+    print(f"✅ DNANet DataLoader: {len(dnanet_loader)} batches")
+    print(f"✅ Mamba DataLoader: {len(mamba_loader)} batches\n")
 
     # 存储结果
     results = []
@@ -387,52 +419,44 @@ def main():
 
     # 推理
     with torch.no_grad():
-        for idx, batch in enumerate(tqdm(unified_loader, desc="Testing")):
-            # PoLaRISTestLoader 返回 dict
-            data = batch['image'].to(device)  # (1, 2, H, W) - [IR, Depth]
-            gt_mask = batch['mask'].cpu().numpy()[0, 0]  # (H, W)
-            img_id = test_img_ids[idx]
+        for idx, (dnanet_batch, mamba_batch) in enumerate(tqdm(
+            zip(dnanet_loader, mamba_loader),
+            total=len(dnanet_loader),
+            desc="Testing"
+        )):
+            # ========== DNANet 数据 ==========
+            # TestSetLoader 返回 (img, mask) tuple
+            dnanet_img, dnanet_mask = dnanet_batch
+            dnanet_img = dnanet_img.to(device)  # (1, C, H, W) - 已经过 transform 归一化
+            gt_mask = dnanet_mask.cpu().numpy()[0, 0]  # (H, W) - 范围 [0, 1]
 
-            # 调试：检查第一个 batch 的 mask
+            # ========== Mamba 数据 ==========
+            # PoLaRISTestLoader 返回 dict
+            mamba_img = mamba_batch['image'].to(device)  # (1, 2, H, W) - [IR, Depth]
+
+            # 调试：检查第一个 batch
             if idx == 0:
                 print(f"\n🔍 Debug Info (first batch):")
-                print(f"  batch['mask'] shape: {batch['mask'].shape}")
-                print(f"  batch['mask'] dtype: {batch['mask'].dtype}")
-                print(f"  batch['mask'] range: [{batch['mask'].min():.4f}, {batch['mask'].max():.4f}]")
-                print(f"  batch['mask'] sum: {batch['mask'].sum():.4f}")
-                print(f"  gt_mask shape: {gt_mask.shape}")
-                print(f"  data shape: {data.shape}")
+                print(f"  DNANet img shape: {dnanet_img.shape}, range: [{dnanet_img.min():.4f}, {dnanet_img.max():.4f}]")
+                print(f"  DNANet mask shape: {dnanet_mask.shape}, range: [{dnanet_mask.min():.4f}, {dnanet_mask.max():.4f}]")
+                print(f"  Mamba img shape: {mamba_img.shape}, range: [{mamba_img.min():.4f}, {mamba_img.max():.4f}]")
+                print(f"  GT mask shape: {gt_mask.shape}, sum: {gt_mask.sum():.4f}")
 
-            # 提取 IR 和 Depth 通道
-            ir_channel = data[:, 0:1, :, :]  # (1, 1, H, W)
-            depth_channel = data[:, 1:2, :, :]  # (1, 1, H, W)
+            img_id = test_img_ids[idx]
 
             # ========== DNANet 推理 ==========
-            # DNANet 需要标准化的输入
-            if dnanet_channels == 1:
-                # 单通道模型：使用 IR，标准化到 [-1, 1]
-                # PoLaRISTestLoader 输出的 IR 已经是 [0, 1] 范围
-                dnanet_input = (ir_channel - 0.5) / 0.5
-            elif dnanet_channels == 3:
-                # 三通道模型：复制 IR 到 RGB，ImageNet 标准化
-                ir_rgb = ir_channel.repeat(1, 3, 1, 1)  # (1, 3, H, W)
-                # PoLaRISTestLoader 输出 [0, 1]，转换为 ImageNet 标准化
-                mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
-                std = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
-                dnanet_input = (ir_rgb - mean) / std
-            else:
-                # 2-channel: IR + Depth
-                dnanet_input = torch.cat([ir_channel, depth_channel], dim=1)
-                # 简单标准化
-                dnanet_input = (dnanet_input - 0.5) / 0.5
-
-            dnanet_pred = dnanet_model(dnanet_input)
+            # DNANet 输入已经过 TestSetLoader + transform 正确归一化
+            dnanet_pred = dnanet_model(dnanet_img)
             if isinstance(dnanet_pred, (list, tuple)):
                 dnanet_pred = dnanet_pred[0]
             dnanet_pred = torch.sigmoid(dnanet_pred)
             dnanet_pred_np = dnanet_pred.cpu().numpy()[0, 0]  # (H, W)
 
             # ========== Mamba 推理 ==========
+            # Mamba 需要分离 IR 和 Depth
+            ir_channel = mamba_img[:, 0:1, :, :]  # (1, 1, H, W)
+            depth_channel = mamba_img[:, 1:2, :, :]  # (1, 1, H, W)
+
             mamba_pred = mamba_model(ir_channel, depth_channel)
             if isinstance(mamba_pred, (list, tuple)):
                 mamba_pred = mamba_pred[0]
@@ -447,8 +471,21 @@ def main():
             mamba_box_iou = calculate_box_iou(mamba_pred_np, gt_mask, args.threshold)
 
             # ========== 准备可视化图像 ==========
-            # 使用原始 IR 通道作为可视化背景（已经是 [0, 1] 范围）
-            ir_img = ir_channel[0, 0].cpu().numpy()
+            # 使用 DNANet 的输入图像（需要反归一化）
+            if dnanet_channels == 1:
+                # 单通道：反归一化 [0.5, 0.5]
+                ir_img = dnanet_img[0, 0].cpu().numpy() * 0.5 + 0.5
+            elif dnanet_channels == 3:
+                # RGB：反归一化 ImageNet，取第一个通道
+                img_np = dnanet_img[0].cpu().numpy()  # (3, H, W)
+                mean = np.array([0.485, 0.456, 0.406]).reshape(3, 1, 1)
+                std = np.array([0.229, 0.224, 0.225]).reshape(3, 1, 1)
+                img_denorm = img_np * std + mean
+                img_denorm = np.clip(img_denorm, 0, 1)
+                ir_img = img_denorm[0]  # 取第一个通道
+            else:
+                # 2-channel
+                ir_img = dnanet_img[0, 0].cpu().numpy() * 0.5 + 0.5
 
             # 存储结果
             results.append({
