@@ -57,10 +57,8 @@ from model_Mamba.core.polaris_mamba import PoLaRIS_Mamba
 from model_Mamba.core.polaris_mamba_multiscale import PoLaRIS_Mamba_MultiScale
 
 # Loss functions
-from model_Mamba.core.losses import (
-    SoftIoULoss, DiceLoss, FocalLoss,
-    BCELoss, ProjectionAwareLoss
-)
+from model_Mamba.core.loss import DiceLoss, BCEDiceLoss
+from model_Mamba.core.loss_advanced import LossFactory
 
 
 def set_seed(seed=42):
@@ -313,34 +311,39 @@ def create_optimizer(model, args):
 
 
 def create_loss_functions(args):
-    """创建损失函数"""
-    losses = {}
+    """创建损失函数（使用LossFactory）"""
+    # 使用LossFactory创建混合损失
+    loss_config = {
+        'dice_weight': args.dice_weight,
+        'projection_weight': args.projection_weight,
+        'focal_alpha': 0.25,
+        'focal_gamma': 2.0,
+        'projection_mode': 'max'
+    }
 
-    if args.bce_weight > 0:
-        losses['bce'] = (BCELoss(), args.bce_weight)
+    # 根据权重设置选择损失类型
+    if args.dice_weight > 0 and args.projection_weight > 0:
+        loss_type = 'hybrid'
+    elif args.projection_weight > 0:
+        loss_type = 'projection'
+    else:
+        loss_type = 'bce_dice'
 
-    if args.dice_weight > 0:
-        losses['dice'] = (DiceLoss(), args.dice_weight)
-
-    if args.focal_weight > 0:
-        losses['focal'] = (FocalLoss(alpha=0.25, gamma=2.0), args.focal_weight)
-
-    if args.projection_weight > 0:
-        losses['projection'] = (ProjectionAwareLoss(), args.projection_weight)
+    loss_fn = LossFactory.create_loss(loss_type, loss_config)
 
     print(f"\n📉 损失函数配置:")
-    for name, (loss_fn, weight) in losses.items():
-        print(f"  ✓ {name.upper()}: weight={weight:.2f}")
+    print(f"  ✓ Type: {loss_type}")
+    print(f"  ✓ Dice weight: {args.dice_weight:.2f}")
+    print(f"  ✓ Projection weight: {args.projection_weight:.2f}")
 
-    return losses
+    return loss_fn
 
 
-def train_one_epoch(model, train_loader, optimizer, losses, device, epoch, args):
+def train_one_epoch(model, train_loader, optimizer, loss_fn, device, epoch, args):
     """训练一个epoch"""
     model.train()
 
     total_loss = 0.0
-    loss_components = {name: 0.0 for name in losses.keys()}
 
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}")
 
@@ -363,17 +366,10 @@ def train_one_epoch(model, train_loader, optimizer, losses, device, epoch, args)
 
         # 计算损失
         optimizer.zero_grad()
-        batch_loss = 0.0
 
-        for loss_name, (loss_fn, weight) in losses.items():
-            if loss_name == 'projection':
-                # Projection loss需要额外参数
-                loss_val = loss_fn(outputs, masks, masks)  # 使用hard mask
-            else:
-                loss_val = loss_fn(outputs, masks)
-
-            batch_loss += weight * loss_val
-            loss_components[loss_name] += loss_val.item()
+        # LossFactory返回的loss可以直接调用
+        # 对于hybrid loss，它会自动处理masks作为oracle_mask
+        batch_loss = loss_fn(outputs, masks, oracle_mask=masks)
 
         batch_loss.backward()
         optimizer.step()
@@ -388,9 +384,8 @@ def train_one_epoch(model, train_loader, optimizer, losses, device, epoch, args)
 
     # 计算平均损失
     avg_loss = total_loss / len(train_loader)
-    avg_components = {name: val / len(train_loader) for name, val in loss_components.items()}
 
-    return avg_loss, avg_components
+    return avg_loss
 
 
 def validate(model, test_loader, device, args):
@@ -464,7 +459,7 @@ def main():
     optimizer, scheduler = create_optimizer(model, args)
 
     # 创建损失函数
-    losses = create_loss_functions(args)
+    loss_fn = create_loss_functions(args)
 
     # 加载checkpoint（如果有）
     start_epoch = 1
@@ -486,8 +481,8 @@ def main():
 
     for epoch in range(start_epoch, args.epochs + 1):
         # 训练
-        train_loss, loss_components = train_one_epoch(
-            model, train_loader, optimizer, losses, device, epoch, args
+        train_loss = train_one_epoch(
+            model, train_loader, optimizer, loss_fn, device, epoch, args
         )
 
         # 验证
@@ -499,8 +494,6 @@ def main():
         # 打印结果
         print(f"\n[Epoch {epoch}/{args.epochs}]")
         print(f"  Train Loss: {train_loss:.4f}")
-        for name, val in loss_components.items():
-            print(f"    {name}: {val:.4f}")
         print(f"  Val IoU: {mean_iou:.4f} | PD: {mean_pd:.4f} | FA: {mean_fa:.4f}")
         print(f"  LR: {optimizer.param_groups[0]['lr']:.6f}")
 
