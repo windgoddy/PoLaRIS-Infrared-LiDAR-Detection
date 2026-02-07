@@ -126,7 +126,7 @@ def parse_args():
                         choices=['Adam', 'AdamW', 'SGD'],
                         help='Optimizer type')
     parser.add_argument('--scheduler', type=str, default='CosineAnnealingLR',
-                        choices=['CosineAnnealingLR', 'StepLR', 'MultiStepLR'],
+                        choices=['CosineAnnealingLR', 'CosineAnnealingWarmRestarts', 'StepLR', 'MultiStepLR'],
                         help='LR scheduler type')
     parser.add_argument('--lr_step', type=int, default=100,
                         help='LR decay step (for StepLR)')
@@ -294,6 +294,10 @@ def create_optimizer(model, args):
 
     if args.scheduler == 'CosineAnnealingLR':
         scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
+    elif args.scheduler == 'CosineAnnealingWarmRestarts':
+        # T_0: 第一次restart的周期（epochs），T_mult: 每次restart后周期的倍数
+        T_0 = 50  # 每50个epoch重启一次
+        scheduler = lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=T_0, T_mult=1, eta_min=1e-6)
     elif args.scheduler == 'StepLR':
         scheduler = lr_scheduler.StepLR(optimizer, step_size=args.lr_step, gamma=args.lr_gamma)
     elif args.scheduler == 'MultiStepLR':
