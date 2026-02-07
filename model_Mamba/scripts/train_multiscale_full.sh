@@ -11,15 +11,19 @@
 #
 # 用法：
 #   # 自动选择GPU（推荐）
-#   bash model_Mamba/scripts/train_multiscale_full.sh [mode]
+#   bash model_Mamba/scripts/train_multiscale_full.sh [mode] [gpu] [model_type] [bit_depth]
 #
 #   # 指定GPU
-#   bash model_Mamba/scripts/train_multiscale_full.sh [mode] [GPU_ID]
+#   bash model_Mamba/scripts/train_multiscale_full.sh [mode] [GPU_ID] [model_type] [bit_depth]
 #
 #   mode选项：
 #     lidar       - LiDAR模式（默认）: IR + Depth + LiDAR点云
 #     ir_only     - IR-only模式: 单通道IR（公平对比）
 #     ir_only_rgb - IR-only RGB模式: 3通道RGB（完全匹配DNANet）
+#
+#   gpu选项：
+#     auto        - 自动选择GPU（默认）
+#     0,1,2...    - 手动指定GPU ID
 #
 #   model_type选项（可选）：
 #     mamba_tiny_multiscale - 小模型+多尺度（默认，embed_dim=64）
@@ -27,12 +31,17 @@
 #     mamba_small           - 中等模型（embed_dim=96）
 #     mamba_base            - 大模型（embed_dim=128）
 #
+#   bit_depth选项（可选）：
+#     16          - 使用16位图像（默认，images文件夹）
+#     8           - 使用8位图像（images-8bit文件夹）
+#
 #   示例：
-#     bash model_Mamba/scripts/train_multiscale_full.sh                        # LiDAR模式，自动选GPU，默认模型
-#     bash model_Mamba/scripts/train_multiscale_full.sh ir_only                # IR-only，自动选GPU，默认模型
-#     bash model_Mamba/scripts/train_multiscale_full.sh lidar 0                # LiDAR模式，GPU 0，默认模型
-#     bash model_Mamba/scripts/train_multiscale_full.sh ir_only auto mamba_small  # IR-only，自动选GPU，中等模型
-#     bash model_Mamba/scripts/train_multiscale_full.sh lidar 1 mamba_base     # LiDAR模式，GPU 1，大模型
+#     bash model_Mamba/scripts/train_multiscale_full.sh                           # LiDAR，自动GPU，默认模型，16bit
+#     bash model_Mamba/scripts/train_multiscale_full.sh lidar auto auto 8         # LiDAR，自动GPU，默认模型，8bit
+#     bash model_Mamba/scripts/train_multiscale_full.sh ir_only                   # IR-only，自动GPU，默认模型，16bit
+#     bash model_Mamba/scripts/train_multiscale_full.sh lidar 0                   # LiDAR，GPU 0，默认模型，16bit
+#     bash model_Mamba/scripts/train_multiscale_full.sh ir_only auto mamba_small  # IR-only，自动GPU，中等模型，16bit
+#     bash model_Mamba/scripts/train_multiscale_full.sh lidar 1 mamba_base 8      # LiDAR，GPU 1，大模型，8bit
 #
 # =============================================================================
 
@@ -89,6 +98,7 @@ trap cleanup SIGINT SIGTERM
 MODE=${1:-lidar}  # 训练模式
 MANUAL_GPU=${2:-}  # 手动指定的GPU（空或"auto"则自动选择）
 MODEL_TYPE=${3:-mamba_tiny_multiscale}  # 模型类型（可选）
+BIT_DEPTH=${4:-16}  # 图像位深度：8 或 16（可选，默认16bit）
 
 # 处理"auto"作为GPU参数的情况
 if [ "$MANUAL_GPU" == "auto" ]; then
@@ -147,6 +157,21 @@ SPLIT_METHOD="50_50_2k_new"
 BASE_SIZE=256
 CROP_SIZE=256
 
+# 根据位深度设置图像文件夹和归一化选项
+if [ "$BIT_DEPTH" == "8" ]; then
+    IMAGE_FOLDER="images-8bit"
+    NORMALIZE_16BIT="False"
+    BIT_DESC="8bit"
+elif [ "$BIT_DEPTH" == "16" ]; then
+    IMAGE_FOLDER="images"
+    NORMALIZE_16BIT="True"
+    BIT_DESC="16bit"
+else
+    echo "❌ 错误: 未知位深度 '$BIT_DEPTH'"
+    echo "支持的位深度: 8 | 16"
+    exit 1
+fi
+
 # 训练配置
 LR=0.0001
 OPTIMIZER="AdamW"
@@ -173,17 +198,17 @@ case $MODEL_TYPE in
         ;;
 esac
 
-# 实验名称（包含模型大小）
+# 实验名称（包含模型大小和位深度）
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 case $MODE in
     "lidar")
-        EXPERIMENT_NAME="${MODEL_SIZE}_LiDAR_d${DICE_WEIGHT}p${PROJECTION_WEIGHT}_${TIMESTAMP}"
+        EXPERIMENT_NAME="${MODEL_SIZE}_LiDAR_${BIT_DESC}_d${DICE_WEIGHT}p${PROJECTION_WEIGHT}_${TIMESTAMP}"
         ;;
     "ir_only")
-        EXPERIMENT_NAME="${MODEL_SIZE}_IR_Only_d${DICE_WEIGHT}p${PROJECTION_WEIGHT}_${TIMESTAMP}"
+        EXPERIMENT_NAME="${MODEL_SIZE}_IR_Only_${BIT_DESC}_d${DICE_WEIGHT}p${PROJECTION_WEIGHT}_${TIMESTAMP}"
         ;;
     "ir_only_rgb")
-        EXPERIMENT_NAME="${MODEL_SIZE}_IR_Only_RGB_d${DICE_WEIGHT}p${PROJECTION_WEIGHT}_${TIMESTAMP}"
+        EXPERIMENT_NAME="${MODEL_SIZE}_IR_Only_RGB_${BIT_DESC}_d${DICE_WEIGHT}p${PROJECTION_WEIGHT}_${TIMESTAMP}"
         ;;
 esac
 
@@ -196,6 +221,7 @@ echo "🚀 Mamba多尺度模型训练 (自动GPU)"
 echo "=========================================="
 echo ""
 echo "训练模式:         $MODE_DESC"
+echo "图像位深度:       $BIT_DESC ($IMAGE_FOLDER)"
 echo ""
 echo "配置信息:"
 echo "  模型:             $MODEL_TYPE (embed_dim=$EMBED_DIM)"
@@ -287,13 +313,17 @@ for GPU_ID in $GPU_LIST; do
                 --lr $LR \
                 --optimizer "$OPTIMIZER" \
                 --scheduler "$SCHEDULER" \
+                --use_lidar "$USE_LIDAR" \
+                --in_channels $IN_CHANNELS \
+                --normalize_16bit "$NORMALIZE_16BIT" \
+                --image_folder "$IMAGE_FOLDER" \
                 --loss_type "$LOSS_TYPE" \
                 --dice_weight $DICE_WEIGHT \
                 --projection_weight $PROJECTION_WEIGHT \
-                --use_lidar $USE_LIDAR \
-                --experiment_name "$EXPERIMENT_NAME" \
-                --save_dir "$SAVE_DIR" \
-                --save_interval 50 \
+                --gpus "$GPU_ID" \
+                --workers 4 \
+                --seed 42 \
+                --suffix .png \
                 > $LOG_FILE 2>&1 &
         else
             # IR-only模式：使用train_ir_only.py
@@ -319,6 +349,7 @@ for GPU_ID in $GPU_LIST; do
                 --workers 4 \
                 --save_iter_step 50 \
                 --exp_name "$EXPERIMENT_NAME" \
+                --image_folder "$IMAGE_FOLDER" \
                 --suffix .png \
                 > $LOG_FILE 2>&1 &
         fi
