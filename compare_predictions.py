@@ -40,7 +40,10 @@ if PROJECT_ROOT not in sys.path:
 
 from model.utils_lidar import PoLaRISTestLoader
 from model.load_param_data import load_dataset
-from model_Mamba.core.polaris_mamba import create_multiscale_mamba
+
+# Mamba models
+from model_Mamba.core.polaris_mamba import PoLaRIS_Mamba
+from model_Mamba.core.polaris_mamba_multiscale import PoLaRIS_Mamba_MultiScale
 
 # DNANet imports
 sys.path.insert(0, os.path.join(PROJECT_ROOT, 'model'))
@@ -104,18 +107,32 @@ def load_mamba_model(checkpoint_path, device):
     use_lidar = any('lidar_gate' in k for k in checkpoint['model_state_dict'].keys())
     is_multiscale = any('skip_proj_s' in k for k in checkpoint['model_state_dict'].keys())
 
-    model = create_multiscale_mamba(
-        in_channels=ir_channels,
-        embed_dim=embed_dim,
-        use_lidar=use_lidar,
-        num_classes=1,
-    )
+    # 根据 embed_dim 推断 depths (参考 test_box_iou.py)
+    depths_map = {64: [2, 2, 4, 2], 96: [2, 2, 6, 2], 128: [2, 2, 12, 2]}
+    depths = depths_map.get(embed_dim, [2, 2, 6, 2])
+
+    # 根据是否多尺度选择模型类
+    if is_multiscale:
+        model = PoLaRIS_Mamba_MultiScale(
+            in_channels=1,  # Always 1 for IR (patch_embed)
+            embed_dim=embed_dim,
+            depths=depths,
+            use_lidar=use_lidar
+        )
+        print(f"✅ Mamba (MultiScale) loaded: embed_dim={embed_dim}, depths={depths}, LiDAR={use_lidar}")
+    else:
+        model = PoLaRIS_Mamba(
+            in_channels=1,  # Always 1 for IR (patch_embed)
+            embed_dim=embed_dim,
+            depths=depths,
+            use_lidar=use_lidar
+        )
+        print(f"✅ Mamba (Standard) loaded: embed_dim={embed_dim}, depths={depths}, LiDAR={use_lidar}")
 
     model.load_state_dict(checkpoint['model_state_dict'], strict=False)
     model = model.to(device)
     model.eval()
 
-    print(f"✅ Mamba loaded: IR={ir_channels}, embed_dim={embed_dim}, LiDAR={use_lidar}, MultiScale={is_multiscale}")
     print(f"   Checkpoint IoU: {checkpoint.get('best_iou', 'N/A')}")
 
     return model, use_lidar

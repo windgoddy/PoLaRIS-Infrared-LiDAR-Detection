@@ -137,8 +137,8 @@ if [ -f "$SAVE_DIR/latest_best_model.pth" ]; then
     echo "🔍 评估最佳checkpoint..."
     echo ""
 
-    # Box IoU测试
-    bash ../test_checkpoint.sh "$SAVE_DIR/latest_best_model.pth" $GPU
+    # Box IoU测试（传递相对于项目根目录的路径）
+    bash ../test_checkpoint.sh "model_Mamba/$SAVE_DIR/latest_best_model.pth" $GPU
 
     echo ""
     echo "=========================================="
