@@ -291,16 +291,25 @@ def create_model(model_type, in_channels, checkpoint, device):
         print(f"    - in_channels: {detected_params['in_channels']}")
         # For Mamba, in_channels is only for IR (patch_embed)
         # Don't override the in_channels parameter here
-        if model_type not in ['mamba', 'mamba_tiny', 'mamba_small', 'mamba_base']:
+        mamba_models = ['mamba', 'mamba_tiny', 'mamba_small', 'mamba_base',
+                        'mamba_tiny_multiscale', 'mamba_small_multiscale',
+                        'mamba_tiny_progressive', 'mamba_small_progressive']
+        if model_type not in mamba_models:
             in_channels = detected_params['in_channels']
     if 'embed_dim' in detected_params:
         print(f"    - embed_dim: {detected_params['embed_dim']}")
     if 'use_lidar' in detected_params:
         print(f"    - use_lidar: {detected_params['use_lidar']}")
-    if 'is_multiscale' in detected_params:
-        print(f"    - is_multiscale: {detected_params['is_multiscale']}")
+    if 'architecture' in detected_params:
+        print(f"    - architecture: {detected_params['architecture']}")
+    if 'use_deep_supervision' in detected_params:
+        print(f"    - use_deep_supervision: {detected_params['use_deep_supervision']}")
 
-    # Align with train.py: metrics are computed on raw logits (no sigmoid)
+    # CRITICAL: apply_sigmoid 需要根据模型输出格式设置
+    # - DNANet/CAFNet: 输出 logits，需要 sigmoid（与训练时评估一致）
+    # - Mamba Base/MultiScale: GaussianHead 输出 logits，需要 sigmoid
+    # - Mamba Progressive: ProgressiveHead 输出已做 sigmoid，不需要再做
+    # 默认设置为 False，后续根据模型类型调整
     apply_sigmoid = False
 
     if model_type == 'DNANet':
@@ -314,10 +323,16 @@ def create_model(model_type, in_channels, checkpoint, device):
             nb_filter=nb_filter,
             deep_supervision=deep_supervision
         )
+        # DNANet 输出 logits，需要 sigmoid（与 train_Phase3.py:350 一致）
+        apply_sigmoid = True
     elif model_type == 'MS_CAFNet':
         model = MS_CAFNet(num_classes=1, input_channels=in_channels)
+        # MS_CAFNet 输出 logits，需要 sigmoid
+        apply_sigmoid = True
     elif model_type == 'MS_CAFNet_DualGeo':
         model = MS_CAFNet_DualGeo(num_classes=1, input_channels=in_channels)
+        # MS_CAFNet_DualGeo 输出 logits，需要 sigmoid
+        apply_sigmoid = True
     elif model_type in ['mamba', 'mamba_tiny', 'mamba_small', 'mamba_base',
                         'mamba_tiny_multiscale', 'mamba_small_multiscale',
                         'mamba_tiny_progressive', 'mamba_small_progressive']:
@@ -581,11 +596,15 @@ def test_model(model, test_loader, use_lidar_loader, threshold, device, apply_si
             if isinstance(pred, tuple):
                 pred = pred[0]  # 取第一个元素（多尺度输出列表）
 
-            # 2. 深度监督模型在训练时返回 [main_output, aux_output1, aux_output2]
-            #    但在测试时（model.eval()）只返回 main_output
-            #    为安全起见，如果意外返回列表，取第一个元素（主输出）
+            # 2. 深度监督模型在训练时返回列表，但测试时（model.eval()）通常只返回 main_output
+            #    为安全起见，如果意外返回列表，需要根据模型类型选择正确的输出：
+            #    - DNANet/CAFNet: [aux1, aux2, ..., main_output] → 主输出在最后
+            #    - Mamba: [main_output, aux1, aux2] → 主输出在最前
             if isinstance(pred, list):
-                pred = pred[0]  # CRITICAL FIX: 主输出是第一个元素，不是最后一个！
+                if model_type in ['DNANet', 'MS_CAFNet', 'MS_CAFNet_DualGeo']:
+                    pred = pred[-1]  # DNANet 系列：主输出在最后
+                else:
+                    pred = pred[0]   # Mamba 系列：主输出在最前
 
             if apply_sigmoid:
                 pred = torch.sigmoid(pred)

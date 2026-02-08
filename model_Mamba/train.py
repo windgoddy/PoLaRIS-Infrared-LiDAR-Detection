@@ -622,10 +622,10 @@ class Trainer:
             # 周期性输出进度（减少日志冗余）
             if (i + 1) % print_interval == 0 or (i + 1) == total_batches:
                 print(f'Epoch {epoch}: [{i+1}/{total_batches}] '
-                      f'Loss: {loss_meter.avg:.4f} | LR: 
+                      f'Loss: {loss_meter.avg:.4f} | LR: {self.optimizer.param_groups[0]["lr"]:.6f}')
 
-            # Update tqdm
-            tbar.set_postfix(loss=f'{loss_meter.avg:.6f}', lr=f'{self.optimizer.param_groups[0]["lr"]:.6f}')
+            # Update loss meter
+            loss_meter.update(loss.item())
 
         # Print diagnostic statistics every 5 epochs
         if epoch % 5 == 0 and pred_stats['min']:
