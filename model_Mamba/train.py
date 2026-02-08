@@ -575,8 +575,11 @@ class Trainer:
                 param_group['lr'] = lr
             print(f"  🔥 Warmup: lr={lr:.6f} (epoch {epoch+1}/{self.warmup_epochs})")
 
-        tbar = tqdm(self.train_loader, desc=f'Epoch {epoch}')
-        for i, batch in enumerate(tbar):
+        # 周期性输出（每个epoch打印10次，减少日志冗余）
+        total_batches = len(self.train_loader)
+        print_interval = max(1, total_batches // 10)  # 每10%打印一次
+        
+        for i, batch in enumerate(self.train_loader):
             ir_img = batch['ir_img'].to(self.device)
             lidar_img = batch['lidar_img'].to(self.device)
             heatmap_gt = batch['heatmap'].to(self.device)
@@ -616,8 +619,10 @@ class Trainer:
 
             self.optimizer.step()
 
-            # Update meter
-            loss_meter.update(loss.item(), ir_img.size(0))
+            # 周期性输出进度（减少日志冗余）
+            if (i + 1) % print_interval == 0 or (i + 1) == total_batches:
+                print(f'Epoch {epoch}: [{i+1}/{total_batches}] '
+                      f'Loss: {loss_meter.avg:.4f} | LR: 
 
             # Update tqdm
             tbar.set_postfix(loss=f'{loss_meter.avg:.6f}', lr=f'{self.optimizer.param_groups[0]["lr"]:.6f}')

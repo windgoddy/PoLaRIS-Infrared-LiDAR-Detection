@@ -39,6 +39,81 @@ from model_Mamba.core.polaris_mamba import PoLaRIS_Mamba
 from model_Mamba.dataset.binary_mask_utils import generate_binary_mask_target, load_yolo_labels
 
 
+def parse_train_log(checkpoint_path):
+    """
+    从 checkpoint 所在目录的 train_log.txt 中解析训练配置
+
+    支持两种格式:
+    1. 传统格式 (DNANet/CAFNet): key:--value
+    2. Mamba 格式: Arguments 部分的 key: value
+
+    Args:
+        checkpoint_path: 权重文件路径
+
+    Returns:
+        config: 配置字典，如果文件不存在或解析失败则返回 {}
+    """
+    checkpoint_dir = os.path.dirname(checkpoint_path)
+    train_log_path = os.path.join(checkpoint_dir, 'train_log.txt')
+
+    if not os.path.exists(train_log_path):
+        print(f"  ⚠️  未找到 train_log.txt: {train_log_path}")
+        return {}
+
+    print(f"  ✓ 读取训练配置: {train_log_path}")
+
+    config = {}
+
+    try:
+        with open(train_log_path, 'r') as f:
+            lines = f.readlines()
+
+        # 检测格式类型
+        is_mamba_format = any('Arguments:' in line for line in lines)
+
+        if is_mamba_format:
+            # Mamba 格式: 查找 Arguments 部分
+            in_args_section = False
+            for line in lines:
+                line = line.strip()
+
+                if 'Arguments:' in line:
+                    in_args_section = True
+                    continue
+
+                if in_args_section:
+                    # 遇到分隔符或新的section，停止解析
+                    if line.startswith('=') or ('Configuration:' in line and line.endswith(':')):
+                        break
+
+                    # 跳过分隔符行和空行
+                    if not line or line.startswith('-'):
+                        continue
+
+                    # 解析 key: value 格式
+                    if ':' in line:
+                        parts = line.split(':', 1)
+                        if len(parts) == 2:
+                            key = parts[0].strip()
+                            value = parts[1].strip()
+                            config[key] = value
+        else:
+            # 传统格式: key:--value
+            for line in lines:
+                line = line.strip()
+                if ':--' in line:
+                    key, value = line.split(':--', 1)
+                    config[key] = value
+
+        print(f"  ✓ 成功解析 {len(config)} 个配置项")
+
+    except Exception as e:
+        print(f"  ⚠️  解析 train_log.txt 失败: {e}")
+        return {}
+
+    return config
+
+
 def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description='Test Mask-to-Box IoU for trained model')
@@ -149,7 +224,7 @@ def detect_model_params(state_dict, model_type):
         else:
             print(f"  ⚠️  未找到 conv0_0 层，无法检测 in_channels")
 
-    # Mamba: infer in_channels, embed_dim, and use_lidar
+    # Mamba: infer in_channels, embed_dim, architecture, and use_lidar
     if 'patch_embed.proj.weight' in state_dict:
         w = state_dict['patch_embed.proj.weight']
         if len(w.shape) == 4:
@@ -157,20 +232,38 @@ def detect_model_params(state_dict, model_type):
             params['in_channels'] = w.shape[1]
             params['embed_dim'] = w.shape[0]
             print(f"  ℹ️  Mamba patch_embed.proj.weight shape: {list(w.shape)} → IR_channels={params['in_channels']}, embed_dim={params['embed_dim']}")
-            
+
             # CRITICAL FIX: Check if model uses LiDAR gating
             # LiDAR is injected via gate mechanism, not patch_embed
             has_lidar_gate = any('lidar_gate' in key for key in state_dict.keys())
             params['use_lidar'] = has_lidar_gate
-            
-            # Check if this is a multiscale model
-            # Multiscale models have skip connection projections
+
+            # Detect architecture type by checking layer patterns
+            # Progressive: has progressive_decoder layers
+            has_progressive = any('progressive_decoder' in key or 'up_block' in key for key in state_dict.keys())
+            # MultiScale: has skip_proj_s layers but no progressive decoder
             has_skip_proj = any('skip_proj_s' in key for key in state_dict.keys())
-            params['is_multiscale'] = has_skip_proj
-            
-            if has_skip_proj:
+
+            if has_progressive:
+                params['architecture'] = 'progressive'
+                # Check for deep supervision (auxiliary heads)
+                has_deep_sup = any('aux_head' in key for key in state_dict.keys())
+                params['use_deep_supervision'] = has_deep_sup
+                print(f"  ℹ️  检测到 Progressive 架构")
+                if has_deep_sup:
+                    print(f"  ℹ️  检测到深度监督 (aux_head 层存在)")
+            elif has_skip_proj:
+                params['architecture'] = 'multiscale'
+                # MultiScale also supports deep supervision
+                has_deep_sup = any('aux_head' in key for key in state_dict.keys())
+                params['use_deep_supervision'] = has_deep_sup
                 print(f"  ℹ️  检测到多尺度架构 (skip_proj_s* 层存在)")
-            
+                if has_deep_sup:
+                    print(f"  ℹ️  检测到深度监督 (aux_head 层存在)")
+            else:
+                params['architecture'] = 'base'
+                print(f"  ℹ️  检测到基础架构")
+
             # For data loader: need 2 channels if LiDAR is used
             if has_lidar_gate:
                 params['data_in_channels'] = 2  # IR + Depth
@@ -225,32 +318,61 @@ def create_model(model_type, in_channels, checkpoint, device):
         model = MS_CAFNet(num_classes=1, input_channels=in_channels)
     elif model_type == 'MS_CAFNet_DualGeo':
         model = MS_CAFNet_DualGeo(num_classes=1, input_channels=in_channels)
-    elif model_type in ['mamba', 'mamba_tiny', 'mamba_small', 'mamba_base', 'mamba_tiny_multiscale']:
+    elif model_type in ['mamba', 'mamba_tiny', 'mamba_small', 'mamba_base',
+                        'mamba_tiny_multiscale', 'mamba_small_multiscale',
+                        'mamba_tiny_progressive', 'mamba_small_progressive']:
         embed_dim = detected_params.get('embed_dim', 96)
         depths_map = {64: [2, 2, 4, 2], 96: [2, 2, 6, 2], 128: [2, 2, 12, 2]}
         depths = depths_map.get(embed_dim, [2, 2, 6, 2])
         use_lidar = detected_params.get('use_lidar', False)
-        is_multiscale = detected_params.get('is_multiscale', False)
-        
-        # Auto-detect multiscale even if model_type is generic 'mamba_tiny'
-        if is_multiscale or model_type == 'mamba_tiny_multiscale':
-            # Import multiscale model
+        use_deep_supervision = detected_params.get('use_deep_supervision', False)
+
+        # Auto-detect architecture from state_dict
+        architecture = detected_params.get('architecture', 'base')
+
+        # Override architecture if explicitly specified in model_type
+        if 'progressive' in model_type:
+            architecture = 'progressive'
+        elif 'multiscale' in model_type:
+            architecture = 'multiscale'
+
+        if architecture == 'progressive':
+            # Import Progressive model
+            from model_Mamba.core.polaris_mamba_progressive import PoLaRIS_Mamba_Progressive
+            model = PoLaRIS_Mamba_Progressive(
+                in_channels=1,  # Always 1 for IR (patch_embed)
+                embed_dim=embed_dim,
+                depths=depths,
+                use_lidar=use_lidar,
+                use_deep_supervision=use_deep_supervision
+            )
+            print(f"  ✓ 使用 Progressive Decoder Mamba 模型 (深度监督: {use_deep_supervision})")
+            # CRITICAL: ProgressiveHead outputs sigmoid([0,1]), NOT logits
+            apply_sigmoid = False
+        elif architecture == 'multiscale':
+            # Import MultiScale model
             from model_Mamba.core.polaris_mamba_multiscale import PoLaRIS_Mamba_MultiScale
             model = PoLaRIS_Mamba_MultiScale(
                 in_channels=1,  # Always 1 for IR (patch_embed)
                 embed_dim=embed_dim,
                 depths=depths,
-                use_lidar=use_lidar
+                use_lidar=use_lidar,
+                use_deep_supervision=use_deep_supervision
             )
-            print(f"  ✓ 使用多尺度 Mamba 模型")
+            print(f"  ✓ 使用多尺度 Mamba 模型 (深度监督: {use_deep_supervision})")
+            # CRITICAL: GaussianHead outputs logits, need sigmoid
+            apply_sigmoid = True
         else:
+            # Base architecture
             model = PoLaRIS_Mamba(
                 in_channels=1,  # Always 1 for IR (patch_embed)
                 embed_dim=embed_dim,
                 depths=depths,
                 use_lidar=use_lidar
             )
-        apply_sigmoid = False  # GaussianHead 内部已做 sigmoid
+            print(f"  ✓ 使用基础 Mamba 模型")
+            # CRITICAL: GaussianHead outputs logits, need sigmoid
+            apply_sigmoid = True
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
@@ -454,13 +576,16 @@ def test_model(model, test_loader, use_lidar_loader, threshold, device, apply_si
             else:
                 pred = model(data)
 
-            # 处理多输出模型（如 MS_CAFNet_DualGeo 返回 tuple: ([outputs], confidence)）
+            # 处理多输出模型
+            # 1. MS_CAFNet_DualGeo 返回 tuple: ([outputs], confidence)
             if isinstance(pred, tuple):
-                # 取第一个元素（多尺度输出列表）
-                pred = pred[0]
+                pred = pred[0]  # 取第一个元素（多尺度输出列表）
 
+            # 2. 深度监督模型在训练时返回 [main_output, aux_output1, aux_output2]
+            #    但在测试时（model.eval()）只返回 main_output
+            #    为安全起见，如果意外返回列表，取第一个元素（主输出）
             if isinstance(pred, list):
-                pred = pred[-1]
+                pred = pred[0]  # CRITICAL FIX: 主输出是第一个元素，不是最后一个！
 
             if apply_sigmoid:
                 pred = torch.sigmoid(pred)
@@ -658,21 +783,92 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"✅ 使用设备: {device}")
 
+    # 🔧 NEW: 从 train_log.txt 读取训练配置
+    train_config = parse_train_log(args.checkpoint)
+
     checkpoint, checkpoint_info = load_model_from_checkpoint(args.checkpoint, device)
 
+    # Apply config from train_log.txt if available (only if not explicitly set)
+    if train_config:
+        print(f"\n📋 应用训练配置到测试参数:")
+
+        # Model type (only auto-detect if not specified)
+        if args.model is None and 'model' in train_config:
+            args.model = train_config['model']
+            print(f"  ✓ model: {args.model}")
+
+        # Dataset configuration
+        if 'dataset' in train_config:
+            args.dataset = train_config['dataset']
+            print(f"  ✓ dataset: {args.dataset}")
+
+        if 'split_method' in train_config:
+            args.split_method = train_config['split_method']
+            print(f"  ✓ split_method: {args.split_method}")
+
+        if 'image_folder' in train_config:
+            args.image_folder = train_config['image_folder']
+            print(f"  ✓ image_folder: {args.image_folder}")
+
+        # Image dimensions
+        if args.base_size is None and 'base_size' in train_config:
+            args.base_size = int(train_config['base_size'])
+            print(f"  ✓ base_size: {args.base_size}")
+
+        if args.crop_size is None and 'crop_size' in train_config:
+            args.crop_size = int(train_config['crop_size'])
+            print(f"  ✓ crop_size: {args.crop_size}")
+
+        # Input channels (from config)
+        if 'in_channels' in train_config:
+            config_in_channels = int(train_config['in_channels'])
+            # Only override if user didn't specify
+            if args.in_channels == 1:  # Default value
+                args.in_channels = config_in_channels
+                print(f"  ✓ in_channels: {args.in_channels}")
+
+        # LiDAR dataloader settings
+        # CRITICAL: Handle both old (use_lidar_dataloader) and new (use_polaris_loader) naming
+        if 'use_polaris_loader' in train_config:
+            args.use_lidar_dataloader = train_config['use_polaris_loader']
+            print(f"  ✓ use_lidar_dataloader: {args.use_lidar_dataloader} (from use_polaris_loader)")
+        elif 'use_lidar_dataloader' in train_config:
+            args.use_lidar_dataloader = train_config['use_lidar_dataloader']
+            print(f"  ✓ use_lidar_dataloader: {args.use_lidar_dataloader}")
+
+        if 'normalize_16bit' in train_config:
+            args.normalize_16bit = train_config['normalize_16bit']
+            print(f"  ✓ normalize_16bit: {args.normalize_16bit}")
+
+        # Other parameters
+        if 'suffix' in train_config:
+            args.suffix = train_config['suffix']
+
+    # Model type auto-detection (fallback if no train_log.txt or model not in config)
     if args.model is None:
         checkpoint_name = os.path.basename(args.checkpoint)
         checkpoint_dir = os.path.dirname(args.checkpoint)
 
         if 'mamba' in checkpoint_dir.lower() or 'mamba' in checkpoint_name.lower():
-            if 'mamba_tiny' in checkpoint_name.lower() or 'mamba_tiny' in checkpoint_dir.lower():
-                args.model = 'mamba_tiny'
-            elif 'mamba_small' in checkpoint_name.lower() or 'mamba_small' in checkpoint_dir.lower():
-                args.model = 'mamba_small'
-            elif 'mamba_base' in checkpoint_name.lower() or 'mamba_base' in checkpoint_dir.lower():
+            # Detect Mamba variant
+            if 'progressive' in checkpoint_name.lower() or 'progressive' in checkpoint_dir.lower():
+                if 'small' in checkpoint_name.lower() or 'small' in checkpoint_dir.lower():
+                    args.model = 'mamba_small_progressive'
+                else:
+                    args.model = 'mamba_tiny_progressive'
+            elif 'multiscale' in checkpoint_name.lower() or 'multiscale' in checkpoint_dir.lower():
+                if 'small' in checkpoint_name.lower() or 'small' in checkpoint_dir.lower():
+                    args.model = 'mamba_small_multiscale'
+                else:
+                    args.model = 'mamba_tiny_multiscale'
+            elif 'base' in checkpoint_name.lower() or 'base' in checkpoint_dir.lower():
                 args.model = 'mamba_base'
+            elif 'small' in checkpoint_name.lower() or 'small' in checkpoint_dir.lower():
+                args.model = 'mamba_small'
+            elif 'tiny' in checkpoint_name.lower() or 'tiny' in checkpoint_dir.lower():
+                args.model = 'mamba_tiny'
             else:
-                args.model = 'mamba'
+                args.model = 'mamba_tiny'  # Default to tiny
         elif 'DNANet' in checkpoint_dir or 'DNANet' in checkpoint_name:
             args.model = 'DNANet'
         elif 'MS_CAFNet_DualGeo' in checkpoint_dir:
@@ -683,6 +879,7 @@ def main():
             print("⚠️  无法自动推断模型类型，默认使用 DNANet")
             args.model = 'DNANet'
 
+    print(f"\n📦 模型配置:")
     print(f"  ✓ 模型类型: {args.model}")
 
     # Auto eval strategy: use dynamic threshold sweep for all models

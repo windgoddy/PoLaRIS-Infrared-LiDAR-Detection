@@ -10,6 +10,7 @@ Date: 2026-02-02
 """
 
 import os
+import sys
 import csv
 import torch
 from datetime import datetime
@@ -61,6 +62,15 @@ def save_training_config(args, save_dir):
     config_file = os.path.join(save_dir, 'train_log.txt')
 
     with open(config_file, 'w') as f:
+        # Write command line at the very top
+        f.write("=" * 80 + "\n")
+        f.write("Command Line\n")
+        f.write("=" * 80 + "\n")
+        # Reconstruct command from sys.argv
+        command = ' '.join(sys.argv)
+        f.write(f"{command}\n")
+        f.write("=" * 80 + "\n\n")
+        
         # Write header
         now = datetime.now()
         f.write("=" * 80 + "\n")
