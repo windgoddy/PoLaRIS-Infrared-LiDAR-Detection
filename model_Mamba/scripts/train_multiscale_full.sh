@@ -356,13 +356,14 @@ for GPU_ID in $GPU_LIST; do
         echo ""
         echo "📝 配置: Mode=$MODE, GPU=$GPU_ID, Batch Size=$BATCH_SIZE"
 
-        # 创建实验目录
-        mkdir -p "result/$EXPERIMENT_NAME"
-        SAVE_DIR="result/$EXPERIMENT_NAME"
+        # 创建实验目录（使用绝对路径）
+        SAVE_DIR="$(pwd)/result/$EXPERIMENT_NAME"
+        mkdir -p "$SAVE_DIR"
 
         # 日志文件
         LOG_FILE="$SAVE_DIR/training_gpu${GPU_ID}_bs${BATCH_SIZE}_${TIMESTAMP}.log"
-        echo "📁 日志: $LOG_FILE"
+        echo "📁 保存目录: $SAVE_DIR"
+        echo "📁 日志文件: $LOG_FILE"
 
         # 所有模式统一使用 train.py（已支持IR-only）
         echo "🚀 启动训练..."
@@ -391,6 +392,7 @@ for GPU_ID in $GPU_LIST; do
             --loss_type "$LOSS_TYPE" \
             --dice_weight $DICE_WEIGHT \
             --projection_weight $PROJECTION_WEIGHT \
+            --save_dir "$SAVE_DIR" \
             --gpus "0" \
             --workers 4 \
             --seed 42 \

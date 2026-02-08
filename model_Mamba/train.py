@@ -563,10 +563,6 @@ class Trainer:
         self.net.train()
         loss_meter = AverageMeter()
 
-        # Diagnostic meters (added 2026-01-30)
-        pred_stats = {'min': [], 'max': [], 'mean': []}
-        gt_pos_counts = []
-
         # Warmup learning rate for first few epochs
         if epoch < self.warmup_epochs:
             warmup_factor = (epoch + 1) / self.warmup_epochs
@@ -575,11 +571,12 @@ class Trainer:
                 param_group['lr'] = lr
             print(f"  🔥 Warmup: lr={lr:.6f} (epoch {epoch+1}/{self.warmup_epochs})")
 
-        # 周期性输出（每个epoch打印10次，减少日志冗余）
+        # Training progress bar (更新频率：每5%)
         total_batches = len(self.train_loader)
-        print_interval = max(1, total_batches // 10)  # 每10%打印一次
-        
-        for i, batch in enumerate(self.train_loader):
+        update_interval = max(1, total_batches // 20)  # 每5%更新一次
+
+        pbar = tqdm(self.train_loader, desc=f'Epoch {epoch} Training', ncols=100)
+        for i, batch in enumerate(pbar):
             ir_img = batch['ir_img'].to(self.device)
             lidar_img = batch['lidar_img'].to(self.device)
             heatmap_gt = batch['heatmap'].to(self.device)
@@ -602,14 +599,6 @@ class Trainer:
                 heatmap_pred = output
                 loss = self.criterion(heatmap_pred, heatmap_gt)
 
-            # Diagnostic: collect statistics from first 5 batches
-            if i < 5:
-                with torch.no_grad():
-                    pred_stats['min'].append(heatmap_pred.min().item())
-                    pred_stats['max'].append(heatmap_pred.max().item())
-                    pred_stats['mean'].append(heatmap_pred.mean().item())
-                    gt_pos_counts.append((heatmap_gt > 0.5).sum().item())
-
             # Backward
             self.optimizer.zero_grad()
             loss.backward()
@@ -619,23 +608,22 @@ class Trainer:
 
             self.optimizer.step()
 
-            # 周期性输出进度（减少日志冗余）
-            if (i + 1) % print_interval == 0 or (i + 1) == total_batches:
-                print(f'Epoch {epoch}: [{i+1}/{total_batches}] '
-                      f'Loss: {loss_meter.avg:.4f} | LR: {self.optimizer.param_groups[0]["lr"]:.6f}')
-
             # Update loss meter
             loss_meter.update(loss.item())
 
-        # Print diagnostic statistics every 5 epochs
-        if epoch % 5 == 0 and pred_stats['min']:
-            print(f"\n  📊 Training Stats (first 5 batches, Epoch {epoch}):")
-            print(f"     Pred: min={min(pred_stats['min']):.6f}, "
-                  f"max={max(pred_stats['max']):.6f}, "
-                  f"mean={sum(pred_stats['mean'])/len(pred_stats['mean']):.6f}")
-            print(f"     GT positive pixels: {sum(gt_pos_counts)/len(gt_pos_counts):.1f} per batch")
-            print(f"     Avg loss: {loss_meter.avg:.6f}")
+            # Update progress bar (每5%更新一次，减少日志输出)
+            if (i + 1) % update_interval == 0 or (i + 1) == total_batches:
+                pbar.set_postfix({
+                    'Loss': f'{loss_meter.avg:.4f}',
+                    'LR': f'{self.optimizer.param_groups[0]["lr"]:.6f}'
+                })
 
+            # Clean up GPU memory periodically to prevent OOM
+            # Critical for deep supervision and progressive models
+            if (i + 1) % 50 == 0:
+                torch.cuda.empty_cache()
+
+        pbar.close()
         return loss_meter.avg
 
     def testing(self, epoch):
@@ -647,13 +635,12 @@ class Trainer:
         recall_sum = 0.0
         box_iou_sum = 0.0  # [NEW] Mask-to-Box IoU accumulator
         count = 0
-        
-        # Debug: track prediction statistics
-        pred_stats = {'min': [], 'max': [], 'mean': []}
-        gt_stats = {'min': [], 'max': [], 'mean': [], 'num_pos': []}
+
+        # Progress bar with real-time IoU display
+        pbar = tqdm(self.test_loader, desc=f'Epoch {epoch} Testing', ncols=120)
 
         with torch.no_grad():
-            for batch_idx, batch in enumerate(tqdm(self.test_loader, desc='Testing')):
+            for batch_idx, batch in enumerate(pbar):
                 ir_img = batch['ir_img'].to(self.device)
                 lidar_img = batch['lidar_img'].to(self.device)
                 heatmap_gt = batch['heatmap'].to(self.device)
@@ -666,16 +653,6 @@ class Trainer:
                     heatmap_pred = output[0]  # Main prediction only
                 else:
                     heatmap_pred = output
-
-                # Collect statistics (first 5 batches of every 10th epoch)
-                if epoch % 10 == 0 and batch_idx < 5:
-                    pred_stats['min'].append(heatmap_pred.min().item())
-                    pred_stats['max'].append(heatmap_pred.max().item())
-                    pred_stats['mean'].append(heatmap_pred.mean().item())
-                    gt_stats['min'].append(heatmap_gt.min().item())
-                    gt_stats['max'].append(heatmap_gt.max().item())
-                    gt_stats['mean'].append(heatmap_gt.mean().item())
-                    gt_stats['num_pos'].append((heatmap_gt > 0.5).sum().item())
 
                 # Loss (only compute on main prediction during eval)
                 loss = self.criterion(heatmap_pred, heatmap_gt)
@@ -744,28 +721,23 @@ class Trainer:
                     threshold=best_batch_threshold
                 )
                 box_iou_sum += batch_box_iou
-                
-                # Log best threshold periodically with detailed sweep results
-                if batch_idx == 0 and epoch % 10 == 0:
-                    print(f"  📊 Best threshold for batch 0: {best_batch_threshold:.2f}")
-                    print(f"      [DEBUG] Threshold sweep results for batch 0:")
 
-                    # Re-do sweep for logging (only for batch 0)
-                    for thresh in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]:
-                        pred_bin_debug = (heatmap_pred > thresh).float()
-                        gt_bin_debug = (heatmap_gt > 0.5).float()
-                        inter_debug = (pred_bin_debug * gt_bin_debug).sum(dim=(1, 2, 3))
-                        union_debug = (pred_bin_debug + gt_bin_debug).clamp(0, 1).sum(dim=(1, 2, 3))
-                        iou_debug = (inter_debug / (union_debug + 1e-7)).mean().item()
-                        tp_debug = inter_debug.sum().item()
-                        fp_debug = (pred_bin_debug * (1 - gt_bin_debug)).sum().item()
-                        fn_debug = ((1 - pred_bin_debug) * gt_bin_debug).sum().item()
-                        prec_debug = tp_debug / (tp_debug + fp_debug + 1e-7)
-                        rec_debug = tp_debug / (tp_debug + fn_debug + 1e-7)
-                        marker = " ← BEST" if abs(thresh - best_batch_threshold) < 0.01 else ""
-                        print(f"        thresh={thresh:.1f}: IoU={iou_debug:.4f}, P={prec_debug:.3f}, R={rec_debug:.3f}{marker}")
+                # Update progress bar with real-time IoU (每5%更新一次)
+                update_interval = max(1, len(self.test_loader) // 20)
+                if (batch_idx + 1) % update_interval == 0 or (batch_idx + 1) == len(self.test_loader):
+                    current_seg_iou = iou_sum / count
+                    current_box_iou = box_iou_sum / count
+                    pbar.set_postfix({
+                        'Seg_IoU': f'{current_seg_iou:.4f}',
+                        'Box_IoU': f'{current_box_iou:.4f}',
+                        'Loss': f'{loss_meter.avg:.4f}'
+                    })
 
-                    self.current_best_threshold = best_batch_threshold  # 保存供日志使用
+                # Clean up GPU memory periodically during testing
+                if (batch_idx + 1) % 50 == 0:
+                    torch.cuda.empty_cache()
+
+        pbar.close()
 
         avg_iou = iou_sum / count
         avg_precision = precision_sum / count
@@ -773,29 +745,18 @@ class Trainer:
         avg_f1 = 2 * (avg_precision * avg_recall) / (avg_precision + avg_recall + 1e-7)
         avg_box_iou = box_iou_sum / count  # [NEW] 平均 Mask-to-Box IoU
 
-        # 使用最近记录的 best_threshold（如果有）
-        best_threshold = getattr(self, 'current_best_threshold', self.args.peak_threshold)
+        # Use dynamic threshold from args (for logging compatibility)
+        best_threshold = self.args.peak_threshold
 
-        print(f"\n[Epoch {epoch}] Test Results:")
-        print(f"  Loss: {loss_meter.avg:.6f}")
-        print(f"  Segmentation IoU : {avg_iou:.4f} ")
-        print(f"  Mask-to-Box IoU  : {avg_box_iou:.4f} ")
+        print(f"\n{'='*60}")
+        print(f"[Epoch {epoch}] Test Results:")
+        print(f"  Segmentation IoU : {avg_iou:.4f}")
+        print(f"  Mask-to-Box IoU  : {avg_box_iou:.4f}")
         print(f"  Precision        : {avg_precision:.4f}")
         print(f"  Recall           : {avg_recall:.4f}")
         print(f"  F1 Score         : {avg_f1:.4f}")
-        print(f"  Best Threshold   : {best_threshold:.2f}")
-        
-        if epoch % 10 == 0:
-            print(f"\n  💡 Tip: Mask-to-Box IoU reflects real detection ability")
-            print(f"     (independent of GT shape: box vs ellipse)")
-        
-        # Print debug stats every 10 epochs
-        if epoch % 10 == 0 and pred_stats['min']:
-            print(f"\n  📊 Debug Statistics (first 5 batches, Epoch {epoch}):")
-            print(f"     Pred: min={min(pred_stats['min']):.6f}, max={max(pred_stats['max']):.6f}, mean={sum(pred_stats['mean'])/len(pred_stats['mean']):.6f}")
-            print(f"     GT:   min={min(gt_stats['min']):.6f}, max={max(gt_stats['max']):.6f}, mean={sum(gt_stats['mean'])/len(gt_stats['mean']):.6f}")
-            print(f"     GT positive pixels: {sum(gt_stats['num_pos'])/len(gt_stats['num_pos']):.1f} per batch")
-            print(f"     Threshold: {self.args.peak_threshold}")
+        print(f"  Loss             : {loss_meter.avg:.6f}")
+        print(f"{'='*60}")
 
         # Save best model
         if avg_iou > self.best_iou:
