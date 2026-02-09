@@ -624,6 +624,10 @@ class Trainer:
                 torch.cuda.empty_cache()
 
         pbar.close()
+
+        # Clean up GPU memory after training epoch
+        torch.cuda.empty_cache()
+
         return loss_meter.avg
 
     def testing(self, epoch):
