@@ -225,10 +225,11 @@ class ProgressiveHead(nn.Module):
         self.conv_out = nn.Conv2d(in_dim // 4, 1, kernel_size=1, bias=True)
 
         # Initialize bias for stable training
-        # NOTE: Changed from -2.0 to 0.0 to improve output confidence
-        # Previous bias=-2.0 caused sigmoid(logits) to be too low (~0.12 initially)
-        # This led to 50%+ samples requiring threshold=0.1 for best IoU
-        nn.init.constant_(self.conv_out.bias, 0.0)
+        # NOTE: Changed from -2.0 to -1.0 for balanced initialization
+        # bias=-2.0: sigmoid≈0.12 (too conservative, 50%+ samples need threshold=0.1)
+        # bias=0.0: sigmoid=0.5 (too aggressive, causes training instability at Epoch 5-6)
+        # bias=-1.0: sigmoid≈0.27 (balanced, stable training expected)
+        nn.init.constant_(self.conv_out.bias, -1.0)
 
         # Upsampling
         self.upsample = nn.Upsample(
@@ -398,19 +399,20 @@ class PoLaRIS_Mamba_Progressive(nn.Module):
 
     def _init_prediction_heads(self):
         """Initialize prediction head biases."""
-        # NOTE: Changed from -2.0 to 0.0 (2026-02-08)
-        # Reason: bias=-2.0 caused sigmoid(logits)~0.12, leading to 50%+ samples
-        # requiring threshold=0.1 for best IoU. This severely limits model performance.
+        # NOTE: Changed from -2.0 to -1.0 (2026-02-09)
+        # bias=-2.0: sigmoid≈0.12 (too conservative, 50%+ samples need threshold=0.1)
+        # bias=0.0: sigmoid=0.5 (too aggressive, causes training instability)
+        # bias=-1.0: sigmoid≈0.27 (balanced initialization for stable training)
         if hasattr(self.head, 'conv_out'):
-            nn.init.constant_(self.head.conv_out.bias, 0.0)
+            nn.init.constant_(self.head.conv_out.bias, -1.0)
 
         if self.use_deep_supervision:
             if hasattr(self, 'aux_head_d2') and hasattr(self.aux_head_d2, 'conv_out'):
-                nn.init.constant_(self.aux_head_d2.conv_out.bias, 0.0)
+                nn.init.constant_(self.aux_head_d2.conv_out.bias, -1.0)
             if hasattr(self, 'aux_head_d3') and hasattr(self.aux_head_d3, 'conv_out'):
-                nn.init.constant_(self.aux_head_d3.conv_out.bias, 0.0)
+                nn.init.constant_(self.aux_head_d3.conv_out.bias, -1.0)
 
-        print("✅ [Progressive] Prediction heads initialized with bias=0.0")
+        print("✅ [Progressive] Prediction heads initialized with bias=-1.0")
 
     def forward(self, ir_img, lidar_img=None):
         """

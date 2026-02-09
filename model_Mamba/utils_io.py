@@ -190,7 +190,7 @@ def log_epoch_metrics(csv_path, epoch, train_loss, test_loss, iou, box_iou, prec
         ])
 
 
-def save_best_model(model, optimizer, epoch, iou, save_dir, use_multi_gpu=False):
+def save_best_model(model, optimizer, epoch, iou, save_dir, use_multi_gpu=False, box_iou=None, save_reason='IoU'):
     """
     Save best model checkpoint.
 
@@ -198,9 +198,11 @@ def save_best_model(model, optimizer, epoch, iou, save_dir, use_multi_gpu=False)
         model: PyTorch model
         optimizer: Optimizer
         epoch: Current epoch
-        iou: Current IoU score
+        iou: Current IoU score (Seg IoU)
         save_dir: Directory to save the model (absolute path)
         use_multi_gpu: Whether using DataParallel
+        box_iou: Mask-to-Box IoU score (optional)
+        save_reason: Reason for saving ('IoU' or 'BoxIoU'), affects filename format
     """
     # Verify save directory exists
     abs_save_dir = os.path.abspath(save_dir)
@@ -222,44 +224,44 @@ def save_best_model(model, optimizer, epoch, iou, save_dir, use_multi_gpu=False)
     # Extract model state (handle DataParallel)
     model_state = model.module.state_dict() if use_multi_gpu else model.state_dict()
 
-    # Save with IoU in filename
-    checkpoint_path = os.path.join(abs_save_dir, f'best_model_epoch{epoch:04d}_IoU{iou:.4f}.pth')
+    # Generate filename based on save reason
+    if save_reason == 'BoxIoU':
+        # Saving for best Box IoU: BoxIoU first, then Seg IoU
+        if box_iou is not None:
+            checkpoint_path = os.path.join(abs_save_dir, f'best_model_epoch{epoch:04d}_BoxIoU{box_iou:.4f}_IoU{iou:.4f}.pth')
+        else:
+            checkpoint_path = os.path.join(abs_save_dir, f'best_model_epoch{epoch:04d}_BoxIoU_IoU{iou:.4f}.pth')
+    else:
+        # Saving for best Seg IoU: IoU first, then BoxIoU
+        if box_iou is not None:
+            checkpoint_path = os.path.join(abs_save_dir, f'best_model_epoch{epoch:04d}_IoU{iou:.4f}_BoxIoU{box_iou:.4f}.pth')
+        else:
+            checkpoint_path = os.path.join(abs_save_dir, f'best_model_epoch{epoch:04d}_IoU{iou:.4f}.pth')
 
     try:
-        torch.save({
+        checkpoint_data = {
             'epoch': epoch,
             'model_state_dict': model_state,
             'optimizer_state_dict': optimizer.state_dict(),
             'iou': iou,
-        }, checkpoint_path)
+        }
+
+        # Add box_iou if provided
+        if box_iou is not None:
+            checkpoint_data['box_iou'] = box_iou
+
+        torch.save(checkpoint_data, checkpoint_path)
 
         # Verify file was actually saved
         if os.path.exists(checkpoint_path):
             file_size_mb = os.path.getsize(checkpoint_path) / (1024 * 1024)
-            print(f"✅ Best model saved: {checkpoint_path}")
+            print(f"✅ Best model saved ({save_reason}): {checkpoint_path}")
             print(f"   📊 File size: {file_size_mb:.2f} MB")
         else:
             print(f"❌ ERROR: File not found after save: {checkpoint_path}")
     except Exception as e:
         print(f"❌ ERROR saving best model: {e}")
         raise
-
-    # Also save as latest_best_model.pth for easy loading
-    latest_path = os.path.join(abs_save_dir, 'latest_best_model.pth')
-    try:
-        torch.save({
-            'epoch': epoch,
-            'model_state_dict': model_state,
-            'optimizer_state_dict': optimizer.state_dict(),
-            'iou': iou,
-        }, latest_path)
-
-        if os.path.exists(latest_path):
-            print(f"✅ Latest best model saved: {latest_path}")
-        else:
-            print(f"❌ ERROR: Latest best model not found after save")
-    except Exception as e:
-        print(f"❌ ERROR saving latest best model: {e}")
 
     return checkpoint_path
 

@@ -594,6 +594,14 @@ class Trainer:
 
                 # Weighted combination: main=60%, aux2=25%, aux3=15%
                 loss = loss_main + 0.5 * loss_aux2 + 0.4 * loss_aux3
+
+                # Debug: Print deep supervision loss breakdown (every 100 batches)
+                if (i + 1) % 100 == 0 or (i + 1) == total_batches:
+                    print(f"\n[Epoch {epoch}] Deep Supervision Loss (batch {i+1}/{total_batches}):")
+                    print(f"  Main Loss:  {loss_main.item():.4f}")
+                    print(f"  Aux2 Loss:  {loss_aux2.item():.4f} (weight: 0.5)")
+                    print(f"  Aux3 Loss:  {loss_aux3.item():.4f} (weight: 0.4)")
+                    print(f"  Total Loss: {loss.item():.4f}")
             else:
                 # Standard mode: single output
                 heatmap_pred = output
@@ -762,21 +770,37 @@ class Trainer:
         print(f"  Loss             : {loss_meter.avg:.6f}")
         print(f"{'='*60}")
 
-        # Save best model
+        # Save best Seg IoU model
         if avg_iou > self.best_iou:
             self.best_iou = avg_iou
             self.best_epoch = epoch
-            # [NEW] Also track best Box IoU (可选：如果要用 Box IoU 作为保存标准)
-            self.best_box_iou = avg_box_iou
 
-            # Use new save function with IoU in filename
+            # Save with both IoU and Box IoU in filename
             save_best_model(
                 self.net,
                 self.optimizer,
                 epoch,
                 avg_iou,
                 self.args.save_dir,
-                self.use_multi_gpu
+                self.use_multi_gpu,
+                box_iou=avg_box_iou,
+                save_reason='IoU'
+            )
+
+        # Save best Box IoU model (separate tracking)
+        if avg_box_iou > self.best_box_iou:
+            self.best_box_iou = avg_box_iou
+
+            # Save with Box IoU as primary metric in filename
+            save_best_model(
+                self.net,
+                self.optimizer,
+                epoch,
+                avg_iou,
+                self.args.save_dir,
+                self.use_multi_gpu,
+                box_iou=avg_box_iou,
+                save_reason='BoxIoU'
             )
 
         return loss_meter.avg, avg_iou, avg_precision, avg_recall, avg_f1, best_threshold, avg_box_iou
