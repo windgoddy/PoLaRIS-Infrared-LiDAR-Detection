@@ -10,8 +10,8 @@ DNANet vs Mamba 预测对比可视化脚本
 
 用法：
     python compare_predictions.py \
-        --dnanet_checkpoint result/DNANet_baseline_8bit_Pohang-Canal-3k_DNANet_28_01_2026_17_37_58_wDS/latest_best_model.pth.tar \
-        --mamba_checkpoint model_Mamba/result/MultiScale_Full_d2.5p2_20260206_162111/latest_best_model.pth \
+        --dnanet_checkpoint result/DNANet_baseline_8bit_Pohang-Canal-3k_DNANet_28_01_2026_17_37_58_wDS/best_model_epoch1326_mIoU0.8437.pth.tar \
+        --mamba_checkpoint model_Mamba/result/tiny_LiDAR_16bit_PoLaRIS_d2.5p2.0_20260210_085612/best_model_epoch0854_BoxIoU0.7887_IoU0.6699.pth \
         --num_samples 30 \
         --output_dir comparison_analysis/
 
@@ -48,6 +48,10 @@ import torchvision.transforms as transforms
 # Mamba models
 from model_Mamba.core.polaris_mamba import PoLaRIS_Mamba
 from model_Mamba.core.polaris_mamba_multiscale import PoLaRIS_Mamba_MultiScale
+from model_Mamba.core.polaris_mamba_progressive import (
+    polaris_mamba_tiny_progressive,
+    polaris_mamba_small_progressive
+)
 
 # DNANet imports
 sys.path.insert(0, os.path.join(PROJECT_ROOT, 'model'))
@@ -147,7 +151,7 @@ def load_dnanet_model(checkpoint_path, device):
 
 
 def load_mamba_model(checkpoint_path, device):
-    """加载 Mamba 模型"""
+    """加载 Mamba 模型 (支持 Base/MultiScale/Progressive 架构)"""
     checkpoint = torch.load(checkpoint_path, map_location=device)
 
     # 兼容不同的键名
@@ -166,14 +170,35 @@ def load_mamba_model(checkpoint_path, device):
 
     # 检测是否使用 LiDAR
     use_lidar = any('lidar_gate' in k for k in state_dict.keys())
-    is_multiscale = any('skip_proj_s' in k for k in state_dict.keys())
 
-    # 根据 embed_dim 推断 depths (参考 test_box_iou.py)
+    # 检测架构类型
+    has_progressive = any('progressive_decoder' in k or 'up_block' in k for k in state_dict.keys())
+    has_multiscale = any('skip_proj_s' in k for k in state_dict.keys())
+    has_deep_supervision = any('aux_head' in k for k in state_dict.keys())
+
+    # 根据 embed_dim 推断 depths
     depths_map = {64: [2, 2, 4, 2], 96: [2, 2, 6, 2], 128: [2, 2, 12, 2]}
     depths = depths_map.get(embed_dim, [2, 2, 6, 2])
 
-    # 根据是否多尺度选择模型类
-    if is_multiscale:
+    # 根据架构类型选择模型类
+    if has_progressive:
+        # Progressive 架构
+        if embed_dim == 64:
+            model = polaris_mamba_tiny_progressive(
+                use_lidar=use_lidar,
+                use_deep_supervision=has_deep_supervision
+            )
+            print(f"✅ Mamba (Progressive Tiny) loaded: embed_dim={embed_dim}, LiDAR={use_lidar}, DeepSup={has_deep_supervision}")
+        elif embed_dim == 96:
+            model = polaris_mamba_small_progressive(
+                use_lidar=use_lidar,
+                use_deep_supervision=has_deep_supervision
+            )
+            print(f"✅ Mamba (Progressive Small) loaded: embed_dim={embed_dim}, LiDAR={use_lidar}, DeepSup={has_deep_supervision}")
+        else:
+            raise ValueError(f"Unsupported embed_dim for Progressive: {embed_dim}")
+    elif has_multiscale:
+        # MultiScale 架构
         model = PoLaRIS_Mamba_MultiScale(
             in_channels=1,  # Always 1 for IR (patch_embed)
             embed_dim=embed_dim,
@@ -182,13 +207,14 @@ def load_mamba_model(checkpoint_path, device):
         )
         print(f"✅ Mamba (MultiScale) loaded: embed_dim={embed_dim}, depths={depths}, LiDAR={use_lidar}")
     else:
+        # Base 架构
         model = PoLaRIS_Mamba(
             in_channels=1,  # Always 1 for IR (patch_embed)
             embed_dim=embed_dim,
             depths=depths,
             use_lidar=use_lidar
         )
-        print(f"✅ Mamba (Standard) loaded: embed_dim={embed_dim}, depths={depths}, LiDAR={use_lidar}")
+        print(f"✅ Mamba (Base) loaded: embed_dim={embed_dim}, depths={depths}, LiDAR={use_lidar}")
 
     load_result = model.load_state_dict(state_dict, strict=False)
     model = model.to(device)
@@ -201,7 +227,12 @@ def load_mamba_model(checkpoint_path, device):
         if len(load_result.unexpected_keys) > 0:
             print(f"   Unexpected keys (first 5): {load_result.unexpected_keys[:5]}")
 
-    print(f"   Checkpoint IoU: {checkpoint.get('mean_IOU', checkpoint.get('best_iou', 'N/A'))}")
+    # 显示 checkpoint 信息
+    iou_val = checkpoint.get('iou', checkpoint.get('mean_IOU', checkpoint.get('best_iou', 'N/A')))
+    box_iou_val = checkpoint.get('box_iou', 'N/A')
+    print(f"   Checkpoint Seg IoU: {iou_val}")
+    if box_iou_val != 'N/A':
+        print(f"   Checkpoint Box IoU: {box_iou_val}")
 
     return model, use_lidar
 
