@@ -171,6 +171,59 @@ def parse_args():
     return parser.parse_args()
 
 
+def load_category_mapping(dataset_root, dataset_name):
+    """
+    加载LiDAR密度类别映射
+
+    Args:
+        dataset_root: 数据集根目录 (e.g., 'dataset/')
+        dataset_name: 数据集名称 (e.g., 'Pohang-Canal-3k')
+
+    Returns:
+        category_map: dict {img_id: category}
+        category_names: dict {category: description}
+    """
+    category_file = os.path.join(dataset_root, dataset_name, 'select-view', 'selection_summary_new.txt')
+
+    if not os.path.exists(category_file):
+        print(f"  ⚠️  类别文件不存在: {category_file}")
+        print(f"  → 跳过类别分析")
+        return None, None
+
+    print(f"  ✓ 加载类别映射: {category_file}")
+
+    category_map = {}
+    with open(category_file, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or '|' not in line:
+                continue
+            parts = line.split('|')
+            if len(parts) == 2:
+                img_id = parts[0].strip().replace('.png', '')
+                category = int(parts[1].strip())
+                category_map[img_id] = category
+
+    # 定义类别含义（根据实际场景类型）
+    category_names = {
+        0: "Category 0 (未分类场景)",
+        1: "Category 1 (适中场景 - 点云适中)",
+        2: "Category 2 (小目标场景 - 点云少)",
+        3: "Category 3 (岸边场景 - 点云多)"
+    }
+
+    # 统计类别分布
+    category_counts = {}
+    for cat in category_map.values():
+        category_counts[cat] = category_counts.get(cat, 0) + 1
+
+    print(f"  ✓ 加载了 {len(category_map)} 个样本的类别信息")
+    for cat in sorted(category_counts.keys()):
+        print(f"    Category {cat}: {category_counts[cat]} samples - {category_names.get(cat, 'Unknown')}")
+
+    return category_map, category_names
+
+
 def load_model_from_checkpoint(checkpoint_path, device):
     """从 checkpoint 加载模型"""
     print(f"\n📦 加载 checkpoint: {checkpoint_path}")
@@ -475,7 +528,7 @@ def create_test_loader(args, force_lidar=False):
             drop_last=False
         )
 
-    return test_loader, use_lidar_loader
+    return test_loader, use_lidar_loader, val_img_ids
 
 
 class MambaLabelMaskWrapper(torch.utils.data.Dataset):
@@ -521,12 +574,15 @@ class MambaLabelMaskWrapper(torch.utils.data.Dataset):
         return sample
 
 
-def test_model(model, test_loader, use_lidar_loader, threshold, device, apply_sigmoid=False, model_type='', eval_strategy='auto'):
+def test_model(model, test_loader, use_lidar_loader, threshold, device, apply_sigmoid=False, model_type='', eval_strategy='auto', category_map=None, category_names=None, val_img_ids=None):
     """测试模型并计算 Mask-to-Box IoU
 
     Args:
         model_type: 模型类型
         eval_strategy: 'auto' (Mamba用dynamic，其他用fixed), 'fixed', 'dynamic'
+        category_map: dict {img_id: category}，用于按类别统计
+        category_names: dict {category: description}，类别描述
+        val_img_ids: list[str]，测试集图像ID列表（用于传统DataLoader获取img_id）
     """
     # 根据eval_strategy决定是否使用动态阈值扫描
     if eval_strategy == 'auto':
@@ -560,16 +616,39 @@ def test_model(model, test_loader, use_lidar_loader, threshold, device, apply_si
     sample_box_ious = []
     sample_best_thresholds = []  # Track best threshold per sample
 
+    # 按类别统计（如果提供了category_map）
+    category_stats = {}
+    if category_map is not None:
+        for cat in set(category_map.values()):
+            category_stats[cat] = {
+                'seg_ious': [],
+                'box_ious': [],
+                'best_thresholds': [],
+                'count': 0
+            }
+
     with torch.no_grad():
         tbar = tqdm(test_loader, desc='Testing')
+        global_sample_idx = 0  # Track global sample index for category mapping
+
         for batch_idx, batch_data in enumerate(tbar):
             if use_lidar_loader:
                 data = batch_data['image'].to(device)
                 labels = batch_data['mask'].to(device)
+                # Extract img_ids for category mapping
+                batch_img_ids = batch_data.get('img_id', [None] * data.size(0))
+                if not isinstance(batch_img_ids, list):
+                    batch_img_ids = [batch_img_ids]
             else:
                 data, labels = batch_data
                 data = data.to(device)
                 labels = labels.to(device)
+                # 从val_img_ids获取当前batch的img_ids
+                if val_img_ids is not None:
+                    batch_size = data.size(0)
+                    batch_img_ids = val_img_ids[global_sample_idx:global_sample_idx + batch_size]
+                else:
+                    batch_img_ids = [None] * data.size(0)
 
             if batch_idx == 0:
                 print(f"\n🔍 调试信息 (第一个 batch):")
@@ -656,6 +735,16 @@ def test_model(model, test_loader, use_lidar_loader, threshold, device, apply_si
                     sample_box_ious.append(best_sample_box_iou)
                     sample_best_thresholds.append(best_sample_threshold)
 
+                    # Track category-wise statistics
+                    if category_map is not None and i < len(batch_img_ids):
+                        img_id = batch_img_ids[i]
+                        if img_id and img_id in category_map:
+                            cat = category_map[img_id]
+                            category_stats[cat]['seg_ious'].append(best_sample_iou)
+                            category_stats[cat]['box_ious'].append(best_sample_box_iou)
+                            category_stats[cat]['best_thresholds'].append(best_sample_threshold)
+                            category_stats[cat]['count'] += 1
+
                     batch_iou_sum += best_sample_iou
                     batch_box_iou_sum += best_sample_box_iou
 
@@ -708,6 +797,9 @@ def test_model(model, test_loader, use_lidar_loader, threshold, device, apply_si
                     'Box_IoU': f'{current_box_iou:.4f}'
                 })
 
+            # Update global sample index for next batch
+            global_sample_idx += data.size(0)
+
             # Clean up tensors after each batch to free GPU memory
             del data, labels, pred
             if batch_idx % 10 == 0:
@@ -734,6 +826,45 @@ def test_model(model, test_loader, use_lidar_loader, threshold, device, apply_si
     sample_ious = np.array(sample_ious)
     sample_box_ious = np.array(sample_box_ious)
 
+    # 输出按类别统计的结果
+    if category_map is not None and category_stats:
+        print(f"\n{'='*70}")
+        print("📊 按LiDAR密度类别统计")
+        print(f"{'='*70}\n")
+
+        for cat in sorted(category_stats.keys()):
+            stats = category_stats[cat]
+            if stats['count'] == 0:
+                continue
+
+            cat_name = category_names.get(cat, f"Category {cat}") if category_names else f"Category {cat}"
+            cat_seg_ious = np.array(stats['seg_ious'])
+            cat_box_ious = np.array(stats['box_ious'])
+            cat_thresholds = stats['best_thresholds']
+
+            print(f"📁 {cat_name}")
+            print(f"   样本数: {stats['count']}")
+            print(f"   Seg IoU:  均值={cat_seg_ious.mean():.4f}, 中位数={np.median(cat_seg_ious):.4f}, 标准差={cat_seg_ious.std():.4f}")
+            print(f"   Box IoU:  均值={cat_box_ious.mean():.4f}, 中位数={np.median(cat_box_ious):.4f}, 标准差={cat_box_ious.std():.4f}")
+
+            # 计算0.1阈值占比
+            thresh_01_count = sum(1 for t in cat_thresholds if t == 0.1)
+            thresh_01_pct = thresh_01_count / len(cat_thresholds) * 100 if cat_thresholds else 0
+            print(f"   0.1阈值占比: {thresh_01_count}/{len(cat_thresholds)} ({thresh_01_pct:.1f}%)")
+
+            # 显示Box IoU分布
+            box_iou_ranges = {
+                '[0.0, 0.5)': sum(1 for iou in cat_box_ious if iou < 0.5),
+                '[0.5, 0.7)': sum(1 for iou in cat_box_ious if 0.5 <= iou < 0.7),
+                '[0.7, 0.9)': sum(1 for iou in cat_box_ious if 0.7 <= iou < 0.9),
+                '[0.9, 1.0]': sum(1 for iou in cat_box_ious if iou >= 0.9),
+            }
+            print(f"   Box IoU分布: ", end="")
+            print(" | ".join([f"{k}:{v}({v/len(cat_box_ious)*100:.1f}%)" for k, v in box_iou_ranges.items()]))
+            print()
+
+        print(f"{'='*70}\n")
+
     results = {
         'mean_iou': mean_iou,
         'mean_box_iou': mean_box_iou,
@@ -741,6 +872,7 @@ def test_model(model, test_loader, use_lidar_loader, threshold, device, apply_si
         'sample_box_ious': sample_box_ious,
         'num_samples': len(sample_ious),
         'use_threshold_sweep': use_threshold_sweep,
+        'category_stats': category_stats if category_map is not None else None,
     }
 
     return results
@@ -937,11 +1069,17 @@ def main():
 
     model, apply_sigmoid = create_model(args.model, args.in_channels, checkpoint, device)
 
-    test_loader, use_lidar_loader = create_test_loader(args, force_lidar=force_lidar)
+    test_loader, use_lidar_loader, val_img_ids = create_test_loader(args, force_lidar=force_lidar)
+
+    # 加载LiDAR密度类别映射（用于分类别性能分析）
+    print(f"\n📂 加载类别信息...")
+    category_map, category_names = load_category_mapping(args.root, args.dataset)
 
     results = test_model(model, test_loader, use_lidar_loader, args.threshold, device,
                          apply_sigmoid=apply_sigmoid, model_type=args.model,
-                         eval_strategy=args.eval_strategy)
+                         eval_strategy=args.eval_strategy,
+                         category_map=category_map, category_names=category_names,
+                         val_img_ids=val_img_ids)
 
     print_results(results, checkpoint_info)
 
