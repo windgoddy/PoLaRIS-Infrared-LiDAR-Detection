@@ -54,6 +54,10 @@
 #     数值        - 自定义Projection Loss权重（默认: 2.0）
 #                   调整投影约束强度
 #
+#   resume_checkpoint选项（可选，第10个参数）：
+#     路径        - Resume训练的checkpoint文件路径（留空则从头训练）
+#                   示例: result/tiny_RGB_LiDAR_xxx/best_model_epoch0347.pth
+#
 #   dataset选项（可选，第11个参数）：
 #     Pohang-Canal-3k - 浦项运河数据集（默认，支持LiDAR）
 #     NUDT-SIRST      - NUDT红外小目标数据集（仅支持IR-only模式，8bit）
@@ -61,6 +65,7 @@
 #   示例：
 #     bash model_Mamba/scripts/train_multiscale_full.sh                                      # LiDAR，自动GPU，默认模型，16bit，polaris loader
 #     bash model_Mamba/scripts/train_multiscale_full.sh rgb_lidar auto mamba_tiny_progressive 16 polaris minmax False 2.5 2.0  # ⭐推荐：RGB+LiDAR模式，全面超越DNANet
+#     bash model_Mamba/scripts/train_multiscale_full.sh rgb_lidar auto mamba_tiny_progressive 16 polaris minmax False 2.0 2.0 result/xxx/best_model.pth  # ⭐微调：降低Dice权重+Resume
 #     bash model_Mamba/scripts/train_multiscale_full.sh rgb_lidar auto mamba_tiny_progressive 8                               # RGB+LiDAR，8bit图像
 #     bash model_Mamba/scripts/train_multiscale_full.sh lidar auto auto 8                    # LiDAR，自动GPU，默认模型，8bit，polaris loader
 #     bash model_Mamba/scripts/train_multiscale_full.sh lidar auto auto 8 traditional        # LiDAR，8bit，traditional loader
@@ -155,6 +160,7 @@ NORMALIZE_MODE=${6:-minmax}  # 归一化模式：minmax/global/percentile/clahe�
 DEEP_SUPERVISION=${7:-False}  # 深度监督：True 或 False（可选，默认False）
 CUSTOM_DICE_WEIGHT=${8:-}  # 自定义 Dice 权重（可选，默认使用脚本内置值）
 CUSTOM_PROJECTION_WEIGHT=${9:-}  # 自定义 Projection 权重（可选，默认使用脚本内置值）
+RESUME_CHECKPOINT=${10:-}  # Resume训练的checkpoint路径（可选，留空则从头训练）
 
 # 处理"auto"作为GPU参数的情况
 if [ "$MANUAL_GPU" == "auto" ]; then
@@ -449,6 +455,13 @@ for GPU_ID in $GPU_LIST; do
         # 所有模式统一使用 train.py（已支持IR-only）
         echo "🚀 启动训练..."
 
+        # 构建resume参数（如果提供）
+        RESUME_ARG=""
+        if [ -n "$RESUME_CHECKPOINT" ]; then
+            RESUME_ARG="--resume $RESUME_CHECKPOINT"
+            echo "📦 Resume from checkpoint: $RESUME_CHECKPOINT"
+        fi
+
         # 注意：CUDA_VISIBLE_DEVICES 会重新编号GPU为0，所以--gpus参数固定为"0"
         CUDA_VISIBLE_DEVICES=$GPU_ID python train.py \
             --root "../dataset" \
@@ -478,6 +491,7 @@ for GPU_ID in $GPU_LIST; do
             --workers 4 \
             --seed 42 \
             --suffix .png \
+            $RESUME_ARG \
             > $LOG_FILE 2>&1 &
 
         TRAIN_PID=$!
