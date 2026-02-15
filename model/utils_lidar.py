@@ -333,8 +333,14 @@ class PoLaRISTrainLoader(Dataset):
             depth = depth / 80.0  # Normalize depth (approx max 80m)
             combined = np.stack([img, depth], axis=0)  # (2, H, W)
             img_tensor = torch.from_numpy(combined).float()
+        elif self.in_channels == 3:
+            # 3-channel mode: pseudo-RGB (灰度复制3次，匹配DNANet)
+            img = img / 255.0  # Normalize to [0, 1]
+            # 将单通道灰度图复制成3通道
+            combined = np.stack([img, img, img], axis=0)  # (3, H, W)
+            img_tensor = torch.from_numpy(combined).float()
         else:
-            # Single channel mode
+            # Single channel mode (in_channels=1)
             img = img / 255.0
             if self.transform is not None:
                 img_tensor = self.transform(img)
@@ -533,8 +539,13 @@ class PoLaRISTestLoader(Dataset):
             depth = depth / 80.0
             combined = np.stack([img, depth], axis=0)
             img_tensor = torch.from_numpy(combined).float()
+        elif self.in_channels == 3:
+            # 3-channel mode: pseudo-RGB (灰度复制3次，匹配DNANet)
+            img = img / 255.0
+            combined = np.stack([img, img, img], axis=0)  # (3, H, W)
+            img_tensor = torch.from_numpy(combined).float()
         else:
-            # Single channel mode
+            # Single channel mode (in_channels=1)
             img = img / 255.0
             if self.transform is not None:
                 img_tensor = self.transform(img)
