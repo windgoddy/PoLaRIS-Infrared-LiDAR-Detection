@@ -203,6 +203,8 @@ def parse_args():
                         help='Random seed')
     parser.add_argument('--save_interval', type=int, default=50,
                         help='Save checkpoint every N epochs (default: 50, reduced from 10 to save disk space)')
+    parser.add_argument('--resume', type=str, default=None,
+                        help='Path to checkpoint to resume training from (e.g., result/xxx/best_model.pth)')
 
     # Evaluation
     parser.add_argument('--peak_threshold', type=float, default=0.35,
@@ -557,6 +559,52 @@ class Trainer:
 
         # Track best threshold for monitoring
         self.best_threshold_history = []
+
+        # Resume from checkpoint if provided
+        if args.resume:
+            self._load_checkpoint(args.resume)
+
+    def _load_checkpoint(self, checkpoint_path):
+        """Load checkpoint for resuming training."""
+        print(f"\n{'='*60}")
+        print(f"📦 Loading checkpoint from: {checkpoint_path}")
+        print(f"{'='*60}")
+
+        if not os.path.exists(checkpoint_path):
+            print(f"❌ Checkpoint not found: {checkpoint_path}")
+            print(f"   Starting training from scratch...")
+            return
+
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+
+            # Load model state
+            if self.use_multi_gpu:
+                self.net.module.load_state_dict(checkpoint['model_state_dict'])
+            else:
+                self.net.load_state_dict(checkpoint['model_state_dict'])
+
+            # Load optimizer state
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+            # Load metrics
+            if 'iou' in checkpoint:
+                self.best_iou = checkpoint['iou']
+                print(f"✅ Loaded best Seg IoU: {self.best_iou:.4f}")
+
+            if 'box_iou' in checkpoint:
+                self.best_box_iou = checkpoint['box_iou']
+                print(f"✅ Loaded best Box IoU: {self.best_box_iou:.4f}")
+
+            if 'epoch' in checkpoint:
+                self.args.start_epoch = checkpoint['epoch'] + 1
+                print(f"✅ Resuming from epoch: {self.args.start_epoch}")
+
+            print(f"{'='*60}\n")
+
+        except Exception as e:
+            print(f"❌ Failed to load checkpoint: {e}")
+            print(f"   Starting training from scratch...")
 
     def training(self, epoch):
         """Training loop for one epoch."""
