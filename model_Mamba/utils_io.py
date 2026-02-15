@@ -212,8 +212,25 @@ def save_best_model(model, optimizer, epoch, iou, save_dir, use_multi_gpu=False,
         print(f"✅ Created directory: {abs_save_dir}")
 
     # [NEW] Delete previous best_model_epoch*.pth files to save disk space
+    # FIXED 2026-02-15: Only delete models of the SAME type (IoU or BoxIoU)
+    # This allows keeping BOTH best IoU model AND best BoxIoU model simultaneously
     import glob
-    old_best_models = glob.glob(os.path.join(abs_save_dir, 'best_model_epoch*.pth'))
+
+    all_best_models = glob.glob(os.path.join(abs_save_dir, 'best_model_epoch*.pth'))
+    old_best_models = []
+
+    for model_path in all_best_models:
+        basename = os.path.basename(model_path)
+        # Check which metric appears first in filename to determine model type
+        if save_reason == 'BoxIoU':
+            # Delete old BoxIoU models (BoxIoU appears before IoU in filename)
+            if '_BoxIoU' in basename and basename.index('_BoxIoU') < basename.index('_IoU'):
+                old_best_models.append(model_path)
+        else:
+            # Delete old Seg IoU models (IoU appears before BoxIoU in filename)
+            if '_IoU' in basename and ('_BoxIoU' not in basename or basename.index('_IoU') < basename.index('_BoxIoU')):
+                old_best_models.append(model_path)
+
     for old_model in old_best_models:
         try:
             os.remove(old_model)

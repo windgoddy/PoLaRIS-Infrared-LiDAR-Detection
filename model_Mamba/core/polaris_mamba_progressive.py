@@ -384,6 +384,7 @@ class PoLaRIS_Mamba_Progressive(nn.Module):
         # Initialize weights
         self.apply(self._init_weights)
         self._init_prediction_heads()
+        self._init_patch_embed_for_pseudo_rgb()  # 新增：修复3通道伪RGB的初始化
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -397,6 +398,37 @@ class PoLaRIS_Mamba_Progressive(nn.Module):
         elif isinstance(m, (nn.LayerNorm, nn.BatchNorm2d)):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
+
+    def _init_patch_embed_for_pseudo_rgb(self):
+        """
+        特殊初始化：针对3通道伪RGB输入（3个通道完全相同）
+
+        问题：当3个通道相同时，标准的kaiming初始化可能导致：
+        - 每个output channel接收3倍的输入能量
+        - 权重标准差从 sqrt(2/4)=0.707 降到 sqrt(2/12)=0.408
+
+        解决：让3个input channel的权重初始化为相同值，且缩放为1/sqrt(3)
+        这样当输入3个相同通道时，效果等同于单通道输入的sqrt(3)倍
+        """
+        if hasattr(self, 'patch_embed') and hasattr(self.patch_embed, 'proj'):
+            conv = self.patch_embed.proj
+            if conv.in_channels == 3:
+                # 重新初始化为"平均权重"模式
+                with torch.no_grad():
+                    # 先用kaiming初始化第一个通道
+                    weight_ch0 = torch.empty_like(conv.weight[:, 0:1, :, :])
+                    nn.init.kaiming_normal_(weight_ch0, mode='fan_out', nonlinearity='relu')
+
+                    # 其余两个通道复制第一个通道的权重
+                    # 然后整体除以sqrt(3)以保持能量一致
+                    for i in range(3):
+                        conv.weight[:, i:i+1, :, :].copy_(weight_ch0)
+                    conv.weight.mul_(1.0 / (3 ** 0.5))
+
+                print(f"✅ PatchEmbed初始化已针对3通道伪RGB优化")
+                print(f"   - Conv2d({conv.in_channels}, {conv.out_channels}, {conv.kernel_size})")
+                print(f"   - 权重shape: {conv.weight.shape}")
+                print(f"   - 3个input channel使用相同初始权重（缩放1/sqrt(3)）")
 
     def _init_prediction_heads(self):
         """Initialize prediction head biases."""
