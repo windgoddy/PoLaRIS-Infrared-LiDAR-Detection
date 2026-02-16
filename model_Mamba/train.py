@@ -206,6 +206,18 @@ def parse_args():
     parser.add_argument('--resume', type=str, default=None,
                         help='Path to checkpoint to resume training from (e.g., result/xxx/best_model.pth)')
 
+    # [NEW 2026-02-16] Scene-weighted loss
+    parser.add_argument('--use_scene_weights', type=str, default='False',
+                        help='Enable scene-weighted loss (True/False)')
+    parser.add_argument('--scene_weight_cat0', type=float, default=1.0,
+                        help='Loss weight for category 0 (unclassified)')
+    parser.add_argument('--scene_weight_cat1', type=float, default=1.0,
+                        help='Loss weight for category 1 (moderate scenes)')
+    parser.add_argument('--scene_weight_cat2', type=float, default=1.0,
+                        help='Loss weight for category 2 (small targets)')
+    parser.add_argument('--scene_weight_cat3', type=float, default=2.0,
+                        help='Loss weight for category 3 (coastal scenes, default 2.0 to prioritize difficult scenes)')
+
     # Evaluation
     parser.add_argument('--peak_threshold', type=float, default=0.35,
                         help='Threshold for binary segmentation (optimized from training observations)')
@@ -245,6 +257,31 @@ class MambaDataset(Dataset):
         self.downscale = downscale
         self.img_ids = base_loader._items
         self.use_polaris_loader = use_polaris_loader
+
+        # [NEW 2026-02-16] Load category mapping for scene-weighted loss
+        self.category_map = self._load_category_mapping(dataset_dir)
+
+    def _load_category_mapping(self, dataset_dir):
+        """Load category mapping from selection_summary_new.txt"""
+        category_file = os.path.join(dataset_dir, 'selection_summary_new.txt')
+        category_map = {}
+
+        if os.path.exists(category_file):
+            with open(category_file, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if '|' in line:
+                        parts = line.split('|')
+                        if len(parts) == 2:
+                            img_id = parts[0].strip().replace('.png', '')
+                            category = int(parts[1].strip())
+                            category_map[img_id] = category
+            print(f"✅ Loaded {len(category_map)} category mappings from {category_file}")
+        else:
+            print(f"⚠️  Category file not found: {category_file}")
+            print(f"   Scene-weighted loss will use default weight 1.0 for all samples")
+
+        return category_map
 
     def __len__(self):
         return len(self.base_loader)
@@ -297,11 +334,15 @@ class MambaDataset(Dataset):
         # Keep variable name 'heatmap' for compatibility with rest of code
         heatmap = torch.from_numpy(mask).unsqueeze(0).float()  # (1, H, W), values in {0, 1}
 
+        # [NEW 2026-02-16] Get category for scene-weighted loss
+        category = self.category_map.get(img_id, 0)  # Default to category 0 if not found
+
         return {
             'ir_img': ir_img,
             'lidar_img': lidar_img,
             'heatmap': heatmap,
             'img_id': img_id,
+            'category': category,  # Scene category for weighted loss
         }
 
 
@@ -498,6 +539,18 @@ class Trainer:
         )
         self.use_calib_loss = False
 
+        # [NEW 2026-02-16] Scene-weighted loss configuration
+        self.use_scene_weights = (args.use_scene_weights == 'True')
+        if self.use_scene_weights:
+            self.scene_weights = {
+                0: args.scene_weight_cat0,
+                1: args.scene_weight_cat1,
+                2: args.scene_weight_cat2,
+                3: args.scene_weight_cat3,
+            }
+        else:
+            self.scene_weights = {0: 1.0, 1: 1.0, 2: 1.0, 3: 1.0}
+
         print(f"\n{'='*70}")
         print(f"Loss Configuration")
         print(f"{'='*70}")
@@ -512,6 +565,11 @@ class Trainer:
             print(f"  - Projection mode: {args.projection_mode} (max=sensitive, mean=smooth)")
         if args.ohem_ratio > 0:
             print(f"  - OHEM ratio: {args.ohem_ratio} (hard example mining)")
+        if self.use_scene_weights:
+            print(f"  - Scene Weights: Cat0={self.scene_weights[0]:.1f}, "
+                  f"Cat1={self.scene_weights[1]:.1f}, "
+                  f"Cat2={self.scene_weights[2]:.1f}, "
+                  f"Cat3={self.scene_weights[3]:.1f} (coastal scenes)")
         print(f"{'='*70}\n")
         print("   - MaxPool LiDAR + Skip Connection: Preserves small target features")
         print("   - Target: Threshold 0.3-0.5, Precision 70%+, IoU 35%+ by epoch 50")
@@ -628,6 +686,7 @@ class Trainer:
             ir_img = batch['ir_img'].to(self.device)
             lidar_img = batch['lidar_img'].to(self.device)
             heatmap_gt = batch['heatmap'].to(self.device)
+            categories = batch['category']  # [NEW 2026-02-16] Get scene categories
 
             # Forward
             output = self.net(ir_img, lidar_img)
@@ -654,6 +713,17 @@ class Trainer:
                 # Standard mode: single output
                 heatmap_pred = output
                 loss = self.criterion(heatmap_pred, heatmap_gt)
+
+            # [NEW 2026-02-16] Apply scene-weighted loss
+            if self.use_scene_weights:
+                # Calculate per-sample weights based on category
+                sample_weights = torch.tensor(
+                    [self.scene_weights[int(cat)] for cat in categories],
+                    device=self.device, dtype=torch.float32
+                )
+                # Apply weights: loss is averaged across batch, so we multiply by weights
+                # and re-normalize by mean weight to maintain loss scale
+                loss = (loss * sample_weights.mean()).mean() if loss.dim() > 0 else loss * sample_weights.mean()
 
             # Backward
             self.optimizer.zero_grad()

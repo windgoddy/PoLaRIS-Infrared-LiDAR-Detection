@@ -62,6 +62,14 @@
 #     Pohang-Canal-3k - 浦项运河数据集（默认，支持LiDAR）
 #     NUDT-SIRST      - NUDT红外小目标数据集（仅支持IR-only模式，8bit）
 #
+#   use_scene_weights选项（可选，第12个参数）：
+#     True        - 启用场景加权损失（针对性提升困难场景，如Category 3海岸场景）
+#     False       - 不启用场景加权（默认）
+#
+#   scene_weight_cat3选项（可选，第13个参数）：
+#     数值        - Category 3（海岸场景）的损失权重（默认: 2.0）
+#                   建议范围: 1.5-2.0，更高的权重会让模型更关注海岸场景
+#
 #   示例：
 #     bash model_Mamba/scripts/train_multiscale_full.sh                                      # LiDAR，自动GPU，默认模型，16bit，polaris loader
 #     bash model_Mamba/scripts/train_multiscale_full.sh rgb_lidar auto mamba_tiny_progressive 16 polaris minmax False 2.5 2.0  # ⭐推荐：RGB+LiDAR模式，全面超越DNANet
@@ -78,6 +86,8 @@
 #     bash model_Mamba/scripts/train_multiscale_full.sh lidar 1 mamba_base 8                 # LiDAR，GPU 1，大模型，8bit
 #     bash model_Mamba/scripts/train_multiscale_full.sh ir_only_rgb auto mamba_tiny_progressive 8 traditional minmax False 2.5 2.0 NUDT-SIRST  # NUDT-SIRST数据集（RGB模式）
 #     bash model_Mamba/scripts/train_multiscale_full.sh ir_only auto mamba_tiny_progressive 8 traditional minmax False 2.5 2.0 NUDT-SIRST     # NUDT-SIRST数据集（IR-only模式）
+#     bash model_Mamba/scripts/train_multiscale_full.sh rgb_lidar auto mamba_tiny_progressive 16 polaris minmax False 2.5 2.0 "" Pohang-Canal-3k True 2.0  # ⭐场景加权：优先训练海岸场景（Cat3权重2.0）
+#     bash model_Mamba/scripts/train_multiscale_full.sh lidar auto mamba_tiny_progressive 16 polaris minmax False 2.5 2.0 result/xxx/best_model.pth Pohang-Canal-3k True 1.8  # Resume+场景加权（Cat3权重1.8）
 #
 #   示例：
 #       python model_Mamba/train.py \
@@ -231,6 +241,9 @@ esac
 
 # 数据配置 - 支持通过第11个参数指定数据集
 DATASET="${11:-Pohang-Canal-3k}"
+USE_SCENE_WEIGHTS="${12:-False}"  # 场景加权损失：True 或 False（默认False）
+SCENE_WEIGHT_CAT3="${13:-2.0}"    # Category 3（海岸场景）权重（默认2.0）
+
 BASE_SIZE=256
 CROP_SIZE=256
 
@@ -318,6 +331,13 @@ fi
 if [ -n "$CUSTOM_PROJECTION_WEIGHT" ]; then
     PROJECTION_WEIGHT="$CUSTOM_PROJECTION_WEIGHT"
     echo "✓ 使用自定义 Projection Weight: $PROJECTION_WEIGHT"
+fi
+
+# 场景加权配置输出
+if [ "$USE_SCENE_WEIGHTS" == "True" ]; then
+    echo "✓ 启用场景加权损失（Scene-Weighted Loss）"
+    echo "  - Category 3 (海岸场景) 权重: $SCENE_WEIGHT_CAT3"
+    echo "  - 策略: 优先训练困难场景，提升Category 3性能"
 fi
 
 # 模型大小信息（用于显示和命名）
@@ -486,6 +506,8 @@ for GPU_ID in $GPU_LIST; do
             --loss_type "$LOSS_TYPE" \
             --dice_weight $DICE_WEIGHT \
             --projection_weight $PROJECTION_WEIGHT \
+            --use_scene_weights "$USE_SCENE_WEIGHTS" \
+            --scene_weight_cat3 $SCENE_WEIGHT_CAT3 \
             --save_dir "$SAVE_DIR" \
             --gpus "0" \
             --workers 4 \
