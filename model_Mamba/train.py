@@ -692,38 +692,68 @@ class Trainer:
             output = self.net(ir_img, lidar_img)
 
             # [NEW] Loss calculation with Deep Supervision support
-            if isinstance(output, list):
-                # Deep Supervision: output = [main_pred, aux_pred_s2, aux_pred_s3]
-                heatmap_pred = output[0]  # Main prediction
-                loss_main = self.criterion(heatmap_pred, heatmap_gt)
-                loss_aux2 = self.criterion(output[1], heatmap_gt)
-                loss_aux3 = self.criterion(output[2], heatmap_gt)
-
-                # Weighted combination: main=60%, aux2=25%, aux3=15%
-                loss = loss_main + 0.5 * loss_aux2 + 0.4 * loss_aux3
-
-                # Debug: Print deep supervision loss breakdown (every 100 batches)
-                if (i + 1) % 100 == 0 or (i + 1) == total_batches:
-                    print(f"\n[Epoch {epoch}] Deep Supervision Loss (batch {i+1}/{total_batches}):")
-                    print(f"  Main Loss:  {loss_main.item():.4f}")
-                    print(f"  Aux2 Loss:  {loss_aux2.item():.4f} (weight: 0.5)")
-                    print(f"  Aux3 Loss:  {loss_aux3.item():.4f} (weight: 0.4)")
-                    print(f"  Total Loss: {loss.item():.4f}")
-            else:
-                # Standard mode: single output
-                heatmap_pred = output
-                loss = self.criterion(heatmap_pred, heatmap_gt)
-
-            # [NEW 2026-02-16] Apply scene-weighted loss
+            # [FIXED 2026-02-20] Properly handle scene-weighted loss
             if self.use_scene_weights:
-                # Calculate per-sample weights based on category
+                # Per-sample loss calculation for proper weighting
                 sample_weights = torch.tensor(
                     [self.scene_weights[int(cat)] for cat in categories],
                     device=self.device, dtype=torch.float32
                 )
-                # Apply weights: loss is averaged across batch, so we multiply by weights
-                # and re-normalize by mean weight to maintain loss scale
-                loss = (loss * sample_weights.mean()).mean() if loss.dim() > 0 else loss * sample_weights.mean()
+
+                batch_size = heatmap_gt.size(0)
+                weighted_losses = []
+
+                for idx in range(batch_size):
+                    if isinstance(output, list):
+                        # Deep Supervision: output = [main_pred, aux_pred_s2, aux_pred_s3]
+                        sample_loss_main = self.criterion(output[0][idx:idx+1], heatmap_gt[idx:idx+1])
+                        sample_loss_aux2 = self.criterion(output[1][idx:idx+1], heatmap_gt[idx:idx+1])
+                        sample_loss_aux3 = self.criterion(output[2][idx:idx+1], heatmap_gt[idx:idx+1])
+                        sample_loss = sample_loss_main + 0.5 * sample_loss_aux2 + 0.4 * sample_loss_aux3
+                    else:
+                        # Standard mode: single output
+                        sample_loss = self.criterion(output[idx:idx+1], heatmap_gt[idx:idx+1])
+
+                    # Apply scene weight to this sample
+                    weighted_loss = sample_loss * sample_weights[idx]
+                    weighted_losses.append(weighted_loss)
+
+                # Average weighted losses
+                loss = torch.stack(weighted_losses).mean()
+
+                # Debug: Print scene-weighted loss breakdown (every 100 batches)
+                if (i + 1) % 100 == 0 or (i + 1) == total_batches:
+                    print(f"\n[Epoch {epoch}] Scene-Weighted Loss (batch {i+1}/{total_batches}):")
+                    cat_counts = {}
+                    for cat in categories:
+                        cat_id = int(cat)
+                        cat_counts[cat_id] = cat_counts.get(cat_id, 0) + 1
+                    for cat_id, count in sorted(cat_counts.items()):
+                        print(f"  Cat{cat_id}: {count} samples, weight={self.scene_weights[cat_id]:.2f}")
+                    print(f"  Weighted Loss: {loss.item():.4f}")
+            else:
+                # Standard loss calculation (no scene weighting)
+                if isinstance(output, list):
+                    # Deep Supervision: output = [main_pred, aux_pred_s2, aux_pred_s3]
+                    heatmap_pred = output[0]  # Main prediction
+                    loss_main = self.criterion(heatmap_pred, heatmap_gt)
+                    loss_aux2 = self.criterion(output[1], heatmap_gt)
+                    loss_aux3 = self.criterion(output[2], heatmap_gt)
+
+                    # Weighted combination: main=60%, aux2=25%, aux3=15%
+                    loss = loss_main + 0.5 * loss_aux2 + 0.4 * loss_aux3
+
+                    # Debug: Print deep supervision loss breakdown (every 100 batches)
+                    if (i + 1) % 100 == 0 or (i + 1) == total_batches:
+                        print(f"\n[Epoch {epoch}] Deep Supervision Loss (batch {i+1}/{total_batches}):")
+                        print(f"  Main Loss:  {loss_main.item():.4f}")
+                        print(f"  Aux2 Loss:  {loss_aux2.item():.4f} (weight: 0.5)")
+                        print(f"  Aux3 Loss:  {loss_aux3.item():.4f} (weight: 0.4)")
+                        print(f"  Total Loss: {loss.item():.4f}")
+                else:
+                    # Standard mode: single output
+                    heatmap_pred = output
+                    loss = self.criterion(heatmap_pred, heatmap_gt)
 
             # Backward
             self.optimizer.zero_grad()

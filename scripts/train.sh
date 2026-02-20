@@ -113,10 +113,10 @@ case $MODE in
             --seed 42 \
             --thres $THRESHOLD \
             --suffix .png \
-            --split_method 50_50_2k_new \
+            --split_method 50_50_2k \
             --workers 4
         ;;
-    
+
     baseline2)
         echo "🔹 Baseline: MS_CAFNet_DualGeo + 8-bit images"
         python train.py \

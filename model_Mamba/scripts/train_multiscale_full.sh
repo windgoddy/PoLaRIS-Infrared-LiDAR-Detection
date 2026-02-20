@@ -260,7 +260,7 @@ if [ "$DATASET" == "NUDT-SIRST" ]; then
         exit 1
     fi
 elif [ "$DATASET" == "Pohang-Canal-3k" ]; then
-    SPLIT_METHOD="50_50_2k_new"
+    SPLIT_METHOD="50_50_2k"
     # Pohang-Canal-3k有独立的images-8bit文件夹
     if [ "$BIT_DEPTH" == "8" ]; then
         IMAGE_FOLDER="images-8bit"

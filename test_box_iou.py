@@ -183,10 +183,13 @@ def load_category_mapping(dataset_root, dataset_name):
         category_map: dict {img_id: category}
         category_names: dict {category: description}
     """
-    category_file = os.path.join(dataset_root, dataset_name, 'select-view', 'selection_summary_new.txt')
+    # Try both possible locations
+    category_file = os.path.join(dataset_root, dataset_name, 'selection_summary_new.txt')
+    if not os.path.exists(category_file):
+        category_file = os.path.join(dataset_root, dataset_name, 'select-view', 'selection_summary_new.txt')
 
     if not os.path.exists(category_file):
-        print(f"  ⚠️  类别文件不存在: {category_file}")
+        print(f"  ⚠️  类别文件不存在: {os.path.join(dataset_root, dataset_name, 'selection_summary_new.txt')}")
         print(f"  → 跳过类别分析")
         return None, None
 
@@ -322,8 +325,10 @@ def detect_model_params(state_dict, model_type):
                 params['data_in_channels'] = 2  # IR + Depth
                 print(f"  ℹ️  检测到 LiDAR gating → 数据加载器需要 2 通道 (IR + Depth)")
             else:
-                params['data_in_channels'] = 1  # IR only
-                print(f"  ℹ️  未检测到 LiDAR gating → 数据加载器只需 1 通道 (IR)")
+                # IR-only: model receives 1-channel IR (MambaDataset extracts img[0:1,:,:])
+                # DO NOT set data_in_channels here - let train_log.txt's in_channels control
+                # the DataLoader (e.g., in_channels=3 → ImageNet normalization, same as training)
+                print(f"  ℹ️  未检测到 LiDAR gating → 模型接收 1 通道 IR (DataLoader 通道数由 train_log 决定)")
 
     return params
 
@@ -660,12 +665,17 @@ def test_model(model, test_loader, use_lidar_loader, threshold, device, apply_si
                 print(f"  - 标签正样本比例: {(labels > 0.5).float().mean().item():.4f}")
 
             if model_type.startswith('mamba'):
-                if data.shape[1] >= 2:
+                if use_lidar_loader and data.shape[1] == 2:
                     ir = data[:, 0:1]
                     lidar = data[:, 1:2]
+                elif data.shape[1] > 1:
+                    # Multi-channel (e.g., 3-ch RGB): take first channel only
+                    # Matches MambaDataset.__getitem__: ir_img = img[0:1, :, :]
+                    ir = data[:, 0:1]
+                    lidar = None
                 else:
-                    ir = data
-                    lidar = torch.zeros_like(ir)
+                    ir = data  # Already 1-channel
+                    lidar = None
                 pred = model(ir, lidar)
             else:
                 pred = model(data)
@@ -1052,9 +1062,15 @@ def main():
 
     force_lidar = False
     if args.model.startswith('mamba'):
-        args.use_lidar_dataloader = 'True'
-        args.normalize_16bit = 'True'
-        force_lidar = True
+        if detected_params.get('use_lidar', False):
+            # Model has LiDAR gate → force LiDAR dataloader + 16-bit normalization
+            args.use_lidar_dataloader = 'True'
+            args.normalize_16bit = 'True'
+            force_lidar = True
+            print("  ✓ 检测到 LiDAR gating → 强制使用 PoLaRIS LiDAR DataLoader + 16-bit 归一化")
+        else:
+            # IR-only Mamba: use settings from train_log.txt, no LiDAR forcing
+            print(f"  ✓ IR-only Mamba → 使用传统 DataLoader (use_lidar={args.use_lidar_dataloader}, normalize_16bit={args.normalize_16bit})")
 
     # Set model-specific default input sizes if not explicitly provided
     if args.base_size is None or args.crop_size is None:
