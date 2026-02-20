@@ -44,7 +44,7 @@ class PoLaRISTrainLoader(Dataset):
     NUM_CLASS = 1
 
     def __init__(self, dataset_dir, img_id=None, base_size=512, crop_size=480,
-                 transform=None, suffix='.png', normalize_16bit=True, normalize_mode='minmax', 
+                 transform=None, suffix='.png', normalize_16bit=True, normalize_mode='minmax',
                  in_channels=1, image_folder='images', oracle_masks_folder='oracle_masks'):
         """
         Args:
@@ -59,12 +59,12 @@ class PoLaRISTrainLoader(Dataset):
 
         self.transform = transform
         self.images = os.path.join(dataset_dir, image_folder)
-        
+
         # Auto-scan images directory if img_id not provided
         if img_id is None:
             img_id = get_img_ids_from_dir(self.images, suffix)
             print(f"[PoLaRISTrainLoader] Auto-scanned {len(img_id)} images from {self.images}")
-        
+
         # Normalize all item ids to strings to avoid type errors when building paths
         self._items = [str(i) for i in img_id]
         self.masks = os.path.join(dataset_dir, 'masks')
@@ -74,15 +74,37 @@ class PoLaRISTrainLoader(Dataset):
         self.base_size = base_size
         self.crop_size = crop_size
         self.suffix = suffix
-        
+
         # Handle normalize_16bit as bool or string
         if isinstance(normalize_16bit, str):
             self.normalize_16bit = (normalize_16bit.lower() == 'true')
         else:
             self.normalize_16bit = normalize_16bit
-        
+
         self.normalize_mode = normalize_mode
         self.in_channels = in_channels
+
+        # [NEW 2026-02-20] Load category mapping for scene-weighted loss
+        self.category_map = {}
+        category_file = os.path.join(dataset_dir, 'selection_summary_new.txt')
+        if not os.path.exists(category_file):
+            category_file = os.path.join(dataset_dir, 'select-view', 'selection_summary_new.txt')
+
+        if os.path.exists(category_file):
+            with open(category_file, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    parts = line.split('|')
+                    if len(parts) >= 2:
+                        img_name = parts[0].strip().replace('.png', '')
+                        category = int(parts[1].strip())
+                        self.category_map[img_name] = category
+            print(f"  - Loaded {len(self.category_map)} category mappings from {category_file}")
+        else:
+            print(f"  ⚠️  Category file not found: {category_file}")
+            print(f"  → All samples will default to Cat0 (unclassified)")
 
         print(f"[PoLaRISTrainLoader] Initialized with {len(self._items)} samples")
         print(f"  - Images: {self.images}")
@@ -359,6 +381,9 @@ class PoLaRISTrainLoader(Dataset):
         # Convert LiDAR to tensor
         lidar_tensor = torch.from_numpy(lidar_points).float()  # (N, 4)
 
+        # [NEW 2026-02-20] Get category for scene-weighted loss
+        category = self.category_map.get(img_id, 0)  # Default to Cat0 if not found
+
         return {
             'image': img_tensor,  # (1, H, W) or (2, H, W) depending on in_channels
             'mask': torch.from_numpy(mask_hard).float(),  # (1, H, W) - Hard GT for evaluation
@@ -367,7 +392,8 @@ class PoLaRISTrainLoader(Dataset):
             'oracle_mask': torch.from_numpy(mask_soft).float(),  # (1, H, W) - Backward compatibility
             'lidar': lidar_tensor,  # (N, 4)
             'img_id': img_id,
-            'is_16bit': is_16bit
+            'is_16bit': is_16bit,
+            'category': category  # [NEW] Scene category for weighted loss
         }
 
     def __len__(self):
@@ -388,12 +414,12 @@ class PoLaRISTestLoader(Dataset):
 
         self.transform = transform
         self.images = os.path.join(dataset_dir, image_folder)
-        
+
         # Auto-scan images directory if img_id not provided
         if img_id is None:
             img_id = get_img_ids_from_dir(self.images, suffix)
             print(f"[PoLaRISTestLoader] Auto-scanned {len(img_id)} images from {self.images}")
-        
+
         # Normalize all item ids to strings to avoid type errors when building paths
         self._items = [str(i) for i in img_id]
         self.masks = os.path.join(dataset_dir, 'masks')
@@ -402,15 +428,36 @@ class PoLaRISTestLoader(Dataset):
         self.base_size = base_size
         self.crop_size = crop_size
         self.suffix = suffix
-        
+
         # Handle normalize_16bit as bool or string
         if isinstance(normalize_16bit, str):
             self.normalize_16bit = (normalize_16bit.lower() == 'true')
         else:
             self.normalize_16bit = normalize_16bit
-        
+
         self.normalize_mode = normalize_mode
         self.in_channels = in_channels
+
+        # [NEW 2026-02-20] Load category mapping for per-category evaluation
+        self.category_map = {}
+        category_file = os.path.join(dataset_dir, 'selection_summary_new.txt')
+        if not os.path.exists(category_file):
+            category_file = os.path.join(dataset_dir, 'select-view', 'selection_summary_new.txt')
+
+        if os.path.exists(category_file):
+            with open(category_file, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    parts = line.split('|')
+                    if len(parts) >= 2:
+                        img_name = parts[0].strip().replace('.png', '')
+                        category = int(parts[1].strip())
+                        self.category_map[img_name] = category
+            print(f"  - Loaded {len(self.category_map)} category mappings")
+        else:
+            print(f"  ⚠️  Category file not found, per-category metrics unavailable")
 
         print(f"[PoLaRISTestLoader] Initialized with {len(self._items)} samples")
         print(f"  - Input channels: {in_channels}")
@@ -555,12 +602,16 @@ class PoLaRISTestLoader(Dataset):
         mask = np.expand_dims(mask / 255.0, axis=0)
         lidar_tensor = torch.from_numpy(lidar_points).float()
 
+        # [NEW 2026-02-20] Get category for per-category evaluation
+        category = self.category_map.get(img_id, 0)  # Default to Cat0 if not found
+
         return {
             'image': img_tensor,
             'mask': torch.from_numpy(mask).float(),
             'lidar': lidar_tensor,
             'img_id': img_id,
-            'is_16bit': is_16bit
+            'is_16bit': is_16bit,
+            'category': category  # [NEW] Scene category for per-category metrics
         }
 
     def __len__(self):
@@ -663,6 +714,7 @@ def polaris_collate_fn(batch):
         - lidar: List[Tensor] - variable-length point clouds
         - img_id: List[str] - image IDs
         - is_16bit: List[bool] - 16-bit flags
+        - category: List[int] - scene categories (Cat0/1/2/3)
     """
     # Stack fixed-size tensors
     images = torch.stack([item['image'] for item in batch])
@@ -673,13 +725,17 @@ def polaris_collate_fn(batch):
     img_id = [item['img_id'] for item in batch]
     is_16bit = [item['is_16bit'] for item in batch]
 
+    # [NEW 2026-02-20] Add category support for scene-weighted loss
+    category = [item.get('category', 0) for item in batch]  # Default to Cat0 if not present
+
     # Build return dict
     result = {
         'image': images,
         'mask': masks,
         'lidar': lidar,
         'img_id': img_id,
-        'is_16bit': is_16bit
+        'is_16bit': is_16bit,
+        'category': category  # [NEW] Scene categories
     }
 
     # Add optional fields if present (training mode)
