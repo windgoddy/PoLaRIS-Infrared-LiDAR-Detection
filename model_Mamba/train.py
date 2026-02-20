@@ -725,15 +725,16 @@ class Trainer:
                 loss = torch.stack(weighted_losses).mean()
 
                 # Debug: Print scene-weighted loss breakdown (every 100 batches)
-                if (i + 1) % 100 == 0 or (i + 1) == total_batches:
-                    print(f"\n[Epoch {epoch}] Scene-Weighted Loss (batch {i+1}/{total_batches}):")
-                    cat_counts = {}
-                    for cat in categories:
-                        cat_id = int(cat)
-                        cat_counts[cat_id] = cat_counts.get(cat_id, 0) + 1
-                    for cat_id, count in sorted(cat_counts.items()):
-                        print(f"  Cat{cat_id}: {count} samples, weight={self.scene_weights[cat_id]:.2f}")
-                    print(f"  Weighted Loss: {loss.item():.4f}")
+                # [COMMENTED 2026-02-20] Verified working, disable to reduce log verbosity
+                # if (i + 1) % 100 == 0 or (i + 1) == total_batches:
+                #     print(f"\n[Epoch {epoch}] Scene-Weighted Loss (batch {i+1}/{total_batches}):")
+                #     cat_counts = {}
+                #     for cat in categories:
+                #         cat_id = int(cat)
+                #         cat_counts[cat_id] = cat_counts.get(cat_id, 0) + 1
+                #     for cat_id, count in sorted(cat_counts.items()):
+                #         print(f"  Cat{cat_id}: {count} samples, weight={self.scene_weights[cat_id]:.2f}")
+                #     print(f"  Weighted Loss: {loss.item():.4f}")
             else:
                 # Standard loss calculation (no scene weighting)
                 if isinstance(output, list):

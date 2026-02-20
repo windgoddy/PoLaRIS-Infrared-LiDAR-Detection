@@ -66,9 +66,17 @@
 #     True        - 启用场景加权损失（针对性提升困难场景，如Category 3海岸场景）
 #     False       - 不启用场景加权（默认）
 #
-#   scene_weight_cat3选项（可选，第13个参数）：
-#     数值        - Category 3（海岸场景）的损失权重（默认: 2.0）
-#                   建议范围: 1.5-2.0，更高的权重会让模型更关注海岸场景
+#   scene_weight_cat0-3选项（可选，第13-16个参数）：
+#     cat0 数值   - Category 0（未分类）权重（默认: 1.0）
+#     cat1 数值   - Category 1（适中场景）权重（默认: 1.5，新数据集推荐）
+#     cat2 数值   - Category 2（小目标/多数类）权重（默认: 0.8，降低多数类影响）
+#     cat3 数值   - Category 3（海岸场景）权重（默认: 2.5，重点优化）
+#     说明: 新数据集50_50_2k中Cat2为多数类，建议使用(1.0,1.5,0.8,2.5)避免过拟合
+#
+#   split_method选项（可选，第17个参数）：
+#     split_method - 数据集划分方法（默认: 50_50_2k for Pohang-Canal-3k, 50_50 for NUDT-SIRST）
+#                    常用值: 50_50_2k（新数据集，Cat2多数类）, 50_50_2k_new（旧数据集，原始分布）
+#                    说明: 显式指定数据集划分，避免手动修改脚本
 #
 #   示例：
 #     bash model_Mamba/scripts/train_multiscale_full.sh                                      # LiDAR，自动GPU，默认模型，16bit，polaris loader
@@ -88,6 +96,8 @@
 #     bash model_Mamba/scripts/train_multiscale_full.sh ir_only auto mamba_tiny_progressive 8 traditional minmax False 2.5 2.0 NUDT-SIRST     # NUDT-SIRST数据集（IR-only模式）
 #     bash model_Mamba/scripts/train_multiscale_full.sh rgb_lidar auto mamba_tiny_progressive 16 polaris minmax False 2.5 2.0 "" Pohang-Canal-3k True 2.0  # ⭐场景加权：优先训练海岸场景（Cat3权重2.0）
 #     bash model_Mamba/scripts/train_multiscale_full.sh lidar auto mamba_tiny_progressive 16 polaris minmax False 2.5 2.0 result/xxx/best_model.pth Pohang-Canal-3k True 1.8  # Resume+场景加权（Cat3权重1.8）
+#     bash model_Mamba/scripts/train_multiscale_full.sh rgb_lidar auto mamba_tiny_progressive 16 polaris minmax False 2.5 2.0 "" Pohang-Canal-3k True 1.0 1.5 0.8 2.5 50_50_2k  # ⭐新数据集：Cat2多数类，降权训练
+#     bash model_Mamba/scripts/train_multiscale_full.sh rgb_lidar auto mamba_tiny_progressive 16 polaris minmax False 2.5 2.0 "" Pohang-Canal-3k True 1.0 1.0 1.0 2.5 50_50_2k_new  # 旧数据集：原始分布
 #
 #   示例：
 #       python model_Mamba/train.py \
@@ -242,7 +252,16 @@ esac
 # 数据配置 - 支持通过第11个参数指定数据集
 DATASET="${11:-Pohang-Canal-3k}"
 USE_SCENE_WEIGHTS="${12:-False}"  # 场景加权损失：True 或 False（默认False）
-SCENE_WEIGHT_CAT3="${13:-2.0}"    # Category 3（海岸场景）权重（默认2.0）
+
+# [NEW 2026-02-20] 场景加权配置 - 适应新数据集50_50_2k（Cat2多数类）
+# 方案1（推荐）：降低多数类Cat2权重，提升Cat1/Cat3权重
+SCENE_WEIGHT_CAT0="${13:-1.0}"    # Category 0（未分类）权重（默认1.0）
+SCENE_WEIGHT_CAT1="${14:-1.5}"    # Category 1（适中场景）权重（默认1.5，提升避免被压制）
+SCENE_WEIGHT_CAT2="${15:-0.8}"    # Category 2（小目标/多数类）权重（默认0.8，降低多数类影响）
+SCENE_WEIGHT_CAT3="${16:-2.5}"    # Category 3（海岸场景）权重（默认2.5，重点优化）
+
+# [NEW 2026-02-20] 数据集划分配置 - 支持通过命令行指定
+CUSTOM_SPLIT_METHOD="${17}"  # 可选：显式指定数据集划分（如 50_50_2k, 50_50_2k_new 等）
 
 BASE_SIZE=256
 CROP_SIZE=256
@@ -260,7 +279,7 @@ if [ "$DATASET" == "NUDT-SIRST" ]; then
         exit 1
     fi
 elif [ "$DATASET" == "Pohang-Canal-3k" ]; then
-    SPLIT_METHOD="50_50_2k_new"
+    SPLIT_METHOD="50_50_2k"
     # Pohang-Canal-3k有独立的images-8bit文件夹
     if [ "$BIT_DEPTH" == "8" ]; then
         IMAGE_FOLDER="images-8bit"
@@ -291,6 +310,12 @@ else
         echo "支持的位深度: 8 | 16"
         exit 1
     fi
+fi
+
+# [NEW 2026-02-20] 允许通过命令行参数覆盖 SPLIT_METHOD
+if [ -n "$CUSTOM_SPLIT_METHOD" ]; then
+    SPLIT_METHOD="$CUSTOM_SPLIT_METHOD"
+    echo "✓ 使用自定义数据集划分: $SPLIT_METHOD"
 fi
 
 # 根据loader类型设置参数（仅对lidar和rgb_lidar模式有效）
@@ -336,8 +361,11 @@ fi
 # 场景加权配置输出
 if [ "$USE_SCENE_WEIGHTS" == "True" ]; then
     echo "✓ 启用场景加权损失（Scene-Weighted Loss）"
+    echo "  - Category 0 (未分类) 权重: $SCENE_WEIGHT_CAT0"
+    echo "  - Category 1 (适中场景) 权重: $SCENE_WEIGHT_CAT1"
+    echo "  - Category 2 (小目标/多数类) 权重: $SCENE_WEIGHT_CAT2"
     echo "  - Category 3 (海岸场景) 权重: $SCENE_WEIGHT_CAT3"
-    echo "  - 策略: 优先训练困难场景，提升Category 3性能"
+    echo "  - 策略: 降低Cat2多数类权重($SCENE_WEIGHT_CAT2)，提升Cat3性能($SCENE_WEIGHT_CAT3)"
 fi
 
 # 模型大小信息（用于显示和命名）
@@ -507,6 +535,9 @@ for GPU_ID in $GPU_LIST; do
             --dice_weight $DICE_WEIGHT \
             --projection_weight $PROJECTION_WEIGHT \
             --use_scene_weights "$USE_SCENE_WEIGHTS" \
+            --scene_weight_cat0 $SCENE_WEIGHT_CAT0 \
+            --scene_weight_cat1 $SCENE_WEIGHT_CAT1 \
+            --scene_weight_cat2 $SCENE_WEIGHT_CAT2 \
             --scene_weight_cat3 $SCENE_WEIGHT_CAT3 \
             --save_dir "$SAVE_DIR" \
             --gpus "0" \
