@@ -264,6 +264,9 @@ class MambaDataset(Dataset):
     def _load_category_mapping(self, dataset_dir):
         """Load category mapping from selection_summary_new.txt"""
         category_file = os.path.join(dataset_dir, 'selection_summary_new.txt')
+        if not os.path.exists(category_file):
+            category_file = os.path.join(dataset_dir, 'select-view', 'selection_summary_new.txt')
+
         category_map = {}
 
         if os.path.exists(category_file):
