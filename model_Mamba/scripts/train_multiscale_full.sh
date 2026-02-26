@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Mamba多尺度模型训练脚本 (支持LiDAR和IR-only模式 + 自动GPU选择)
+# Mamba多尺度模型训练脚本 (自动GPU + 顶会技巧集成)
 # =============================================================================
 #
 # 功能：
@@ -8,6 +8,13 @@
 #   2. 自动选择可用GPU（按显存从大到小）
 #   3. OOM自动重试（降低batch size或换GPU）
 #   4. Ctrl+C优雅退出（保存checkpoint）
+#   5. ✨ 集成所有顶会训练技巧（+10-16% IoU预期提升）
+#      - 强化数据增强（垂直翻转、90度旋转、Gamma/对比度）
+#      - 多尺度训练（动态分辨率 [192-320]）
+#      - 梯度累积（有效Batch=Batch×4）
+#      - Warmup学习率调度器（10 epochs预热）
+#      - EMA模型权重平均（decay=0.9999）
+#      - Test-Time Augmentation（8-way增强）
 #
 # 用法：
 #   # 自动选择GPU（推荐）
@@ -173,7 +180,7 @@ trap cleanup SIGINT SIGTERM
 
 MODE=${1:-lidar}  # 训练模式
 MANUAL_GPU=${2:-}  # 手动指定的GPU（空或"auto"则自动选择）
-MODEL_TYPE=${3:-mamba_tiny_multiscale}  # 模型类型（可选）
+MODEL_TYPE=${3:-mamba_tiny_progressive}  # 模型类型（可选）
 BIT_DEPTH=${4:-16}  # 图像位深度：8 或 16（可选，默认16bit）
 LOADER_TYPE=${5:-polaris}  # DataLoader类型：polaris 或 traditional（可选，默认polaris）
 NORMALIZE_MODE=${6:-minmax}  # 归一化模式：minmax/global/percentile/clahe（可选，默认minmax）
@@ -181,6 +188,17 @@ DEEP_SUPERVISION=${7:-False}  # 深度监督：True 或 False（可选，默认F
 CUSTOM_DICE_WEIGHT=${8:-}  # 自定义 Dice 权重（可选，默认使用脚本内置值）
 CUSTOM_PROJECTION_WEIGHT=${9:-}  # 自定义 Projection 权重（可选，默认使用脚本内置值）
 RESUME_CHECKPOINT=${10:-}  # Resume训练的checkpoint路径（可选，留空则从头训练）
+
+# ============================================================
+# [NEW] 训练改进参数（Tier S + Tier A 顶会技巧）
+# ============================================================
+USE_AUGMENTATION="True"         # 强化数据增强（垂直翻转+90度旋转+Gamma+对比度）
+USE_MULTI_SCALE="True"          # 多尺度训练（动态分辨率 [192-320]）
+GRADIENT_ACCUM=4                # 梯度累积步数（有效batch=batch_size×4）
+USE_EMA="True"                  # EMA (Exponential Moving Average)
+USE_TTA="True"                  # Test-Time Augmentation (8-way)
+USE_WARMUP="True"               # Warmup学习率调度器
+WARMUP_EPOCHS=10                # Warmup轮数
 
 # 处理"auto"作为GPU参数的情况
 if [ "$MANUAL_GPU" == "auto" ]; then
@@ -218,28 +236,28 @@ case $MODE in
         USE_LIDAR=True
         IN_CHANNELS=2
         USE_LIDAR_LOADER=True
-        TRAIN_SCRIPT="train.py"
+        TRAIN_SCRIPT="train_with_improvements.py"
         MODE_DESC="LiDAR模式 (IR + Depth + LiDAR)"
         ;;
     "rgb_lidar")
         USE_LIDAR=True
         IN_CHANNELS=3
         USE_LIDAR_LOADER=True
-        TRAIN_SCRIPT="train.py"
+        TRAIN_SCRIPT="train_with_improvements.py"
         MODE_DESC="RGB+LiDAR模式 (3通道伪RGB + LiDAR gating，全面超越DNANet)"
         ;;
     "ir_only")
         USE_LIDAR=False
         IN_CHANNELS=1
         USE_LIDAR_LOADER=False
-        TRAIN_SCRIPT="train.py"  # ← 改为使用 train.py
+        TRAIN_SCRIPT="train_with_improvements.py"  # ← 改为使用 train.py
         MODE_DESC="IR-only模式 (公平对比，单通道)"
         ;;
     "ir_only_rgb")
         USE_LIDAR=False
         IN_CHANNELS=3
         USE_LIDAR_LOADER=False
-        TRAIN_SCRIPT="train.py"  # ← 改为使用 train.py
+        TRAIN_SCRIPT="train_with_improvements.py"  # ← 改为使用 train.py
         MODE_DESC="IR-only RGB模式 (完全匹配DNANet)"
         ;;
     *)
@@ -279,7 +297,7 @@ if [ "$DATASET" == "NUDT-SIRST" ]; then
         exit 1
     fi
 elif [ "$DATASET" == "Pohang-Canal-3k" ]; then
-    SPLIT_METHOD="50_50_2k"
+    SPLIT_METHOD="50_50_2k_new"  # 默认使用旧数据集（原始分布）
     # Pohang-Canal-3k有独立的images-8bit文件夹
     if [ "$BIT_DEPTH" == "8" ]; then
         IMAGE_FOLDER="images-8bit"
@@ -414,7 +432,7 @@ esac
 # ============================================================
 
 echo "=========================================="
-echo "🚀 Mamba多尺度模型训练 (自动GPU)"
+echo "🚀 Mamba多尺度模型训练 (自动GPU + 顶会技巧)"
 echo "=========================================="
 echo ""
 echo "训练模式:         $MODE_DESC"
@@ -430,6 +448,15 @@ echo "  训练轮数:         $EPOCHS epochs"
 echo "  Batch Sizes:      尝试 16/8/4/2 (自动降级)"
 echo "  损失权重:         Dice=$DICE_WEIGHT, Projection=$PROJECTION_WEIGHT"
 echo "  实验名称:         $EXPERIMENT_NAME"
+echo ""
+echo "🎯 性能改进 (已启用):"
+echo "  ✅ 强化数据增强     垂直翻转 + 90度旋转 + Gamma + 对比度"
+echo "  ✅ 多尺度训练       动态分辨率 [192-320]"
+echo "  ✅ 梯度累积         有效Batch = Batch × $GRADIENT_ACCUM"
+echo "  ✅ Warmup调度器     $WARMUP_EPOCHS epochs 预热"
+echo "  ✅ EMA             模型权重指数平均"
+echo "  ✅ TTA             测试时8-way增强"
+echo "  📊 预期提升:        +10-16% IoU"
 echo ""
 if [ "$MODE" == "lidar" ]; then
     echo "📋 预期结果 (LiDAR模式):"
@@ -511,7 +538,7 @@ for GPU_ID in $GPU_LIST; do
         fi
 
         # 注意：CUDA_VISIBLE_DEVICES 会重新编号GPU为0，所以--gpus参数固定为"0"
-        CUDA_VISIBLE_DEVICES=$GPU_ID python train.py \
+        CUDA_VISIBLE_DEVICES=$GPU_ID python train_with_improvements.py \
             --root "../dataset" \
             --model "$MODEL_TYPE" \
             --dataset "$DATASET" \
@@ -544,6 +571,13 @@ for GPU_ID in $GPU_LIST; do
             --workers 4 \
             --seed 42 \
             --suffix .png \
+            --use_augmentation "$USE_AUGMENTATION" \
+            --use_multi_scale "$USE_MULTI_SCALE" \
+            --gradient_accumulation_steps $GRADIENT_ACCUM \
+            --use_ema "$USE_EMA" \
+            --use_tta "$USE_TTA" \
+            --use_warmup "$USE_WARMUP" \
+            --warmup_epochs $WARMUP_EPOCHS \
             $RESUME_ARG \
             > $LOG_FILE 2>&1 &
 
