@@ -224,6 +224,26 @@ def parse_args():
     parser.add_argument('--adaptive_threshold', type=str, default='False',
                         help='Use adaptive threshold based on prediction distribution')
 
+    # [NEW 2026-02-26] Training improvements (顶会技巧)
+    parser.add_argument('--use_augmentation', type=str, default='False',
+                        help='Enable enhanced data augmentation (vertical flip, 90° rotation, gamma, contrast)')
+    parser.add_argument('--use_multi_scale', type=str, default='False',
+                        help='Enable multi-scale training (dynamic resolution [192-320])')
+    parser.add_argument('--multi_scale_range', type=str, default='0.75,1.25',
+                        help='Multi-scale range (min,max)')
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=1,
+                        help='Gradient accumulation steps (effective_batch = batch × steps)')
+    parser.add_argument('--use_tta', type=str, default='False',
+                        help='Enable Test-Time Augmentation (8-way)')
+    parser.add_argument('--use_ema', type=str, default='False',
+                        help='Enable Exponential Moving Average of model weights')
+    parser.add_argument('--ema_decay', type=float, default=0.9999,
+                        help='EMA decay rate')
+    parser.add_argument('--use_warmup', type=str, default='False',
+                        help='Enable learning rate warmup')
+    parser.add_argument('--warmup_epochs', type=int, default=10,
+                        help='Number of warmup epochs')
+
     args = parser.parse_args()
 
     # Create or use experiment directory

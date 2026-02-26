@@ -538,7 +538,8 @@ for GPU_ID in $GPU_LIST; do
         fi
 
         # 注意：CUDA_VISIBLE_DEVICES 会重新编号GPU为0，所以--gpus参数固定为"0"
-        CUDA_VISIBLE_DEVICES=$GPU_ID python train_with_improvements.py \
+        # TODO: 改进功能目前需要手动集成到train.py，暂时使用原始train.py
+        CUDA_VISIBLE_DEVICES=$GPU_ID python train.py \
             --root "../dataset" \
             --model "$MODEL_TYPE" \
             --dataset "$DATASET" \
