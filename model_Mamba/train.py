@@ -697,7 +697,8 @@ class Trainer:
             print("  - Gaussian noise (std=5-15, p=0.2)")
             print("  - Gaussian blur (r=0.5-1.5, p=0.2)")
 
-            self.augmentation = InfraredAugmentation(mode='train', use_all=True)
+            # [2026-02-27] 仅使用几何增强，禁用光度增强（gamma/对比度可能破坏红外热特征）
+            self.augmentation = InfraredAugmentation(mode='train', use_all=False)
 
             # Patch augmentation into trainset - use wrapper class to avoid type issues
             base_loader = self.trainset.base_loader

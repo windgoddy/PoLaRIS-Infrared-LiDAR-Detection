@@ -192,8 +192,8 @@ RESUME_CHECKPOINT=${10:-}  # Resume训练的checkpoint路径（可选，留空�
 # ============================================================
 # [NEW] 训练改进参数（Tier S + Tier A 顶会技巧）
 # ============================================================
-USE_AUGMENTATION="True"         # 强化数据增强（垂直翻转+90度旋转+Gamma+对比度）
-USE_MULTI_SCALE="True"          # 多尺度训练（动态分辨率 [192-320]）
+USE_AUGMENTATION="False"        # 强化数据增强（垂直翻转+90度旋转+Gamma+对比度）- DISABLED
+USE_MULTI_SCALE="False"         # 多尺度训练（动态分辨率 [192-320]）- DISABLED
 GRADIENT_ACCUM=1                # 梯度累积步数（保持batch=4）
 USE_EMA="False"                 # EMA (Exponential Moving Average) - DISABLED: causing test collapse
 USE_TTA="False"                 # Test-Time Augmentation (8-way) - DISABLED for training
