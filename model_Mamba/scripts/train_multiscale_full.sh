@@ -195,7 +195,7 @@ RESUME_CHECKPOINT=${10:-}  # Resume训练的checkpoint路径（可选，留空�
 USE_AUGMENTATION="True"         # 强化数据增强（垂直翻转+90度旋转+Gamma+对比度）
 USE_MULTI_SCALE="True"          # 多尺度训练（动态分辨率 [192-320]）
 GRADIENT_ACCUM=4                # 梯度累积步数（有效batch=batch_size×4）
-USE_EMA="True"                  # EMA (Exponential Moving Average)
+USE_EMA="False"                 # EMA (Exponential Moving Average) - DISABLED: causing test collapse
 USE_TTA="True"                  # Test-Time Augmentation (8-way)
 USE_WARMUP="True"               # Warmup学习率调度器
 WARMUP_EPOCHS=10                # Warmup轮数
