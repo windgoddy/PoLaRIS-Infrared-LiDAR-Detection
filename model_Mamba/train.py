@@ -936,22 +936,14 @@ class Trainer:
                     heatmap_pred = output
                     loss = self.criterion(heatmap_pred, heatmap_gt)
 
-            # [NEW 2026-02-26] Gradient accumulation
-            # Scale loss by accumulation steps to maintain equivalent gradients
-            loss_scaled = loss / self.gradient_accumulation_steps
-            loss_scaled.backward()
+            # Backward and optimizer step (baseline)
+            self.optimizer.zero_grad()
+            loss.backward()
 
-            # Only update weights every N steps
-            if hasattr(self, 'accumulator') and self.accumulator.should_update(i):
-                # Gradient clipping to prevent instability
-                torch.nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=1.0)
+            # Gradient clipping to prevent instability
+            torch.nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=1.0)
 
-                self.optimizer.step()
-                self.optimizer.zero_grad()
-
-                # [NEW 2026-02-26] Update EMA after optimizer step
-                if hasattr(self, 'use_ema') and self.use_ema:
-                    self.ema.update()
+            self.optimizer.step()
 
             # Update loss meter (use original unscaled loss for logging)
             loss_meter.update(loss.item())
@@ -970,12 +962,6 @@ class Trainer:
 
         pbar.close()
 
-        # [NEW 2026-02-26] Handle remaining gradients from accumulation
-        if hasattr(self, 'accumulator'):
-            self.accumulator.final_update(self.optimizer)
-            if hasattr(self, 'use_ema') and self.use_ema:
-                self.ema.update()
-
         # Clean up GPU memory after training epoch
         torch.cuda.empty_cache()
 
@@ -983,11 +969,6 @@ class Trainer:
 
     def testing(self, epoch):
         """Testing loop."""
-        # [NEW 2026-02-26] Apply EMA weights for evaluation
-        if hasattr(self, 'use_ema') and self.use_ema:
-            print("📊 Using EMA weights for evaluation...")
-            self.ema.apply_shadow()
-
         self.net.eval()
         loss_meter = AverageMeter()
         iou_sum = 0.0
