@@ -655,6 +655,14 @@ class Trainer:
         # DISABLED for baseline validation (2026-02-27)
         # self._init_training_improvements(args)
 
+        # Initialize required attributes for baseline (to avoid AttributeError)
+        self.gradient_accumulation_steps = 1  # No accumulation in baseline
+        self.use_augmentation = False
+        self.use_multi_scale = False
+        self.use_ema = False
+        self.use_tta = False
+        self.use_warmup_improvement = False
+
         # Resume from checkpoint if provided
         if args.resume:
             self._load_checkpoint(args.resume)
