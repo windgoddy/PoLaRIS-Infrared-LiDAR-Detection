@@ -104,6 +104,9 @@ def parse_args():
                         help='Whether to use LiDAR gating (True/False)')
     parser.add_argument('--use_deep_supervision', type=str, default='False',
                         help='Enable deep supervision (aux loss at D2 and D3). Only for *_multiscale and *_progressive models.')
+    parser.add_argument('--use_cbam', type=str, default='none',
+                        choices=['none', 'spatial', 'full'],
+                        help='[NEW 2026-02-27] CBAM attention mode for ProgressiveHead: none (baseline), spatial (lightweight), full (complete)')
 
     # Dataset configuration
     parser.add_argument('--dataset', type=str, default='Pohang-Canal-3k',
@@ -519,9 +522,17 @@ class Trainer:
         elif args.model == 'mamba_small_multiscale':
             self.net = polaris_mamba_small_multiscale(use_lidar=use_lidar, use_deep_supervision=use_deep_supervision)
         elif args.model == 'mamba_tiny_progressive':
-            self.net = polaris_mamba_tiny_progressive(use_lidar=use_lidar, use_deep_supervision=use_deep_supervision)
+            self.net = polaris_mamba_tiny_progressive(
+                use_lidar=use_lidar,
+                use_deep_supervision=use_deep_supervision,
+                use_cbam=args.use_cbam  # [NEW 2026-02-27] CBAM attention
+            )
         elif args.model == 'mamba_small_progressive':
-            self.net = polaris_mamba_small_progressive(use_lidar=use_lidar, use_deep_supervision=use_deep_supervision)
+            self.net = polaris_mamba_small_progressive(
+                use_lidar=use_lidar,
+                use_deep_supervision=use_deep_supervision,
+                use_cbam=args.use_cbam  # [NEW 2026-02-27] CBAM attention
+            )
         else:
             raise ValueError(f"Unknown model: {args.model}")
 
@@ -641,7 +652,8 @@ class Trainer:
         self.best_threshold_history = []
 
         # ========== [NEW 2026-02-26] Training Improvements ==========
-        self._init_training_improvements(args)
+        # DISABLED for baseline validation (2026-02-27)
+        # self._init_training_improvements(args)
 
         # Resume from checkpoint if provided
         if args.resume:

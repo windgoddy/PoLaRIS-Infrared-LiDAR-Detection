@@ -38,6 +38,42 @@ import torch.nn.functional as F
 from .ss2d_components import VSSBlock
 
 
+# ========== CBAM Attention Modules (from DNANet) ==========
+class ChannelAttention(nn.Module):
+    """Channel Attention Module - focuses on 'what' is meaningful."""
+    def __init__(self, in_planes, ratio=16):
+        super(ChannelAttention, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        self.fc1 = nn.Conv2d(in_planes, in_planes // ratio, 1, bias=False)
+        self.relu1 = nn.ReLU()
+        self.fc2 = nn.Conv2d(in_planes // ratio, in_planes, 1, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg_out = self.fc2(self.relu1(self.fc1(self.avg_pool(x))))
+        max_out = self.fc2(self.relu1(self.fc1(self.max_pool(x))))
+        out = avg_out + max_out
+        return self.sigmoid(out)
+
+
+class SpatialAttention(nn.Module):
+    """Spatial Attention Module - focuses on 'where' is meaningful."""
+    def __init__(self, kernel_size=7):
+        super(SpatialAttention, self).__init__()
+        assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
+        padding = 3 if kernel_size == 7 else 1
+        self.conv1 = nn.Conv2d(2, 1, kernel_size, padding=padding, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        x = torch.cat([avg_out, max_out], dim=1)
+        x = self.conv1(x)
+        return self.sigmoid(x)
+
+
 class PatchEmbed(nn.Module):
     """Image to Patch Embedding with configurable patch size."""
     def __init__(self, in_channels=1, embed_dim=64, patch_size=2):
@@ -201,13 +237,27 @@ class ProgressiveDecoderBlock(nn.Module):
 
 class ProgressiveHead(nn.Module):
     """
-    Final prediction head with lightweight refinement.
+    Final prediction head with lightweight refinement + CBAM attention.
 
     Only needs 4x upsampling (not 32x like old version).
+
+    [2026-02-27] Added CBAM for local refinement:
+    - Spatial Attention: locks onto small target positions
+    - Channel Attention: emphasizes informative channels
     """
-    def __init__(self, in_dim, upscale_factor=4):
+    def __init__(self, in_dim, upscale_factor=4, use_cbam='spatial'):
+        """
+        Args:
+            in_dim: input feature dimension
+            upscale_factor: upsampling factor (default: 4)
+            use_cbam: CBAM mode
+                - 'none': no attention (baseline)
+                - 'spatial': only spatial attention (lightweight, recommended)
+                - 'full': channel + spatial attention (complete CBAM)
+        """
         super().__init__()
         self.upscale_factor = upscale_factor
+        self.use_cbam = use_cbam
 
         # Lightweight refinement
         self.conv1 = nn.Sequential(
@@ -220,6 +270,17 @@ class ProgressiveHead(nn.Module):
             nn.BatchNorm2d(in_dim // 4),
             nn.ReLU(inplace=True),
         )
+
+        # [NEW 2026-02-27] CBAM Attention for local refinement
+        if use_cbam == 'spatial':
+            # Lightweight: only spatial attention (focuses on 'where')
+            self.sa = SpatialAttention(kernel_size=7)
+            print(f"  [ProgressiveHead] Using Spatial Attention (kernel=7)")
+        elif use_cbam == 'full':
+            # Complete CBAM: channel + spatial
+            self.ca = ChannelAttention(in_dim // 4, ratio=16)
+            self.sa = SpatialAttention(kernel_size=7)
+            print(f"  [ProgressiveHead] Using Full CBAM (Channel + Spatial)")
 
         # Final prediction
         self.conv_out = nn.Conv2d(in_dim // 4, 1, kernel_size=1, bias=True)
@@ -247,7 +308,17 @@ class ProgressiveHead(nn.Module):
             output: (B, 1, H, W) heatmap in [0, 1]
         """
         x = self.conv1(x)
-        x = self.conv2(x)
+        x = self.conv2(x)  # (B, in_dim//4, H/4, W/4)
+
+        # [NEW 2026-02-27] Apply CBAM attention
+        if self.use_cbam == 'spatial':
+            # Spatial attention: x = x * attention_map
+            x = x * self.sa(x)
+        elif self.use_cbam == 'full':
+            # Full CBAM: channel first, then spatial
+            x = x * self.ca(x)
+            x = x * self.sa(x)
+
         logits = self.conv_out(x)
         logits = self.upsample(logits)
         output = torch.sigmoid(logits)
@@ -284,6 +355,7 @@ class PoLaRIS_Mamba_Progressive(nn.Module):
         use_lidar=True,
         patch_size=2,  # Changed from 4 to 2
         use_deep_supervision=False,
+        use_cbam='none',  # [NEW 2026-02-27] CBAM mode: 'none', 'spatial', 'full'
     ):
         super().__init__()
 
@@ -292,6 +364,7 @@ class PoLaRIS_Mamba_Progressive(nn.Module):
         self.use_lidar = use_lidar
         self.patch_size = patch_size
         self.use_deep_supervision = use_deep_supervision
+        self.use_cbam = use_cbam
 
         # Patch embedding
         self.patch_embed = PatchEmbed(
@@ -370,10 +443,11 @@ class PoLaRIS_Mamba_Progressive(nn.Module):
             )
         )
 
-        # Final prediction head
+        # Final prediction head (with optional CBAM)
         self.head = ProgressiveHead(
             in_dim=dims[0],  # 64
-            upscale_factor=patch_size  # 2 (not 32!)
+            upscale_factor=patch_size,  # 2 (not 32!)
+            use_cbam=use_cbam  # [NEW 2026-02-27] CBAM attention
         )
 
         # Optional: Deep supervision (auxiliary heads)
@@ -534,12 +608,18 @@ class PoLaRIS_Mamba_Progressive(nn.Module):
 
 # ======================== Model Variants ========================
 
-def polaris_mamba_tiny_progressive(use_lidar=True, use_deep_supervision=False):
+def polaris_mamba_tiny_progressive(use_lidar=True, use_deep_supervision=False, use_cbam='none'):
     """
-    Tiny model with Progressive Decoder.
+    Tiny model with Progressive Decoder (+ optional CBAM).
 
     Parameters: ~11.5M (similar to multiscale)
     Expected Box IoU: 0.70+ (vs 0.574 for multiscale)
+
+    Args:
+        use_lidar: Enable LiDAR gated fusion
+        use_deep_supervision: Enable auxiliary heads for training
+        use_cbam: CBAM mode - 'none' (baseline), 'spatial' (lightweight), 'full' (complete)
+                  [2026-02-27] Added for local refinement
     """
     return PoLaRIS_Mamba_Progressive(
         embed_dim=64,
@@ -548,11 +628,12 @@ def polaris_mamba_tiny_progressive(use_lidar=True, use_deep_supervision=False):
         use_lidar=use_lidar,
         patch_size=2,  # Key difference: 2 instead of 4
         use_deep_supervision=use_deep_supervision,
+        use_cbam=use_cbam,  # [NEW 2026-02-27]
     )
 
 
-def polaris_mamba_small_progressive(use_lidar=True, use_deep_supervision=False):
-    """Small model with Progressive Decoder."""
+def polaris_mamba_small_progressive(use_lidar=True, use_deep_supervision=False, use_cbam='none'):
+    """Small model with Progressive Decoder (+ optional CBAM)."""
     return PoLaRIS_Mamba_Progressive(
         embed_dim=96,
         depths=[2, 2, 6, 2],
@@ -560,6 +641,7 @@ def polaris_mamba_small_progressive(use_lidar=True, use_deep_supervision=False):
         use_lidar=use_lidar,
         patch_size=2,
         use_deep_supervision=use_deep_supervision,
+        use_cbam=use_cbam,  # [NEW 2026-02-27]
     )
 
 

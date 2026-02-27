@@ -197,8 +197,9 @@ USE_MULTI_SCALE="False"         # 多尺度训练（动态分辨率 [192-320]）
 GRADIENT_ACCUM=1                # 梯度累积步数（保持batch=4）
 USE_EMA="False"                 # EMA (Exponential Moving Average) - DISABLED: causing test collapse
 USE_TTA="False"                 # Test-Time Augmentation (8-way) - DISABLED for training
-USE_WARMUP="False"              # Warmup学习率调度器：False=使用train.py内置的3-epoch warmup
+USE_WARMUP="False"              # Warmup学习率调度器：False=使用train.py内置的5-epoch warmup
 WARMUP_EPOCHS=10                # Warmup轮数（USE_WARMUP=False时不生效）
+USE_CBAM="none"                 # [NEW 2026-02-27] CBAM注意力：none(baseline) / spatial(轻量) / full(完整)
 
 # 处理"auto"作为GPU参数的情况
 if [ "$MANUAL_GPU" == "auto" ]; then
@@ -580,6 +581,7 @@ for GPU_ID in $GPU_LIST; do
             --use_tta "$USE_TTA" \
             --use_warmup "$USE_WARMUP" \
             --warmup_epochs $WARMUP_EPOCHS \
+            --use_cbam "$USE_CBAM" \
             $RESUME_ARG \
             > $LOG_FILE 2>&1 &
 
