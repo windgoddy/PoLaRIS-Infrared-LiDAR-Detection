@@ -812,9 +812,9 @@ class Trainer:
         self.net.train()
         loss_meter = AverageMeter()
 
-        # [NEW 2026-02-26] Multi-scale training: change resolution every 5 epochs
+        # [NEW 2026-02-26] Multi-scale training: change resolution every 20 epochs (conservative)
         if hasattr(self, 'use_multi_scale') and self.use_multi_scale:
-            if epoch > 0 and epoch % 5 == 0:
+            if epoch > 0 and epoch % 20 == 0:
                 new_size = self.multi_scale_manager.get_random_size()
                 if new_size != self.args.base_size:
                     print(f"\n🔄 Multi-scale: Switching to resolution {new_size} (from {self.args.base_size})")
