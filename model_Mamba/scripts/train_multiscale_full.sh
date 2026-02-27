@@ -356,7 +356,8 @@ else
 fi
 
 # 训练配置
-LR=0.0001
+# Reduced from 0.0001 to 0.00005 for stable warmup (2026-02-27)
+LR=0.00005
 OPTIMIZER="AdamW"
 SCHEDULER="CosineAnnealingWarmRestarts"
 
