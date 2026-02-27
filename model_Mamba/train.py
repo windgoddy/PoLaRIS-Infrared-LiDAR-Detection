@@ -869,8 +869,8 @@ class Trainer:
                         sample_loss_main = self.criterion(output[0][idx:idx+1], heatmap_gt[idx:idx+1])
                         sample_loss_aux2 = self.criterion(output[1][idx:idx+1], heatmap_gt[idx:idx+1])
                         sample_loss_aux3 = self.criterion(output[2][idx:idx+1], heatmap_gt[idx:idx+1])
-                        # Reduced aux3 weight: 0.4→0.1 to reduce early training instability (2026-02-27)
-                        sample_loss = sample_loss_main + 0.5 * sample_loss_aux2 + 0.1 * sample_loss_aux3
+                        # Increased aux3 weight: 0.1→0.3 (aux3 loss stabilized after epoch 10, 2026-02-27)
+                        sample_loss = sample_loss_main + 0.5 * sample_loss_aux2 + 0.3 * sample_loss_aux3
                     else:
                         # Standard mode: single output
                         sample_loss = self.criterion(output[idx:idx+1], heatmap_gt[idx:idx+1])
@@ -902,15 +902,15 @@ class Trainer:
                     loss_aux2 = self.criterion(output[1], heatmap_gt)
                     loss_aux3 = self.criterion(output[2], heatmap_gt)
 
-                    # Weighted combination: Reduced aux3 from 0.4 to 0.1 (2026-02-27)
-                    loss = loss_main + 0.5 * loss_aux2 + 0.1 * loss_aux3
+                    # Weighted combination: Increased aux3 from 0.1 to 0.3 (stabilized after epoch 10, 2026-02-27)
+                    loss = loss_main + 0.5 * loss_aux2 + 0.3 * loss_aux3
 
                     # Debug: Print deep supervision loss breakdown (every 100 batches)
                     if (i + 1) % 100 == 0 or (i + 1) == total_batches:
                         print(f"\n[Epoch {epoch}] Deep Supervision Loss (batch {i+1}/{total_batches}):")
                         print(f"  Main Loss:  {loss_main.item():.4f}")
                         print(f"  Aux2 Loss:  {loss_aux2.item():.4f} (weight: 0.5)")
-                        print(f"  Aux3 Loss:  {loss_aux3.item():.4f} (weight: 0.1)")
+                        print(f"  Aux3 Loss:  {loss_aux3.item():.4f} (weight: 0.3)")
                         print(f"  Total Loss: {loss.item():.4f}")
                 else:
                     # Standard mode: single output
