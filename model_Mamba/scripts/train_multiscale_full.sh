@@ -192,13 +192,13 @@ RESUME_CHECKPOINT=${10:-}  # Resume训练的checkpoint路径（可选，留空�
 # ============================================================
 # [NEW] 训练改进参数（Tier S + Tier A 顶会技巧）
 # ============================================================
-USE_AUGMENTATION="True"        # 强化数据增强（垂直翻转+90度旋转+Gamma+对比度）- DISABLED
+USE_AUGMENTATION="False"       # 数据增强：False=Baseline配置（禁用所有增强）
 USE_MULTI_SCALE="False"         # 多尺度训练（动态分辨率 [192-320]）- DISABLED
 GRADIENT_ACCUM=1                # 梯度累积步数（保持batch=4）
 USE_EMA="False"                 # EMA (Exponential Moving Average) - DISABLED: causing test collapse
 USE_TTA="False"                 # Test-Time Augmentation (8-way) - DISABLED for training
-USE_WARMUP="True"               # Warmup学习率调度器（之前成功配置有）
-WARMUP_EPOCHS=10                # Warmup轮数
+USE_WARMUP="False"              # Warmup学习率调度器：False=使用train.py内置的3-epoch warmup
+WARMUP_EPOCHS=10                # Warmup轮数（USE_WARMUP=False时不生效）
 
 # 处理"auto"作为GPU参数的情况
 if [ "$MANUAL_GPU" == "auto" ]; then
