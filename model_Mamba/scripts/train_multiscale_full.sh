@@ -193,11 +193,11 @@ RESUME_CHECKPOINT=${10:-}  # Resume训练的checkpoint路径（可选，留空�
 # [NEW] 训练改进参数（Tier S + Tier A 顶会技巧）
 # ============================================================
 USE_AUGMENTATION="True"         # 强化数据增强（垂直翻转+90度旋转+Gamma+对比度）
-USE_MULTI_SCALE="True"          # 多尺度训练（动态分辨率 [192-320]）
-GRADIENT_ACCUM=4                # 梯度累积步数（有效batch=batch_size×4）
+USE_MULTI_SCALE="False"         # 多尺度训练（动态分辨率 [192-320]）- DISABLED temporarily
+GRADIENT_ACCUM=1                # 梯度累积步数（保持batch=4）
 USE_EMA="False"                 # EMA (Exponential Moving Average) - DISABLED: causing test collapse
-USE_TTA="True"                  # Test-Time Augmentation (8-way)
-USE_WARMUP="True"               # Warmup学习率调度器
+USE_TTA="False"                 # Test-Time Augmentation (8-way) - DISABLED for training
+USE_WARMUP="True"               # Warmup学习率调度器（之前成功配置有）
 WARMUP_EPOCHS=10                # Warmup轮数
 
 # 处理"auto"作为GPU参数的情况
@@ -356,8 +356,8 @@ else
 fi
 
 # 训练配置
-# Reduced from 0.0001 to 0.00005 for stable warmup (2026-02-27)
-LR=0.00005
+# Restored to 0.0001 (original successful config, 2026-02-27)
+LR=0.0001
 OPTIMIZER="AdamW"
 SCHEDULER="CosineAnnealingWarmRestarts"
 
