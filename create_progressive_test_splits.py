@@ -61,7 +61,8 @@ def main():
     # 创建4个测试集
     print("\n[2/4] 创建测试集划分...")
 
-    dataset_root = os.path.dirname(os.path.dirname(args.source_split))
+    # FIXED: 应该在dataset/Pohang-Canal-3k/下创建，而不是dataset/下
+    dataset_root = os.path.dirname(args.source_split)  # dataset/Pohang-Canal-3k
     splits = []
 
     # Split 1: Baseline (无Cat3)
