@@ -135,8 +135,8 @@ def parse_args():
                         help='Dataset name')
     parser.add_argument('--root', type=str, default='dataset/',
                         help='Dataset root directory')
-    parser.add_argument('--split_method', type=str, default='50_50_2k_new',
-                        help='Train/test split method')
+    parser.add_argument('--split_method', type=str, default=None,
+                        help='Train/test split method (auto-detect from checkpoint if not specified)')
     parser.add_argument('--image_folder', type=str, default='images',
                         help='Image folder name')
     parser.add_argument('--suffix', type=str, default='.png',
@@ -977,16 +977,19 @@ def main():
             args.model = train_config['model']
             print(f"  ✓ model: {args.model}")
 
-        # Dataset configuration
-        if 'dataset' in train_config:
+        # Dataset configuration (only if not specified by user)
+        if args.dataset == 'Pohang-Canal-3k' and 'dataset' in train_config:
             args.dataset = train_config['dataset']
             print(f"  ✓ dataset: {args.dataset}")
 
-        if 'split_method' in train_config:
+        # CRITICAL: Only use train_config's split_method if user didn't specify one
+        if args.split_method is None and 'split_method' in train_config:
             args.split_method = train_config['split_method']
-            print(f"  ✓ split_method: {args.split_method}")
+            print(f"  ✓ split_method: {args.split_method} (from train_log.txt)")
+        elif args.split_method is not None:
+            print(f"  ✓ split_method: {args.split_method} (from command line, overriding train_log.txt)")
 
-        if 'image_folder' in train_config:
+        if args.image_folder == 'images' and 'image_folder' in train_config:
             args.image_folder = train_config['image_folder']
             print(f"  ✓ image_folder: {args.image_folder}")
 
@@ -1059,8 +1062,14 @@ def main():
             print("⚠️  无法自动推断模型类型，默认使用 DNANet")
             args.model = 'DNANet'
 
+    # Fallback for split_method if still None
+    if args.split_method is None:
+        args.split_method = '50_50_2k_new'  # Default fallback
+        print(f"  ⚠️  split_method 未指定，使用默认值: {args.split_method}")
+
     print(f"\n📦 模型配置:")
     print(f"  ✓ 模型类型: {args.model}")
+    print(f"  ✓ 数据集划分: {args.split_method}")
 
     # Auto eval strategy: use dynamic threshold sweep for all models
     if args.eval_strategy == 'auto':
