@@ -1,6 +1,11 @@
+import os
+
 def load_dataset (root, dataset, split_method):
-    train_txt = root + '/' + dataset + '/' + split_method + '/' + 'train.txt'
-    test_txt  = root + '/' + dataset + '/' + split_method + '/' + 'test.txt'
+    # FIXED: 使用 os.path.join 避免双斜杠问题 (dataset//Pohang-Canal-3k/)
+    split_dir = os.path.join(root, dataset, split_method)
+    train_txt = os.path.join(split_dir, 'train.txt')
+    test_txt = os.path.join(split_dir, 'test.txt')
+
     train_img_ids = []
     val_img_ids = []
     with open(train_txt, "r") as f:
