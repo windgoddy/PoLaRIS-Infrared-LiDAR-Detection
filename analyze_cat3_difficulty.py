@@ -26,15 +26,8 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
-from test_box_iou import (
-    load_model_from_checkpoint,
-    detect_model_params,
-    create_model,
-    load_category_mapping,
-    calculate_mask_to_box_iou
-)
 from model.utils_lidar import PoLaRISTestLoader, polaris_collate_fn
-from model.load_param_data import load_dataset
+from model.metric import calculate_mask_to_box_iou
 
 
 def parse_args():
@@ -49,6 +42,39 @@ def parse_args():
                         help='Output file')
     parser.add_argument('--gpu', type=str, default='0', help='GPU ID')
     return parser.parse_args()
+
+
+def load_category_mapping(dataset_root, dataset_name):
+    """加载类别映射"""
+    category_file = os.path.join(dataset_root, dataset_name, 'selection_summary_new.txt')
+    if not os.path.exists(category_file):
+        category_file = os.path.join(dataset_root, dataset_name, 'select-view/selection_summary_new.txt')
+
+    if not os.path.exists(category_file):
+        print(f"  ⚠️  类别文件不存在")
+        return None, None
+
+    category_map = {}
+    with open(category_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line or '文件名' in line or '类别名' in line:
+                continue
+            if '|' in line:
+                parts = line.split('|')
+                if len(parts) == 2:
+                    img_id = parts[0].strip().replace('.png', '')
+                    category = int(parts[1].strip())
+                    category_map[img_id] = category
+
+    category_names = {
+        0: "Category 0 (未分类场景)",
+        1: "Category 1 (适中场景 - 点云适中)",
+        2: "Category 2 (小目标场景 - 点云少)",
+        3: "Category 3 (岸边场景 - 点云多)"
+    }
+
+    return category_map, category_names
 
 
 def get_cat3_samples(category_map):
@@ -72,9 +98,14 @@ def main():
 
     # 加载类别映射
     print("\n[1/5] 加载类别映射...")
-    dataset_dir = os.path.join('dataset', args.dataset)
-    category_file = os.path.join(dataset_dir, 'select-view/selection_summary_new.txt')
-    category_map, category_names = load_category_mapping(category_file)
+    dataset_root = 'dataset'
+    dataset_dir = os.path.join(dataset_root, args.dataset)
+    category_map, category_names = load_category_mapping(dataset_root, args.dataset)
+
+    # 检查类别映射是否加载成功
+    if category_map is None:
+        print("❌ 无法加载类别映射，退出")
+        return
 
     # 获取Cat3样本
     cat3_samples = get_cat3_samples(category_map)
@@ -82,7 +113,7 @@ def main():
 
     # 加载模型
     print("\n[2/5] 加载模型...")
-    checkpoint, checkpoint_info = load_model_from_checkpoint(args.checkpoint, device)
+    checkpoint = torch.load(args.checkpoint, map_location=device)
 
     # 简化：直接使用mamba_tiny_progressive
     from model_Mamba.core.polaris_mamba_progressive import polaris_mamba_tiny_progressive
