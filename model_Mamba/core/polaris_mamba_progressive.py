@@ -245,7 +245,7 @@ class ProgressiveHead(nn.Module):
     - Spatial Attention: locks onto small target positions
     - Channel Attention: emphasizes informative channels
     """
-    def __init__(self, in_dim, upscale_factor=4, use_cbam='spatial'):
+    def __init__(self, in_dim, upscale_factor=4, use_cbam='none'):
         """
         Args:
             in_dim: input feature dimension

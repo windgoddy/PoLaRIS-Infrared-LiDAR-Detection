@@ -305,7 +305,21 @@ def detect_model_params(state_dict, model_type):
                 # Check for deep supervision (auxiliary heads)
                 has_deep_sup = any('aux_head' in key for key in state_dict.keys())
                 params['use_deep_supervision'] = has_deep_sup
-                print(f"  ℹ️  检测到 Progressive 架构")
+
+                # Check for CBAM (NEW 2026-02-28) - Fixed detection logic
+                # CBAM modules are named 'head.ca' (channel) and 'head.sa' (spatial)
+                has_cbam_channel = any('head.ca.' in key for key in state_dict.keys())
+                has_cbam_spatial = any('head.sa.' in key for key in state_dict.keys())
+                if has_cbam_channel and has_cbam_spatial:
+                    params['use_cbam'] = 'full'
+                    print(f"  ✅ 检测到 Progressive 架构 + CBAM Full (Channel + Spatial)")
+                elif has_cbam_spatial:
+                    params['use_cbam'] = 'spatial'
+                    print(f"  ✅ 检测到 Progressive 架构 + CBAM Spatial")
+                else:
+                    params['use_cbam'] = 'none'
+                    print(f"  ℹ️  检测到 Progressive 架构 (无CBAM)")
+
                 if has_deep_sup:
                     print(f"  ℹ️  检测到深度监督 (aux_head 层存在)")
             elif has_skip_proj:
@@ -412,14 +426,19 @@ def create_model(model_type, in_channels, checkpoint, device):
         if architecture == 'progressive':
             # Import Progressive model
             from model_Mamba.core.polaris_mamba_progressive import PoLaRIS_Mamba_Progressive
+
+            # Detect CBAM from checkpoint (NEW 2026-02-28)
+            use_cbam = detected_params.get('use_cbam', 'none')
+
             model = PoLaRIS_Mamba_Progressive(
                 in_channels=1,  # Always 1 for IR (patch_embed)
                 embed_dim=embed_dim,
                 depths=depths,
                 use_lidar=use_lidar,
-                use_deep_supervision=use_deep_supervision
+                use_deep_supervision=use_deep_supervision,
+                use_cbam=use_cbam  # NEW: CBAM support
             )
-            print(f"  ✓ 使用 Progressive Decoder Mamba 模型 (深度监督: {use_deep_supervision})")
+            print(f"  ✓ 使用 Progressive Decoder Mamba 模型 (深度监督: {use_deep_supervision}, CBAM: {use_cbam})")
             # CRITICAL: ProgressiveHead outputs sigmoid([0,1]), NOT logits
             apply_sigmoid = False
         elif architecture == 'multiscale':

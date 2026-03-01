@@ -11,13 +11,26 @@ including:
 5. Detected peaks (local maxima)
 
 Usage:
-    python vis_mamba.py --checkpoint result/Pohang-Canal-3k/mamba_tiny/best_model.pth \
-                         --dataset Pohang-Canal-3k \
-                         --num_samples 10 \
-                         --output_dir visualizations/
+    # Basic model
+    python visualize.py --checkpoint result/Pohang-Canal-3k/mamba_tiny/best_model.pth \
+                        --model mamba_tiny \
+                        --dataset Pohang-Canal-3k \
+                        --num_samples 10 \
+                        --output_dir visualizations/
+
+    # Progressive model with CBAM (recommended)
+    python visualize.py --checkpoint result/tiny_LiDAR_16bit_PoLaRIS_d1.5p2.5_CBAM/best_model.pth \
+                        --model mamba_tiny_progressive \
+                        --use_cbam full \
+                        --use_deep_supervision True \
+                        --dataset Pohang-Canal-3k \
+                        --split_method 50_50_2k_new \
+                        --num_samples 10 \
+                        --output_dir visualizations/
 
 Author: PoLaRIS Team
 Date: 2026-01-30
+Updated: 2026-02-28 (Added Progressive/Multiscale/CBAM support)
 """
 
 import torch
@@ -45,8 +58,10 @@ from model_Mamba.dataset.gaussian_utils import (
     overlay_heatmap,
 )
 
-# Mamba model
+# Mamba models
 from model_Mamba.core.polaris_mamba import polaris_mamba_tiny, polaris_mamba_small, polaris_mamba_base
+from model_Mamba.core.polaris_mamba_multiscale import polaris_mamba_tiny_multiscale, polaris_mamba_small_multiscale
+from model_Mamba.core.polaris_mamba_progressive import polaris_mamba_tiny_progressive, polaris_mamba_small_progressive
 
 
 def parse_args():
@@ -56,11 +71,18 @@ def parse_args():
     # Model and checkpoint
     parser.add_argument('--checkpoint', type=str, required=True,
                         help='Path to model checkpoint (.pth)')
-    parser.add_argument('--model', type=str, default='mamba_tiny',
-                        choices=['mamba_tiny', 'mamba_small', 'mamba_base'],
+    parser.add_argument('--model', type=str, default='mamba_tiny_progressive',
+                        choices=['mamba_tiny', 'mamba_small', 'mamba_base',
+                                'mamba_tiny_multiscale', 'mamba_small_multiscale',
+                                'mamba_tiny_progressive', 'mamba_small_progressive'],
                         help='Model variant')
     parser.add_argument('--use_lidar', type=str, default='True',
                         help='Whether model uses LiDAR')
+    parser.add_argument('--use_cbam', type=str, default='none',
+                        choices=['none', 'spatial', 'full'],
+                        help='CBAM attention type (for progressive models)')
+    parser.add_argument('--use_deep_supervision', type=str, default='True',
+                        help='Whether model uses deep supervision (for multiscale/progressive)')
 
     # Dataset
     parser.add_argument('--dataset', type=str, default='Pohang-Canal-3k',
@@ -229,12 +251,22 @@ def main():
 
     # Load model
     use_lidar = (args.use_lidar == 'True')
+    use_deep_supervision = (args.use_deep_supervision == 'True')
+
     if args.model == 'mamba_tiny':
         model = polaris_mamba_tiny(use_lidar=use_lidar)
     elif args.model == 'mamba_small':
         model = polaris_mamba_small(use_lidar=use_lidar)
     elif args.model == 'mamba_base':
         model = polaris_mamba_base(use_lidar=use_lidar)
+    elif args.model == 'mamba_tiny_multiscale':
+        model = polaris_mamba_tiny_multiscale(use_lidar=use_lidar, use_deep_supervision=use_deep_supervision)
+    elif args.model == 'mamba_small_multiscale':
+        model = polaris_mamba_small_multiscale(use_lidar=use_lidar, use_deep_supervision=use_deep_supervision)
+    elif args.model == 'mamba_tiny_progressive':
+        model = polaris_mamba_tiny_progressive(use_lidar=use_lidar, use_deep_supervision=use_deep_supervision, use_cbam=args.use_cbam)
+    elif args.model == 'mamba_small_progressive':
+        model = polaris_mamba_small_progressive(use_lidar=use_lidar, use_deep_supervision=use_deep_supervision, use_cbam=args.use_cbam)
     else:
         raise ValueError(f"Unknown model: {args.model}")
 

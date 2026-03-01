@@ -75,10 +75,10 @@
 #
 #   scene_weight_cat0-3选项（可选，第13-16个参数）：
 #     cat0 数值   - Category 0（未分类）权重（默认: 1.0）
-#     cat1 数值   - Category 1（适中场景）权重（默认: 1.5，新数据集推荐）
-#     cat2 数值   - Category 2（小目标/多数类）权重（默认: 0.8，降低多数类影响）
-#     cat3 数值   - Category 3（海岸场景）权重（默认: 2.5，重点优化）
-#     说明: 新数据集50_50_2k中Cat2为多数类，建议使用(1.0,1.5,0.8,2.5)避免过拟合
+#     cat1 数值   - Category 1（适中场景）权重（默认: 1.0，已表现良好）
+#     cat2 数值   - Category 2（小目标场景）权重（默认: 1.0，保持优势）
+#     cat3 数值   - Category 3（岸边场景）权重（默认: 3.0，重点提升）
+#     说明: 方案A配置 - 保持Cat2优势(领先DNANet 28%)，专攻Cat3弱点(落后DNANet 16%)
 #
 #   split_method选项（可选，第17个参数）：
 #     split_method - 数据集划分方法（默认: 50_50_2k for Pohang-Canal-3k, 50_50 for NUDT-SIRST）
@@ -101,10 +101,12 @@
 #     bash model_Mamba/scripts/train_multiscale_full.sh lidar 1 mamba_base 8                 # LiDAR，GPU 1，大模型，8bit
 #     bash model_Mamba/scripts/train_multiscale_full.sh ir_only_rgb auto mamba_tiny_progressive 8 traditional minmax False 2.5 2.0 NUDT-SIRST  # NUDT-SIRST数据集（RGB模式）
 #     bash model_Mamba/scripts/train_multiscale_full.sh ir_only auto mamba_tiny_progressive 8 traditional minmax False 2.5 2.0 NUDT-SIRST     # NUDT-SIRST数据集（IR-only模式）
-#     bash model_Mamba/scripts/train_multiscale_full.sh rgb_lidar auto mamba_tiny_progressive 16 polaris minmax False 2.5 2.0 "" Pohang-Canal-3k True 2.0  # ⭐场景加权：优先训练海岸场景（Cat3权重2.0）
-#     bash model_Mamba/scripts/train_multiscale_full.sh lidar auto mamba_tiny_progressive 16 polaris minmax False 2.5 2.0 result/xxx/best_model.pth Pohang-Canal-3k True 1.8  # Resume+场景加权（Cat3权重1.8）
-#     bash model_Mamba/scripts/train_multiscale_full.sh rgb_lidar auto mamba_tiny_progressive 16 polaris minmax False 2.5 2.0 "" Pohang-Canal-3k True 1.0 1.5 0.8 2.5 50_50_2k  # ⭐新数据集：Cat2多数类，降权训练
-#     bash model_Mamba/scripts/train_multiscale_full.sh rgb_lidar auto mamba_tiny_progressive 16 polaris minmax False 2.5 2.0 "" Pohang-Canal-3k True 1.0 1.0 1.0 2.5 50_50_2k_new  # 旧数据集：原始分布
+#
+#     # 场景加权训练示例（针对Cat3弱点）
+#     bash model_Mamba/scripts/train_multiscale_full.sh lidar auto mamba_tiny_progressive 16 polaris minmax True 2.5 2.0 "" Pohang-Canal-3k True  # ⭐方案A：启用场景加权（使用默认值：Cat3=3.0）
+#     bash model_Mamba/scripts/train_multiscale_full.sh lidar auto mamba_tiny_progressive 16 polaris minmax True 2.5 2.0 "" Pohang-Canal-3k True 1.0 1.0 1.0 3.0  # 方案A显式指定（效果同上）
+#     bash model_Mamba/scripts/train_multiscale_full.sh lidar auto mamba_tiny_progressive 16 polaris minmax True 2.5 2.0 "" Pohang-Canal-3k True 1.0 1.0 1.0 4.0  # 方案B：更激进的Cat3优化
+#     bash model_Mamba/scripts/train_multiscale_full.sh lidar auto mamba_tiny_progressive 16 polaris minmax True 2.5 2.0 result/xxx/best_model.pth Pohang-Canal-3k True  # Resume+场景加权
 #
 #   示例：
 #       python model_Mamba/train.py \
@@ -199,7 +201,7 @@ USE_EMA="False"                 # EMA (Exponential Moving Average) - DISABLED: c
 USE_TTA="False"                 # Test-Time Augmentation (8-way) - DISABLED for training
 USE_WARMUP="False"              # Warmup学习率调度器：False=使用train.py内置的5-epoch warmup
 WARMUP_EPOCHS=10                # Warmup轮数（USE_WARMUP=False时不生效）
-USE_CBAM="none"                 # [NEW 2026-02-27] CBAM注意力：none(baseline) / spatial(轻量) / full(完整)
+USE_CBAM="full"                 # [NEW 2026-02-27] CBAM注意力：none(baseline) / spatial(轻量) / full(完整)
 
 # 处理"auto"作为GPU参数的情况
 if [ "$MANUAL_GPU" == "auto" ]; then
@@ -272,12 +274,12 @@ esac
 DATASET="${11:-Pohang-Canal-3k}"
 USE_SCENE_WEIGHTS="${12:-False}"  # 场景加权损失：True 或 False（默认False）
 
-# [NEW 2026-02-20] 场景加权配置 - 适应新数据集50_50_2k（Cat2多数类）
-# 方案1（推荐）：降低多数类Cat2权重，提升Cat1/Cat3权重
+# [NEW 2026-02-20] 场景加权配置 - 方案A：保持优势，专攻Cat3弱点
+# 策略：保持Cat2优势（1.0），强化Cat3弱点（3.0）
 SCENE_WEIGHT_CAT0="${13:-1.0}"    # Category 0（未分类）权重（默认1.0）
-SCENE_WEIGHT_CAT1="${14:-1.5}"    # Category 1（适中场景）权重（默认1.5，提升避免被压制）
-SCENE_WEIGHT_CAT2="${15:-0.8}"    # Category 2（小目标/多数类）权重（默认0.8，降低多数类影响）
-SCENE_WEIGHT_CAT3="${16:-2.5}"    # Category 3（海岸场景）权重（默认2.5，重点优化）
+SCENE_WEIGHT_CAT1="${14:-1.0}"    # Category 1（适中场景）权重（默认1.0，已表现良好）
+SCENE_WEIGHT_CAT2="${15:-1.0}"    # Category 2（小目标场景）权重（默认1.0，保持领先优势）
+SCENE_WEIGHT_CAT3="${16:-3.0}"    # Category 3（岸边场景）权重（默认3.0，重点提升弱点）
 
 # [NEW 2026-02-20] 数据集划分配置 - 支持通过命令行指定
 CUSTOM_SPLIT_METHOD="${17}"  # 可选：显式指定数据集划分（如 50_50_2k, 50_50_2k_new 等）
@@ -380,12 +382,12 @@ fi
 
 # 场景加权配置输出
 if [ "$USE_SCENE_WEIGHTS" == "True" ]; then
-    echo "✓ 启用场景加权损失（Scene-Weighted Loss）"
+    echo "✓ 启用场景加权损失（Scene-Weighted Loss - 方案A）"
     echo "  - Category 0 (未分类) 权重: $SCENE_WEIGHT_CAT0"
     echo "  - Category 1 (适中场景) 权重: $SCENE_WEIGHT_CAT1"
-    echo "  - Category 2 (小目标/多数类) 权重: $SCENE_WEIGHT_CAT2"
-    echo "  - Category 3 (海岸场景) 权重: $SCENE_WEIGHT_CAT3"
-    echo "  - 策略: 降低Cat2多数类权重($SCENE_WEIGHT_CAT2)，提升Cat3性能($SCENE_WEIGHT_CAT3)"
+    echo "  - Category 2 (小目标场景) 权重: $SCENE_WEIGHT_CAT2"
+    echo "  - Category 3 (岸边场景) 权重: $SCENE_WEIGHT_CAT3"
+    echo "  - 策略: 保持Cat2优势(${SCENE_WEIGHT_CAT2})，重点提升Cat3弱点(${SCENE_WEIGHT_CAT3})"
 fi
 
 # 模型大小信息（用于显示和命名）
