@@ -314,7 +314,11 @@ case $MODE in
         ;;
 
     mamba_unetpp)
-        echo "🎯 Mamba-UNet++: 混合架构（CNN浅层 + Mamba深层 + UNet++密集连接）"
+        echo "🎯 Mamba-UNet++ V2: 混合架构（优化版）"
+        echo "  ✓ Spatial Restore Layer (修复语义代沟)"
+        echo "  ✓ Deep Supervision (UNet++ 核心)"
+        echo "  ✓ 残差连接 (稳定训练)"
+        echo "  ✓ Dice Weight = 4.0 (提高像素精度)"
 
         cd model_Mamba
 
@@ -327,9 +331,12 @@ case $MODE in
             echo ""
             echo "🔄 尝试 Batch Size = $TRY_BATCH"
 
-            # 运行训练，重定向输出到日志文件
+            # [FIX 2026-03-02] 优化训练配置
+            # 1. 启用深度监督 (--use_deep_supervision True)
+            # 2. 提高 Dice 权重 (--dice_weight 4.0)
+            # 3. 使用 improved_bce_dice 损失
             python train.py \
-                --experiment_name MambaUNetPP_Cat2 \
+                --experiment_name MambaUNetPP_V2_Cat2_DeepSup \
                 --model mamba_unetpp \
                 --root ../dataset/ \
                 --dataset $DATASET \
@@ -342,20 +349,20 @@ case $MODE in
                 --train_batch_size $TRY_BATCH \
                 --test_batch_size $TRY_BATCH \
                 --epochs $EPOCHS \
-                --optimizer AdamW \
-                --lr 0.0005 \
-                --weight_decay 0.05 \
+                --optimizer Adagrad \
+                --lr 0.05 \
                 --scheduler CosineAnnealingLR \
                 --min_lr 1e-6 \
                 --seed 42 \
                 --use_polaris_loader False \
                 --normalize_16bit False \
                 --loss_type improved_bce_dice \
-                --dice_weight 2.0 \
+                --dice_weight 4.0 \
+                --focal_gamma 2.5 \
                 --peak_threshold $THRESHOLD \
                 --workers 4 \
                 --use_lidar False \
-                --use_deep_supervision False > "$LOG_FILE" 2>&1 &
+                --use_deep_supervision True > "$LOG_FILE" 2>&1 &
 
             TRAIN_PID=$!
             echo "📝 训练进程 PID: $TRAIN_PID"

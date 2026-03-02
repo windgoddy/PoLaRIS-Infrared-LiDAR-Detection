@@ -558,11 +558,13 @@ class Trainer:
         elif args.model == 'mamba_unetpp':
             # [NEW 2026-03-02] Mamba-UNet++ Hybrid Architecture
             # Combines Mamba blocks (global context) with UNet++ dense skip connections (local details)
+            # [FIX 2026-03-02] Added deep_supervision support
             self.net = mamba_unetplusplus(
                 in_channels=args.in_channels,
-                num_classes=1
+                num_classes=1,
+                deep_supervision=args.use_deep_supervision  # Enable deep supervision
             )
-            print(f"✓ Using Mamba-UNet++ Hybrid (in_channels={args.in_channels})")
+            print(f"✓ Using Mamba-UNet++ Hybrid (in_channels={args.in_channels}, deep_supervision={args.use_deep_supervision})")
         else:
             raise ValueError(f"Unknown model: {args.model}")
 

@@ -36,11 +36,12 @@ class MambaUNetPlusPlus(nn.Module):
     2. Linear complexity vs quadratic (Transformer)
     """
 
-    def __init__(self, num_classes=1, input_channels=3, nb_filter=[16, 32, 64, 128, 256]):
+    def __init__(self, num_classes=1, input_channels=3, nb_filter=[16, 32, 64, 128, 256], deep_supervision=False):
         super().__init__()
 
         self.pool = nn.MaxPool2d(2, 2)
         self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+        self.deep_supervision = deep_supervision
 
         # ===== Encoder (保留CNN特征提取能力) =====
         # Shallow layers: CNN blocks (for local features)
@@ -71,8 +72,15 @@ class MambaUNetPlusPlus(nn.Module):
         # Level 3 (32x32)
         self.conv3_1 = self._make_mamba_block(nb_filter[3] + nb_filter[4], nb_filter[3])
 
-        # Final output
-        self.final = nn.Conv2d(nb_filter[0], num_classes, kernel_size=1)
+        # Final output layers
+        # [FIX 2026-03-02] Deep Supervision: multiple output heads for UNet++ columns
+        if self.deep_supervision:
+            self.final1 = nn.Conv2d(nb_filter[0], num_classes, kernel_size=1)
+            self.final2 = nn.Conv2d(nb_filter[0], num_classes, kernel_size=1)
+            self.final3 = nn.Conv2d(nb_filter[0], num_classes, kernel_size=1)
+            self.final4 = nn.Conv2d(nb_filter[0], num_classes, kernel_size=1)
+        else:
+            self.final = nn.Conv2d(nb_filter[0], num_classes, kernel_size=1)
 
     def _make_cnn_block(self, in_ch, out_ch):
         """Standard CNN block with BatchNorm and ReLU"""
@@ -103,7 +111,10 @@ class MambaUNetPlusPlus(nn.Module):
             lidar: Optional LiDAR input (ignored in current version)
 
         Returns:
-            output: (B, 1, H, W) prediction map
+            If deep_supervision=True:
+                [output1, output2, output3, output4]: List of predictions from each UNet++ column
+            Else:
+                output: (B, 1, H, W) final prediction map
         """
         # ===== Encoder =====
         x0_0 = self.conv0_0(x)
@@ -134,14 +145,21 @@ class MambaUNetPlusPlus(nn.Module):
         # Column 4
         x0_4 = self.conv0_4(torch.cat([x0_0, x0_1, x0_2, x0_3, self.up(x1_3)], 1))
 
-        # Final prediction
-        output = self.final(x0_4)
-
-        # Apply sigmoid to convert logits to probabilities [0, 1]
-        # Required by loss functions (FocalBCE, Dice, BoxProjection)
-        output = torch.sigmoid(output)
-
-        return output
+        # [FIX 2026-03-02] Deep Supervision: return multiple outputs
+        if self.deep_supervision:
+            # Apply final conv + sigmoid to each column
+            output1 = torch.sigmoid(self.final1(x0_1))
+            output2 = torch.sigmoid(self.final2(x0_2))
+            output3 = torch.sigmoid(self.final3(x0_3))
+            output4 = torch.sigmoid(self.final4(x0_4))
+            return [output4, output3, output2, output1]  # Main output first
+        else:
+            # Standard mode: only return final output
+            output = self.final(x0_4)
+            # Apply sigmoid to convert logits to probabilities [0, 1]
+            # Required by loss functions (FocalBCE, Dice, BoxProjection)
+            output = torch.sigmoid(output)
+            return output
 
 
 class MambaBlockWrapper(nn.Module):
@@ -151,6 +169,7 @@ class MambaBlockWrapper(nn.Module):
     Handles:
     1. Channel conversion (in_ch → out_ch)
     2. Format conversion (BCHW ↔ BHWC)
+    3. [FIX 2026-03-02] Spatial restore: bridge the semantic gap between Mamba and CNN
     """
     def __init__(self, in_ch, out_ch):
         super().__init__()
@@ -166,6 +185,11 @@ class MambaBlockWrapper(nn.Module):
             use_lidar_gate=False,  # Disable LiDAR for now
         )
 
+        # [FIX 2026-03-02] Spatial restore layer
+        # Use depthwise convolution to convert global Mamba features back to local-friendly features
+        # This bridges the semantic gap between Mamba's global context and CNN's local features
+        self.spatial_restore = nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1, groups=out_ch)
+
     def forward(self, x):
         """
         Args:
@@ -174,45 +198,52 @@ class MambaBlockWrapper(nn.Module):
             out: (B, out_ch, H, W)
         """
         # Channel projection
-        x = self.proj_in(x)  # (B, out_ch, H, W)
+        identity = self.proj_in(x)  # (B, out_ch, H, W) - save for residual
 
         # Convert to Mamba format
-        B, C, H, W = x.shape
-        x = x.permute(0, 2, 3, 1)  # (B, H, W, C)
+        B, C, H, W = identity.shape
+        x_mamba = identity.permute(0, 2, 3, 1)  # (B, H, W, C)
 
-        # Mamba block
-        x = self.mamba(x)  # (B, H, W, C)
+        # Mamba block (global context modeling)
+        x_mamba = self.mamba(x_mamba)  # (B, H, W, C)
 
         # Convert back
-        x = x.permute(0, 3, 1, 2)  # (B, C, H, W)
-        # Do NOT add BatchNorm2d here: VSSBlock's internal LayerNorm is sufficient.
-        # Extra BN would destroy the global-context distribution Mamba has built.
+        x_mamba = x_mamba.permute(0, 3, 1, 2)  # (B, C, H, W)
 
-        return x
+        # [FIX 2026-03-02] Restore spatial details with depthwise conv
+        x_mamba = self.spatial_restore(x_mamba)
+
+        # [FIX 2026-03-02] Add residual connection for stability
+        return identity + x_mamba
 
 
 # ===== Factory function for easy instantiation =====
-def mamba_unetplusplus(in_channels=3, num_classes=1):
+def mamba_unetplusplus(in_channels=3, num_classes=1, deep_supervision=False):
     """
     Create Mamba-UNet++ model.
 
     Args:
         in_channels: Number of input channels (1=IR, 2=IR+Depth, 3=RGB)
         num_classes: Number of output classes (1 for binary segmentation)
+        deep_supervision: Enable deep supervision (recommended for small targets)
 
     Returns:
         model: MambaUNetPlusPlus instance
 
     Example:
-        >>> model = mamba_unetplusplus(in_channels=3, num_classes=1)
+        >>> model = mamba_unetplusplus(in_channels=3, num_classes=1, deep_supervision=True)
         >>> x = torch.randn(4, 3, 256, 256)
         >>> out = model(x)
-        >>> print(out.shape)  # (4, 1, 256, 256)
+        >>> if isinstance(out, list):
+        >>>     print(f"Deep supervision: {len(out)} outputs")
+        >>> else:
+        >>>     print(out.shape)  # (4, 1, 256, 256)
     """
     return MambaUNetPlusPlus(
         num_classes=num_classes,
         input_channels=in_channels,
         nb_filter=[16, 32, 64, 128, 256],  # Same as DNANet
+        deep_supervision=deep_supervision,
     )
 
 
