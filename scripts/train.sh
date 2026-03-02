@@ -315,36 +315,131 @@ case $MODE in
 
     mamba_unetpp)
         echo "🎯 Mamba-UNet++: 混合架构（CNN浅层 + Mamba深层 + UNet++密集连接）"
+
         cd model_Mamba
-        python train.py \
-            --experiment_name MambaUNetPP_Cat2 \
-            --model mamba_unetpp \
-            --root ../dataset/ \
-            --dataset $DATASET \
-            --split_method $SPLIT_METHOD \
-            --in_channels 3 \
-            --image_folder images-8bit \
-            --suffix .png \
-            --base_size 256 \
-            --crop_size 256 \
-            --train_batch_size $BATCH_SIZE \
-            --test_batch_size $BATCH_SIZE \
-            --epochs $EPOCHS \
-            --optimizer Adagrad \
-            --lr 0.05 \
-            --scheduler CosineAnnealingLR \
-            --min_lr 1e-6 \
-            --seed 42 \
-            --use_polaris_loader False \
-            --normalize_16bit False \
-            --loss_type hybrid \
-            --dice_weight 1.0 \
-            --projection_weight 5.0 \
-            --peak_threshold $THRESHOLD \
-            --workers 4 \
-            --use_lidar False \
-            --use_deep_supervision False
+
+        # OOM 自动重试逻辑
+        BATCH_SIZES=(4 2 1)
+        SUCCESS=false
+        LOG_FILE="/tmp/mamba_unetpp_train_$$.log"
+
+        for TRY_BATCH in "${BATCH_SIZES[@]}"; do
+            echo ""
+            echo "🔄 尝试 Batch Size = $TRY_BATCH"
+
+            # 运行训练，重定向输出到日志文件
+            python train.py \
+                --experiment_name MambaUNetPP_Cat2 \
+                --model mamba_unetpp \
+                --root ../dataset/ \
+                --dataset $DATASET \
+                --split_method $SPLIT_METHOD \
+                --in_channels 3 \
+                --image_folder images-8bit \
+                --suffix .png \
+                --base_size 256 \
+                --crop_size 256 \
+                --train_batch_size $TRY_BATCH \
+                --test_batch_size $TRY_BATCH \
+                --epochs $EPOCHS \
+                --optimizer Adagrad \
+                --lr 0.05 \
+                --scheduler CosineAnnealingLR \
+                --min_lr 1e-6 \
+                --seed 42 \
+                --use_polaris_loader False \
+                --normalize_16bit False \
+                --loss_type hybrid \
+                --dice_weight 1.0 \
+                --projection_weight 5.0 \
+                --peak_threshold $THRESHOLD \
+                --workers 4 \
+                --use_lidar False \
+                --use_deep_supervision False > "$LOG_FILE" 2>&1 &
+
+            TRAIN_PID=$!
+            echo "📝 训练进程 PID: $TRAIN_PID"
+            echo "📁 日志文件: $LOG_FILE"
+
+            # 监控训练启动（等待 60 秒）
+            EPOCH_STARTED=false
+            for i in {1..60}; do
+                sleep 1
+
+                # 检查进程是否还在运行
+                if ! ps -p $TRAIN_PID > /dev/null 2>&1; then
+                    # 检查是否 OOM
+                    if grep -qE "OutOfMemoryError|CUDA out of memory" "$LOG_FILE"; then
+                        echo "❌ OOM"
+                        break
+                    else
+                        echo "❌ 训练失败"
+                        tail -10 "$LOG_FILE" | grep -E "Error|Exception" || echo "查看日志: $LOG_FILE"
+                        break
+                    fi
+                fi
+
+                # 检查是否开始训练
+                if [ "$EPOCH_STARTED" = false ] && grep -qE "Epoch.*0|epoch.*0|Epoch 0:" "$LOG_FILE"; then
+                    EPOCH_STARTED=true
+                    echo "✓ 训练已启动，Batch Size = $TRY_BATCH 可行"
+                    echo "✓ 继续训练中... (日志: $LOG_FILE)"
+                    SUCCESS=true
+                    break
+                fi
+            done
+
+            if [ "$SUCCESS" = true ]; then
+                # 显示实时训练日志
+                echo ""
+                echo "=========================================="
+                echo "开始显示训练日志 (Ctrl+C 退出查看但不停止训练)"
+                echo "=========================================="
+                tail -f "$LOG_FILE" &
+                TAIL_PID=$!
+
+                # 等待训练完成
+                wait $TRAIN_PID
+                TRAIN_EXIT_CODE=$?
+
+                # 停止 tail
+                kill $TAIL_PID 2>/dev/null || true
+
+                echo ""
+                echo "=========================================="
+                if [ $TRAIN_EXIT_CODE -eq 0 ]; then
+                    echo "✅ 训练成功完成 (Batch Size = $TRY_BATCH)"
+                else
+                    echo "❌ 训练异常退出 (退出码: $TRAIN_EXIT_CODE)"
+                    echo "查看完整日志: $LOG_FILE"
+                fi
+                echo "=========================================="
+                break
+            else
+                # 杀死进程（如果还在运行）
+                kill $TRAIN_PID 2>/dev/null || true
+                wait $TRAIN_PID 2>/dev/null || true
+
+                if [ "$TRY_BATCH" != "${BATCH_SIZES[-1]}" ]; then
+                    echo "⚠️  Batch Size $TRY_BATCH 不可行，尝试更小的 batch..."
+                    sleep 2
+                    continue
+                else
+                    echo "❌ 即使 Batch Size = 1 仍然失败"
+                    break
+                fi
+            fi
+        done
+
         cd ..
+
+        if [ "$SUCCESS" = false ]; then
+            echo ""
+            echo "============================================================"
+            echo "❌ 训练失败，请查看日志: $LOG_FILE"
+            echo "============================================================"
+            exit 1
+        fi
         ;;
 
     *)

@@ -136,6 +136,11 @@ class MambaUNetPlusPlus(nn.Module):
 
         # Final prediction
         output = self.final(x0_4)
+
+        # Apply sigmoid to convert logits to probabilities [0, 1]
+        # Required by loss functions (FocalBCE, Dice, BoxProjection)
+        output = torch.sigmoid(output)
+
         return output
 
 
