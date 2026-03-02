@@ -319,6 +319,7 @@ case $MODE in
         python train.py \
             --experiment_name MambaUNetPP_Cat2 \
             --model mamba_unetpp \
+            --root ../dataset/ \
             --dataset $DATASET \
             --split_method $SPLIT_METHOD \
             --in_channels 3 \
@@ -339,7 +340,7 @@ case $MODE in
             --loss_type hybrid \
             --dice_weight 1.0 \
             --projection_weight 5.0 \
-            --thres $THRESHOLD \
+            --peak_threshold $THRESHOLD \
             --workers 4 \
             --use_lidar False \
             --use_deep_supervision False
