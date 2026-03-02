@@ -56,6 +56,8 @@ from model_Mamba.core.polaris_mamba_progressive import (
     polaris_mamba_tiny_progressive,
     polaris_mamba_small_progressive,
 )
+# [NEW] Mamba-UNet++ Hybrid Model (2026-03-02)
+from model.model_Mamba_UNetPP import mamba_unetplusplus
 from model_Mamba.core.loss import GaussianFocalLoss, CombinedLoss, AverageMeter, BCEDiceLoss
 from model_Mamba.core.loss_improved import ImprovedBCEDiceLoss, ConfidenceCalibrationLoss
 from model_Mamba.core.loss_advanced import LossFactory  # 2026-02-03: Multi-loss support
@@ -98,8 +100,9 @@ def parse_args():
     parser.add_argument('--model', type=str, default='mamba_tiny',
                         choices=['mamba_tiny', 'mamba_small', 'mamba_base',
                                 'mamba_tiny_multiscale', 'mamba_small_multiscale',
-                                'mamba_tiny_progressive', 'mamba_small_progressive'],
-                        help='Model variant (use *_multiscale for multi-scale, *_progressive for U-Net style decoder)')
+                                'mamba_tiny_progressive', 'mamba_small_progressive',
+                                'mamba_unetpp'],
+                        help='Model variant (use *_multiscale for multi-scale, *_progressive for U-Net style decoder, mamba_unetpp for Mamba-UNet++ hybrid)')
     parser.add_argument('--use_lidar', type=str, default='True',
                         help='Whether to use LiDAR gating (True/False)')
     parser.add_argument('--use_deep_supervision', type=str, default='False',
@@ -163,7 +166,7 @@ def parse_args():
     parser.add_argument('--weight_decay', type=float, default=1e-4,
                         help='Weight decay (L2 penalty)')
     parser.add_argument('--optimizer', type=str, default='AdamW',
-                        choices=['Adam', 'AdamW', 'SGD'],
+                        choices=['Adam', 'AdamW', 'Adagrad', 'SGD'],
                         help='Optimizer')
     parser.add_argument('--scheduler', type=str, default='CosineAnnealingLR',
                         choices=['CosineAnnealingLR', 'CosineAnnealingWarmRestarts', 'StepLR'],
@@ -342,21 +345,39 @@ class MambaDataset(Dataset):
             ir_img = img[0:1, :, :]      # (1, H, W)
             lidar_img = torch.zeros_like(ir_img)
 
-        # Load YOLO labels
-        label_path = os.path.join(self.dataset_dir, 'labels', f'{img_id}.txt')
-        labels = load_yolo_labels_binary(label_path)
+        # [CRITICAL FIX 2026-03-02] Load GT mask directly from masks/ directory
+        # This matches DNANet's approach and avoids issues with missing/mismatched labels
+        # Previously: Generated mask from YOLO labels → failed when labels missing
+        # Now: Load mask PNG directly → works like DNANet
+        mask_path = os.path.join(self.dataset_dir, 'masks', f'{img_id}.png')
 
-        # [SCHEME A] Generate Binary Mask target (instead of Gaussian heatmap)
-        # This is the CRITICAL fix for low IoU - ensures GT is binary {0, 1}
-        # UPDATED 2026-02-03: Use ellipse mode to reduce background noise from rectangular corners
-        H, W = ir_img.shape[1], ir_img.shape[2]
-        mask = generate_binary_mask_target(
-            labels,
-            img_size=(H, W),
-            downscale=self.downscale,
-            fill_mode='box',  # CHANGED: 'ellipse' reduces 50% background noise vs 'box'
-            ellipse_ratio=0.8,    # 80% of bbox size (conservative, can tune to 0.7-0.9)
-        )
+        if os.path.exists(mask_path):
+            # Load mask image (grayscale PNG)
+            mask_img = Image.open(mask_path).convert('L')
+
+            # Resize to match IR image size if needed
+            H, W = ir_img.shape[1], ir_img.shape[2]
+            if mask_img.size != (W, H):
+                mask_img = mask_img.resize((W, H), Image.NEAREST)
+
+            # Convert to numpy and normalize to [0, 1]
+            mask = np.array(mask_img, dtype=np.float32) / 255.0
+
+            # Binarize (threshold at 0.5)
+            mask = (mask > 0.5).astype(np.float32)
+        else:
+            # Fallback: try old YOLO labels method
+            H, W = ir_img.shape[1], ir_img.shape[2]
+            label_path = os.path.join(self.dataset_dir, 'labels', f'{img_id}.txt')
+            labels = load_yolo_labels_binary(label_path)
+            mask = generate_binary_mask_target(
+                labels,
+                img_size=(H, W),
+                downscale=self.downscale,
+                fill_mode='box',
+                ellipse_ratio=0.8,
+            )
+
         # Keep variable name 'heatmap' for compatibility with rest of code
         heatmap = torch.from_numpy(mask).unsqueeze(0).float()  # (1, H, W), values in {0, 1}
 
@@ -533,6 +554,14 @@ class Trainer:
                 use_deep_supervision=use_deep_supervision,
                 use_cbam=args.use_cbam  # [NEW 2026-02-27] CBAM attention
             )
+        elif args.model == 'mamba_unetpp':
+            # [NEW 2026-03-02] Mamba-UNet++ Hybrid Architecture
+            # Combines Mamba blocks (global context) with UNet++ dense skip connections (local details)
+            self.net = mamba_unetplusplus(
+                in_channels=args.in_channels,
+                num_classes=1
+            )
+            print(f"✓ Using Mamba-UNet++ Hybrid (in_channels={args.in_channels})")
         else:
             raise ValueError(f"Unknown model: {args.model}")
 
@@ -613,6 +642,8 @@ class Trainer:
             self.optimizer = optim.Adam(self.net.parameters(), lr=args.lr, weight_decay=args.weight_decay)
         elif args.optimizer == 'AdamW':
             self.optimizer = optim.AdamW(self.net.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+        elif args.optimizer == 'Adagrad':
+            self.optimizer = optim.Adagrad(self.net.parameters(), lr=args.lr, weight_decay=args.weight_decay)
         elif args.optimizer == 'SGD':
             self.optimizer = optim.SGD(self.net.parameters(), lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
 

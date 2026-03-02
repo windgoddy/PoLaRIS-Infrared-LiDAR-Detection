@@ -95,12 +95,15 @@ class TrainSetLoader(Dataset):
             # Don't blur depth? Or maybe yes? Let's skip blurring depth for now.
 
         # final transform
-        img, mask = np.array(img), np.array(mask, dtype=np.float32)
+        # [FIX 2026-03-02] Don't convert to numpy if transform is provided (it expects PIL Image)
+        mask = np.array(mask, dtype=np.float32)
+        if self.transform is None:
+            img = np.array(img)  # Only convert if no transform
         if depth is not None:
             depth = np.array(depth, dtype=np.float32)
         if oracle_mask is not None:
             oracle_mask = np.array(oracle_mask, dtype=np.float32)
-            
+
         return img, mask, depth, oracle_mask
 
     def __getitem__(self, idx):
