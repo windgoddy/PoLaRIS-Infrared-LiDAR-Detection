@@ -341,9 +341,10 @@ class MambaDataset(Dataset):
             ir_img = img[0:1, :, :]      # (1, H, W)
             lidar_img = torch.zeros_like(ir_img)  # (1, H, W) all zeros
         else:
-            # in_channels=3: RGB (not supported for Mamba, use first channel)
-            ir_img = img[0:1, :, :]      # (1, H, W)
-            lidar_img = torch.zeros_like(ir_img)
+            # in_channels=3: RGB (for models like Mamba-UNet++ that support 3-channel input)
+            # [FIX 2026-03-02] Keep all 3 channels for fair comparison with DNANet
+            ir_img = img  # (3, H, W) - keep all channels
+            lidar_img = torch.zeros((1, img.shape[1], img.shape[2]), dtype=img.dtype, device=img.device)
 
         # [CRITICAL FIX 2026-03-02] Load GT mask directly from masks/ directory
         # This matches DNANet's approach and avoids issues with missing/mismatched labels
