@@ -342,16 +342,16 @@ case $MODE in
                 --train_batch_size $TRY_BATCH \
                 --test_batch_size $TRY_BATCH \
                 --epochs $EPOCHS \
-                --optimizer Adagrad \
-                --lr 0.05 \
+                --optimizer AdamW \
+                --lr 0.0005 \
+                --weight_decay 0.05 \
                 --scheduler CosineAnnealingLR \
                 --min_lr 1e-6 \
                 --seed 42 \
                 --use_polaris_loader False \
                 --normalize_16bit False \
-                --loss_type hybrid \
-                --dice_weight 1.0 \
-                --projection_weight 5.0 \
+                --loss_type improved_bce_dice \
+                --dice_weight 2.0 \
                 --peak_threshold $THRESHOLD \
                 --workers 4 \
                 --use_lidar False \

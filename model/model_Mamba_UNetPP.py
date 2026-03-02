@@ -159,14 +159,12 @@ class MambaBlockWrapper(nn.Module):
         self.proj_in = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
 
         # Mamba block (expects BHWC format)
+        # VSSBlock already contains internal LayerNorm; no extra norm needed here
         self.mamba = VSSBlock(
             hidden_dim=out_ch,
             drop_path=0.1,
             use_lidar_gate=False,  # Disable LiDAR for now
         )
-
-        # Batch norm for stability
-        self.norm = nn.BatchNorm2d(out_ch)
 
     def forward(self, x):
         """
@@ -187,7 +185,8 @@ class MambaBlockWrapper(nn.Module):
 
         # Convert back
         x = x.permute(0, 3, 1, 2)  # (B, C, H, W)
-        x = self.norm(x)
+        # Do NOT add BatchNorm2d here: VSSBlock's internal LayerNorm is sufficient.
+        # Extra BN would destroy the global-context distribution Mamba has built.
 
         return x
 
