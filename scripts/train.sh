@@ -338,7 +338,7 @@ case $MODE in
             # 3. 缩短训练周期 (500 → 300) ← 配合 GroupNorm 快速收敛
             # 4. 保持数据增强、梯度累积、深度监督
             python train.py \
-                --experiment_name MambaUNetPP_V4_Cat2_GroupNorm \
+                --experiment_name MambaUNetPP_V5_Cat2_HybridNoDice \
                 --model mamba_unetpp \
                 --root ../dataset/ \
                 --dataset $DATASET \
@@ -360,9 +360,10 @@ case $MODE in
                 --seed 42 \
                 --use_polaris_loader False \
                 --normalize_16bit False \
-                --loss_type improved_bce_dice \
-                --dice_weight 4.0 \
-                --focal_gamma 2.5 \
+                --loss_type hybrid \
+                --dice_weight 0.1 \
+                --projection_weight 2.0 \
+                --focal_gamma 4.0 \
                 --peak_threshold $THRESHOLD \
                 --workers 4 \
                 --use_lidar False \

@@ -106,6 +106,85 @@ class BoxProjectionLoss(nn.Module):
         return loss_x + loss_y
 
 
+class PairwiseAffinityLoss(nn.Module):
+    """
+    成对亲和力损失 (Pairwise Affinity Loss) - BoxInst 风格
+
+    **核心思想：**
+    如果相邻像素在原始图像中颜色/亮度相似，那么它们的预测值也应该相似。
+    这是一种无监督约束，利用图像本身的纹理信息引导分割边界。
+
+    **数学原理：**
+    对于相邻像素 i 和 j：
+    1. 计算图像相似度: w_ij = exp(-λ * |I_i - I_j|)
+    2. 计算预测差异: d_ij = |P_i - P_j|
+    3. Loss = Σ w_ij * d_ij
+
+    **含义：**
+    - 如果图像相似(w大)但预测不同(d大) → Loss 大 → 惩罚
+    - 如果图像不同(w小) → Loss 小 → 允许预测不同
+
+    **优势：**
+    - ✅ 自动贴合物体边缘（利用红外热点的亮度差异）
+    - ✅ 无需像素级标注（完全无监督）
+    - ✅ 适合不规则形状（船体、浮漂）
+
+    **适用场景：**
+    - 红外小目标检测（热点与背景有明显亮度差）
+    - 弱监督分割（Box 标注）
+    - 需要精细边缘的场景
+
+    Args:
+        lambda_val: 亲和力权重系数 (default: 2.0)
+                   越大表示对图像相似度越敏感
+        kernel_size: 邻域大小 (default: 3, 即8邻域)
+
+    Reference:
+        BoxInst: High-Performance Instance Segmentation with Box Annotations (CVPR 2021)
+    """
+    def __init__(self, lambda_val=2.0, kernel_size=3):
+        super(PairwiseAffinityLoss, self).__init__()
+        self.lambda_val = lambda_val
+        self.kernel_size = kernel_size
+
+    def forward(self, pred, image):
+        """
+        Args:
+            pred: (B, 1, H, W) 预测 Mask (Sigmoid后，范围 [0, 1])
+            image: (B, C, H, W) 原始红外图像 (归一化到 [0, 1])
+
+        Returns:
+            loss: scalar affinity loss
+        """
+        # 如果是多通道图像，转为灰度（红外通常是单通道）
+        if image.shape[1] > 1:
+            # RGB to grayscale: 0.299*R + 0.587*G + 0.114*B
+            image = 0.299 * image[:, 0:1] + 0.587 * image[:, 1:2] + 0.114 * image[:, 2:3]
+
+        # 1. 计算图像的水平和垂直差异
+        # 水平方向：比较每个像素与右边像素
+        img_diff_h = torch.abs(image[:, :, :, :-1] - image[:, :, :, 1:])  # (B, 1, H, W-1)
+        # 垂直方向：比较每个像素与下边像素
+        img_diff_v = torch.abs(image[:, :, :-1, :] - image[:, :, 1:, :])  # (B, 1, H-1, W)
+
+        # 2. 计算亲和力权重 (Affinity Weight)
+        # 公式: w = exp(-λ * |I_i - I_j|)
+        # 图像差异越小 → w 越大 → 要求预测也相似
+        weight_h = torch.exp(-self.lambda_val * img_diff_h)  # (B, 1, H, W-1)
+        weight_v = torch.exp(-self.lambda_val * img_diff_v)  # (B, 1, H-1, W)
+
+        # 3. 计算预测值的差异
+        pred_diff_h = torch.abs(pred[:, :, :, :-1] - pred[:, :, :, 1:])  # (B, 1, H, W-1)
+        pred_diff_v = torch.abs(pred[:, :, :-1, :] - pred[:, :, 1:, :])  # (B, 1, H-1, W)
+
+        # 4. 加权损失
+        # 如果图像相似(weight大)但预测不同(diff大)，则 Loss 大
+        loss_h = (weight_h * pred_diff_h).mean()
+        loss_v = (weight_v * pred_diff_v).mean()
+
+        return loss_h + loss_v
+
+
 class HybridLoss(nn.Module):
     """
     混合损失：ImprovedBCEDice + ProjectionLoss
