@@ -83,13 +83,24 @@ class MambaUNetPlusPlus(nn.Module):
             self.final = nn.Conv2d(nb_filter[0], num_classes, kernel_size=1)
 
     def _make_cnn_block(self, in_ch, out_ch):
-        """Standard CNN block with BatchNorm and ReLU"""
+        """
+        CNN block with GroupNorm (Better for small batch size)
+
+        [FIX 2026-03-03] Replaced BatchNorm with GroupNorm
+        - BatchNorm is unstable with small batch size (4)
+        - GroupNorm is independent of batch size
+        - Standard solution for medical/small-target detection
+        """
+        # GroupNorm: 8 groups for channels < 64, 16 groups for channels >= 64
+        # Ensures each group has at least 2-4 channels
+        num_groups = 8 if out_ch < 64 else 16
+
         return nn.Sequential(
             nn.Conv2d(in_ch, out_ch, 3, padding=1),
-            nn.BatchNorm2d(out_ch),
+            nn.GroupNorm(num_groups, out_ch),  # ✅ Replaced BatchNorm
             nn.ReLU(inplace=True),
             nn.Conv2d(out_ch, out_ch, 3, padding=1),
-            nn.BatchNorm2d(out_ch),
+            nn.GroupNorm(num_groups, out_ch),  # ✅ Replaced BatchNorm
             nn.ReLU(inplace=True),
         )
 

@@ -331,13 +331,14 @@ case $MODE in
             echo ""
             echo "🔄 尝试 Batch Size = $TRY_BATCH"
 
-            # [FIX 2026-03-03] 导师建议的关键修复
-            # 1. 启用数据增强 (--use_augmentation True) ← 关键！防止过拟合
-            # 2. 梯度累积 (--gradient_accumulation_steps 4) ← 有效 Batch = 16，稳定梯度
-            # 3. 缩短训练周期 (--epochs 500) ← 让 LR 快速衰减到精细收敛区
-            # 4. 保持深度监督和高 Dice 权重
+            # [FIX 2026-03-03] 导师诊断：BatchNorm + 小Batch的致命组合
+            # 核心修复：
+            # 1. 模型代码已改用 GroupNorm（不依赖 Batch Size）
+            # 2. 降低学习率 (0.0005 → 0.0004) ← GroupNorm 更稳定，可用稍高 LR
+            # 3. 缩短训练周期 (500 → 300) ← 配合 GroupNorm 快速收敛
+            # 4. 保持数据增强、梯度累积、深度监督
             python train.py \
-                --experiment_name MambaUNetPP_V3_Cat2_Augmented \
+                --experiment_name MambaUNetPP_V4_Cat2_GroupNorm \
                 --model mamba_unetpp \
                 --root ../dataset/ \
                 --dataset $DATASET \
@@ -350,9 +351,9 @@ case $MODE in
                 --train_batch_size $TRY_BATCH \
                 --test_batch_size $TRY_BATCH \
                 --gradient_accumulation_steps 4 \
-                --epochs 500 \
+                --epochs 300 \
                 --optimizer AdamW \
-                --lr 0.0005 \
+                --lr 0.0004 \
                 --weight_decay 0.05 \
                 --scheduler CosineAnnealingLR \
                 --min_lr 1e-6 \
