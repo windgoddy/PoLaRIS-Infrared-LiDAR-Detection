@@ -331,12 +331,13 @@ case $MODE in
             echo ""
             echo "🔄 尝试 Batch Size = $TRY_BATCH"
 
-            # [FIX 2026-03-02] 优化训练配置
-            # 1. 启用深度监督 (--use_deep_supervision True)
-            # 2. 提高 Dice 权重 (--dice_weight 4.0)
-            # 3. 使用 improved_bce_dice 损失
+            # [FIX 2026-03-03] 导师建议的关键修复
+            # 1. 启用数据增强 (--use_augmentation True) ← 关键！防止过拟合
+            # 2. 梯度累积 (--gradient_accumulation_steps 4) ← 有效 Batch = 16，稳定梯度
+            # 3. 缩短训练周期 (--epochs 500) ← 让 LR 快速衰减到精细收敛区
+            # 4. 保持深度监督和高 Dice 权重
             python train.py \
-                --experiment_name MambaUNetPP_V2_Cat2_DeepSup \
+                --experiment_name MambaUNetPP_V3_Cat2_Augmented \
                 --model mamba_unetpp \
                 --root ../dataset/ \
                 --dataset $DATASET \
@@ -348,9 +349,11 @@ case $MODE in
                 --crop_size 256 \
                 --train_batch_size $TRY_BATCH \
                 --test_batch_size $TRY_BATCH \
-                --epochs $EPOCHS \
-                --optimizer Adagrad \
-                --lr 0.05 \
+                --gradient_accumulation_steps 4 \
+                --epochs 500 \
+                --optimizer AdamW \
+                --lr 0.0005 \
+                --weight_decay 0.05 \
                 --scheduler CosineAnnealingLR \
                 --min_lr 1e-6 \
                 --seed 42 \
@@ -362,7 +365,8 @@ case $MODE in
                 --peak_threshold $THRESHOLD \
                 --workers 4 \
                 --use_lidar False \
-                --use_deep_supervision True > "$LOG_FILE" 2>&1 &
+                --use_deep_supervision True \
+                --use_augmentation True > "$LOG_FILE" 2>&1 &
 
             TRAIN_PID=$!
             echo "📝 训练进程 PID: $TRAIN_PID"
