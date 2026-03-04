@@ -370,7 +370,7 @@ case $MODE in
                 --train_batch_size $TRY_BATCH \
                 --test_batch_size $TRY_BATCH \
                 --gradient_accumulation_steps 4 \
-                --epochs 300 \
+                --epochs 500 \
                 --optimizer AdamW \
                 --lr 0.0004 \
                 --weight_decay 0.05 \
