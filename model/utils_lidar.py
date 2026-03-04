@@ -39,6 +39,11 @@ def bin_to_depth_image(lidar_points, img_size):
     'lidar_roi' points are projected onto the camera image plane beforehand
     (using calibration), so (x, y) are already pixel coordinates.
 
+    Filtering (mirrors data_tools.py filter_lidar_points):
+      - Remove NaN / Inf values (fixes RuntimeWarning on cast)
+      - Keep points with positive depth (z > 0)
+      - Keep points with sufficient intensity (intensity > 5.0)
+
     Args:
         lidar_points: (N, 4) numpy array  [x=col, y=row, z=depth, intensity]
                       Empty array → all-zero image.
@@ -53,10 +58,26 @@ def bin_to_depth_image(lidar_points, img_size):
     if len(lidar_points) == 0:
         return Image.fromarray(depth_map, mode='F')
 
+    # Step 1: Remove NaN / Inf (root cause of RuntimeWarning)
+    finite_mask = np.isfinite(lidar_points).all(axis=1)
+    lidar_points = lidar_points[finite_mask]
+
+    if len(lidar_points) == 0:
+        return Image.fromarray(depth_map, mode='F')
+
+    # Step 2: Intensity filter (mirrors data_tools.py min_intensity=5.0)
+    intensity = lidar_points[:, 3]
+    int_mask = intensity > 5.0
+    lidar_points = lidar_points[int_mask]
+
+    if len(lidar_points) == 0:
+        return Image.fromarray(depth_map, mode='F')
+
     cols   = np.round(lidar_points[:, 0]).astype(np.int32)
     rows   = np.round(lidar_points[:, 1]).astype(np.int32)
     depths = lidar_points[:, 2].astype(np.float32)
 
+    # Step 3: Keep in-bounds, positive-depth points
     valid = (cols >= 0) & (cols < W) & (rows >= 0) & (rows < H) & (depths > 0)
     cols, rows, depths = cols[valid], rows[valid], depths[valid]
 
@@ -398,7 +419,9 @@ class PoLaRISTrainLoader(Dataset):
         if self.in_channels == 2:
             # 2-channel mode: stack IR + depth
             img = img / 255.0  # Normalize IR to [0, 1]
-            depth = depth / 80.0  # Normalize depth (approx max 80m)
+            # [FIX 2026-03-04] Pohang-Canal lidar_roi z实测范围 0~911m，
+            # 原 /80.0 会导致归一化值远超[0,1]，改为 /1000.0 覆盖常见海面探测距离
+            depth = depth / 1000.0  # Normalize depth (max ~1000m for maritime LiDAR)
             combined = np.stack([img, depth], axis=0)  # (2, H, W)
             img_tensor = torch.from_numpy(combined).float()
         elif self.in_channels == 3:
@@ -634,7 +657,7 @@ class PoLaRISTestLoader(Dataset):
         if self.in_channels == 2:
             # 2-channel mode: stack IR + depth
             img = img / 255.0
-            depth = depth / 80.0
+            depth = depth / 1000.0  # [FIX 2026-03-04] maritime LiDAR max ~1000m
             combined = np.stack([img, depth], axis=0)
             img_tensor = torch.from_numpy(combined).float()
         elif self.in_channels == 3:
