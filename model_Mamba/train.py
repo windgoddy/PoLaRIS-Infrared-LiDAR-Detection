@@ -852,11 +852,31 @@ class Trainer:
             # Load metrics
             if 'iou' in checkpoint:
                 self.best_iou = checkpoint['iou']
-                print(f"✅ Loaded best Seg IoU: {self.best_iou:.4f}")
+                print(f"\u2705 Loaded best Seg IoU: {self.best_iou:.4f}")
 
             if 'box_iou' in checkpoint:
                 self.best_box_iou = checkpoint['box_iou']
-                print(f"✅ Loaded best Box IoU: {self.best_box_iou:.4f}")
+                print(f"\u2705 Loaded best Box IoU: {self.best_box_iou:.4f}")
+
+            # Fallback: old checkpoints may not have iou/box_iou fields.
+            # Scan existing best_model_*.pth filenames in save_dir to recover scores.
+            if 'iou' not in checkpoint or 'box_iou' not in checkpoint:
+                import glob, re
+                save_dir = os.path.dirname(checkpoint_path)
+                best_files = glob.glob(os.path.join(save_dir, 'best_model_epoch*.pth'))
+                for bf in best_files:
+                    name = os.path.basename(bf)
+                    # IoU-first files: best_model_epoch####_IoU0.xxxx_BoxIoU0.xxxx.pth
+                    m = re.search(r'_IoU(\d+\.\d+)_BoxIoU(\d+\.\d+)', name)
+                    if m and 'iou' not in checkpoint:
+                        self.best_iou = max(self.best_iou, float(m.group(1)))
+                    # BoxIoU-first files: best_model_epoch####_BoxIoU0.xxxx_IoU0.xxxx.pth
+                    m2 = re.search(r'_BoxIoU(\d+\.\d+)_IoU(\d+\.\d+)', name)
+                    if m2 and 'box_iou' not in checkpoint:
+                        self.best_box_iou = max(self.best_box_iou, float(m2.group(1)))
+                if best_files:
+                    print(f"\u26a0\ufe0f  Checkpoint had no metric fields \u2014 recovered from disk:")
+                    print(f"   best Seg IoU={self.best_iou:.4f}, best Box IoU={self.best_box_iou:.4f}")
 
             if 'epoch' in checkpoint:
                 self.args.start_epoch = checkpoint['epoch'] + 1

@@ -122,6 +122,9 @@ def init_training_log_csv(save_dir):
     """
     Initialize train_log.csv with headers.
 
+    If the file already exists (i.e. resuming into the same save_dir),
+    the existing content is preserved and new epochs are appended.
+
     Args:
         save_dir: Directory to save the CSV file
 
@@ -129,6 +132,11 @@ def init_training_log_csv(save_dir):
         csv_path: Path to the CSV file
     """
     csv_path = os.path.join(save_dir, 'train_log.csv')
+
+    if os.path.exists(csv_path):
+        # Resume: keep existing log and append going forward
+        print(f"📋 Resuming training log (appending): {csv_path}")
+        return csv_path
 
     with open(csv_path, 'w', newline='') as f:
         writer = csv.writer(f)

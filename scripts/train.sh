@@ -330,6 +330,15 @@ case $MODE in
         echo "  ✓ 残差连接 (稳定训练)"
         echo "  ✓ Dice Weight = 4.0 (提高像素精度)"
 
+        # 在 cd 之前将相对路径转为绝对路径，避免进入子目录后路径失效
+        ROOT_ABS="$(pwd)"
+        if [[ -n "$RESUME" && "$RESUME" != /* ]]; then
+            RESUME="$ROOT_ABS/$RESUME"
+        fi
+        if [[ -n "$SAVE_DIR" && "$SAVE_DIR" != /* ]]; then
+            SAVE_DIR="$ROOT_ABS/$SAVE_DIR"
+        fi
+
         cd model_Mamba
 
         # OOM 自动重试逻辑
