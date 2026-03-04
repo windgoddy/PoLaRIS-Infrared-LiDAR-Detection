@@ -997,6 +997,12 @@ class Trainer:
                     heatmap_pred = output
                     loss = self.criterion(heatmap_pred, heatmap_gt)
 
+            # Skip batch if loss is NaN/Inf (numerical instability in Mamba SSM)
+            if not torch.isfinite(loss):
+                print(f"\n[WARNING] Epoch {epoch} batch {i}: loss={loss.item()}, skipping batch")
+                self.optimizer.zero_grad()
+                continue
+
             # Backward and optimizer step (baseline)
             self.optimizer.zero_grad()
             loss.backward()

@@ -341,8 +341,13 @@ case $MODE in
 
         cd model_Mamba
 
-        # OOM 自动重试逻辑
-        BATCH_SIZES=(4 2 1)
+        # OOM 自动重试逻辑：从用户指定的 batch size 开始，逐步降低
+        BATCH_SIZES=($BATCH_SIZE)
+        for fallback in 4 2 1; do
+            if [ $fallback -lt $BATCH_SIZE ]; then
+                BATCH_SIZES+=($fallback)
+            fi
+        done
         SUCCESS=false
         LOG_FILE="/tmp/mamba_unetpp_train_$$.log"
 

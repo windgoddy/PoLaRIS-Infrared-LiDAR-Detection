@@ -100,6 +100,13 @@ class BoxProjectionLoss(nn.Module):
             target_y = torch.mean(target, dim=2)  # (B, H)
         
         # 3. 计算投影损失
+        # Replace NaN/Inf and clamp to [eps, 1-eps] to prevent BCELoss CUDA assertion
+        # (NaN can appear in Mamba SSM computations after long training)
+        eps = 1e-7
+        pred_x = torch.nan_to_num(pred_x, nan=0.0, posinf=1.0, neginf=0.0)
+        pred_y = torch.nan_to_num(pred_y, nan=0.0, posinf=1.0, neginf=0.0)
+        pred_x = torch.clamp(pred_x, eps, 1.0 - eps)
+        pred_y = torch.clamp(pred_y, eps, 1.0 - eps)
         loss_x = self.criterion(pred_x, target_x)
         loss_y = self.criterion(pred_y, target_y)
         
