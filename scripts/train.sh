@@ -126,14 +126,13 @@ done
 
 # 自动选择数据集划分方法（如果未指定）
 if [[ -z "$SPLIT_METHOD" ]]; then
-    case $MODE in
-        cat2)
-            SPLIT_METHOD="50_50_cat2"
-            ;;
-        *)
-            SPLIT_METHOD="50_50_2k"
-            ;;
-    esac
+    SPLIT_METHOD="50_50_cat2"
+fi
+
+# 如果指定了 --resume 但没有指定 --save-dir，自动用 checkpoint 所在目录
+if [[ -n "$RESUME" && -z "$SAVE_DIR" ]]; then
+    SAVE_DIR="$(dirname "$RESUME")"
+    echo "ℹ️  Auto save-dir from resume: $SAVE_DIR"
 fi
 
 # 自动选择GPU
@@ -326,7 +325,7 @@ case $MODE in
     mamba_unetpp)
         echo "🎯 Mamba-UNet++ Final Baseline: 回归本质，工程致胜"
         echo "  ✓ Loss: Hybrid (Focal + Dice + Projection)"
-        echo "  ✓ Dice Weight = 1.0  → 填满矩形框，保证 Box IoU"
+        echo "  ✓ Dice Weight = 0.1  → 辅助分割，主导权交给 Focal"
         echo "  ✓ Projection Weight = 2.0 → 边界约束，防止溢出"
         echo "  ✓ GroupNorm + AdamW + Cosine → 稳定收敛"
         echo "  ✓ Augmentation + Deep Supervision → 抗过拟合"
@@ -359,12 +358,10 @@ case $MODE in
             LOG_FILE="/tmp/mamba_unetpp_train_$$_bs${TRY_BATCH}.log"
             LAST_LOG_FILE="$LOG_FILE"
 
-            # [Final Baseline 2026-03-04]
-            # 战略回归：Hybrid Loss (Focal + Dice + Projection)
-            # Dice=1.0 填满框 → Box IoU 评估天然对齐
-            # Projection=2.0 约束边界防溢出
-            # Focal α=0.25 γ=2.0 标准配置压制虚警
-            # GroupNorm 已固化在模型代码中，本次无需修改模型
+            # [Phase 2: Augmentation 抗过拟合 2026-03-04]
+            # Epoch ~82 出现过拟合拐点（Test Loss > Train Loss, Gap≈+0.2）
+            # 从最佳 checkpoint 恢复，开启 augmentation 抑制过拟合
+            # 其余参数保持不变
             python train.py \
                 --experiment_name MambaUNetPP_FinalBaseline \
                 --model mamba_unetpp \
@@ -378,10 +375,10 @@ case $MODE in
                 --crop_size 256 \
                 --train_batch_size $TRY_BATCH \
                 --test_batch_size $TRY_BATCH \
-                --gradient_accumulation_steps 4 \
+                --gradient_accumulation_steps 1 \
                 --epochs 500 \
                 --optimizer AdamW \
-                --lr 0.0003 \
+                --lr 0.0004 \
                 --weight_decay 0.05 \
                 --scheduler CosineAnnealingLR \
                 --min_lr 1e-6 \
@@ -390,14 +387,14 @@ case $MODE in
                 --normalize_16bit False \
                 --loss_type hybrid \
                 --focal_alpha 0.25 \
-                --focal_gamma 2.0 \
-                --dice_weight 1.0 \
+                --focal_gamma 4.0 \
+                --dice_weight 0.1 \
                 --projection_weight 2.0 \
                 --peak_threshold $THRESHOLD \
                 --workers 4 \
                 --use_lidar False \
                 --use_deep_supervision True \
-                --use_augmentation True \
+                --use_augmentation False \
                 ${RESUME:+--resume "$RESUME"} \
                 ${SAVE_DIR:+--save_dir "$SAVE_DIR"} > "$LOG_FILE" 2>&1 &
 
@@ -463,6 +460,27 @@ case $MODE in
                     if [ "$TRY_BATCH" = "${BATCH_SIZES[-1]}" ]; then
                         echo "❌ 即使 Batch Size = $TRY_BATCH 仍然 OOM，放弃"
                         break
+                    fi
+                    # [FIX] 自动从日志中找到 Save Dir，并定位最佳 checkpoint
+                    # 这样 OOM 降 batch 重试时能从断点继续，而不是从 Epoch 0 重新开始
+                    OOM_SAVE_DIR=$(grep "Save Dir:" "$LOG_FILE" | tail -1 | sed 's/.*Save Dir: //')
+                    if [[ -n "$OOM_SAVE_DIR" && -d "$OOM_SAVE_DIR" ]]; then
+                        # 优先找 BoxIoU 最高的 best_model checkpoint
+                        OOM_CKPT=$(ls "$OOM_SAVE_DIR"/best_model_epoch*.pth 2>/dev/null | \
+                            sort -t'x' -k2 -V | tail -1)
+                        if [[ -z "$OOM_CKPT" ]]; then
+                            # 退而求其次：找最新的 checkpoint
+                            OOM_CKPT=$(ls -t "$OOM_SAVE_DIR"/*.pth 2>/dev/null | head -1)
+                        fi
+                        if [[ -n "$OOM_CKPT" ]]; then
+                            echo "🔁 自动 Resume: $OOM_CKPT"
+                            RESUME="$OOM_CKPT"
+                            SAVE_DIR="$OOM_SAVE_DIR"
+                        else
+                            echo "⚠️  未找到 checkpoint，将从头开始（损失已保存至 $OOM_SAVE_DIR）"
+                        fi
+                    else
+                        echo "⚠️  无法解析 Save Dir，将从头开始"
                     fi
                     echo "⚠️  尝试更小的 batch size..."
                     sleep 2

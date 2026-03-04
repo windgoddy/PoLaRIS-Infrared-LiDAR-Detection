@@ -1020,13 +1020,7 @@ class Trainer:
                     # Weighted combination: Original baseline weight (0.4)
                     loss = loss_main + 0.5 * loss_aux2 + 0.4 * loss_aux3
 
-                    # Debug: Print deep supervision loss breakdown (every 100 batches)
-                    if (i + 1) % 100 == 0 or (i + 1) == total_batches:
-                        print(f"\n[Epoch {epoch}] Deep Supervision Loss (batch {i+1}/{total_batches}):")
-                        print(f"  Main Loss:  {loss_main.item():.4f}")
-                        print(f"  Aux2 Loss:  {loss_aux2.item():.4f} (weight: 0.5)")
-                        print(f"  Aux3 Loss:  {loss_aux3.item():.4f} (weight: 0.4)")
-                        print(f"  Total Loss: {loss.item():.4f}")
+                    pass  # deep supervision loss breakdown logging removed
                 else:
                     # Standard mode: single output
                     heatmap_pred = output
@@ -1267,6 +1261,9 @@ class Trainer:
 
             # Testing (返回值包含 box_iou)
             test_loss, test_iou, test_precision, test_recall, test_f1, best_threshold, test_box_iou = self.testing(epoch)
+
+            # 清理 GPU 内存碎片，防止大数据集（如 50_50_cat2）测试结束后下一轮训练 OOM
+            torch.cuda.empty_cache()
 
             # Update scheduler
             self.scheduler.step()
