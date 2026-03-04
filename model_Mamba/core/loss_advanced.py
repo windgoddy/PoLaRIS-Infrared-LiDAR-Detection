@@ -317,9 +317,11 @@ class GaussianFocalLoss(nn.Module):
         eps = 1e-7
         pred = torch.clamp(pred, eps, 1.0 - eps)
 
-        # 前景掩码：高斯中心（精确 == 1.0）
-        pos_mask = target.eq(1.0).float()
-        neg_mask = target.lt(1.0).float()
+        # [FIX 2026-03-04] 前景掩码：高斯峰值附近（>= 0.999）
+        # 原来用 eq(1.0) 在偶数尺寸目标框上会失败（中心不在整数格点）
+        # 虽然 convert_box_mask_to_gaussian 已做 round 修复，此处作为防御保留宽松阈值
+        pos_mask = target.ge(0.999).float()
+        neg_mask = target.lt(0.999).float()
 
         # 前景损失（只在峰值像素计算）
         pos_loss = pos_mask * (-(1.0 - pred).pow(self.alpha) * torch.log(pred))
@@ -385,22 +387,27 @@ class GaussianHybridLoss(nn.Module):
         self.sigma_scale = sigma_scale
         self.min_sigma = min_sigma
 
-    def forward(self, pred, target):
+    def forward(self, pred, target, gaussian_target=None):
         """
         Args:
             pred  : (B, 1, H, W) 模型输出 [0, 1]
             target: (B, 1, H, W) 原始 Box 二值 Mask {0, 1}（DataLoader 原始输出）
+            gaussian_target: (B, 1, H, W) 预计算的高斯热图（可选）
+                             如果提供，跳过 Box→Gaussian 转换（Deep Supervision 优化用）
         Returns:
             loss: scalar
         """
         target = target.float()
 
         # Step 1: Box Mask → 软高斯热图（GPU 内联转换）
-        gaussian_target = convert_box_mask_to_gaussian(
-            target,
-            sigma_scale=self.sigma_scale,
-            min_sigma=self.min_sigma,
-        )
+        # [FIX 2026-03-04] 支持传入预计算的 gaussian_target，
+        # Deep Supervision 场景下只需转换一次，3 个 head 复用
+        if gaussian_target is None:
+            gaussian_target = convert_box_mask_to_gaussian(
+                target,
+                sigma_scale=self.sigma_scale,
+                min_sigma=self.min_sigma,
+            )
 
         # Step 2: 主损失 —— Gaussian Focal（学习热点分布）
         loss_gauss = self.gaussian_focal(pred, gaussian_target)

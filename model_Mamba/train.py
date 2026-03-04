@@ -565,12 +565,14 @@ class Trainer:
             # [NEW 2026-03-02] Mamba-UNet++ Hybrid Architecture
             # Combines Mamba blocks (global context) with UNet++ dense skip connections (local details)
             # [FIX 2026-03-02] Added deep_supervision support
+            # [FIX 2026-03-04] use_deep_supervision 是字符串 'True'/'False'，
+            # 必须转为 bool，否则 'False' 作为非空字符串也是 truthy
             self.net = mamba_unetplusplus(
                 in_channels=args.in_channels,
                 num_classes=1,
-                deep_supervision=args.use_deep_supervision  # Enable deep supervision
+                deep_supervision=use_deep_supervision  # 使用 line 541 已转换的 bool 变量
             )
-            print(f"✓ Using Mamba-UNet++ Hybrid (in_channels={args.in_channels}, deep_supervision={args.use_deep_supervision})")
+            print(f"✓ Using Mamba-UNet++ Hybrid (in_channels={args.in_channels}, deep_supervision={use_deep_supervision})")
         else:
             raise ValueError(f"Unknown model: {args.model}")
 
@@ -703,16 +705,17 @@ class Trainer:
         self.best_threshold_history = []
 
         # ========== [NEW 2026-02-26] Training Improvements ==========
-        # DISABLED for baseline validation (2026-02-27)
-        # self._init_training_improvements(args)
-
-        # Initialize required attributes for baseline (to avoid AttributeError)
-        self.gradient_accumulation_steps = 1  # No accumulation in baseline
+        # [FIX 2026-03-04] 重新启用训练增强模块
+        # 之前被注释掉导致 train.sh 传的 --use_augmentation True 和
+        # --gradient_accumulation_steps 4 完全不生效
+        # 先设置默认值（防止 _init 失败时 AttributeError），再调用初始化
+        self.gradient_accumulation_steps = 1
         self.use_augmentation = False
         self.use_multi_scale = False
         self.use_ema = False
         self.use_tta = False
         self.use_warmup_improvement = False
+        self._init_training_improvements(args)
 
         # Resume from checkpoint if provided
         if args.resume:
@@ -995,9 +998,24 @@ class Trainer:
                 if isinstance(output, list):
                     # Deep Supervision: output = [main_pred, aux_pred_s2, aux_pred_s3]
                     heatmap_pred = output[0]  # Main prediction
-                    loss_main = self.criterion(heatmap_pred, heatmap_gt)
-                    loss_aux2 = self.criterion(output[1], heatmap_gt)
-                    loss_aux3 = self.criterion(output[2], heatmap_gt)
+
+                    # [FIX 2026-03-04] 对 GaussianHybridLoss，预计算一次高斯目标复用
+                    # 避免 3 个 head 各自重复做 Box→Gaussian 转换
+                    _precomputed_gauss = None
+                    if self.loss_type == 'gaussian_focal' and hasattr(self.criterion, 'sigma_scale'):
+                        from model_Mamba.dataset.gaussian_utils import convert_box_mask_to_gaussian
+                        _precomputed_gauss = convert_box_mask_to_gaussian(
+                            heatmap_gt.float(),
+                            sigma_scale=self.criterion.sigma_scale,
+                            min_sigma=self.criterion.min_sigma,
+                        )
+
+                    loss_main = self.criterion(heatmap_pred, heatmap_gt, gaussian_target=_precomputed_gauss) \
+                        if _precomputed_gauss is not None else self.criterion(heatmap_pred, heatmap_gt)
+                    loss_aux2 = self.criterion(output[1], heatmap_gt, gaussian_target=_precomputed_gauss) \
+                        if _precomputed_gauss is not None else self.criterion(output[1], heatmap_gt)
+                    loss_aux3 = self.criterion(output[2], heatmap_gt, gaussian_target=_precomputed_gauss) \
+                        if _precomputed_gauss is not None else self.criterion(output[2], heatmap_gt)
 
                     # Weighted combination: Original baseline weight (0.4)
                     loss = loss_main + 0.5 * loss_aux2 + 0.4 * loss_aux3
@@ -1020,14 +1038,16 @@ class Trainer:
                 self.optimizer.zero_grad()
                 continue
 
-            # Backward and optimizer step (baseline)
-            self.optimizer.zero_grad()
-            loss.backward()
+            # [FIX 2026-03-04] 梯度累积：loss 按 accumulation_steps 缩放，
+            # 仅在累积满后执行 optimizer.step() 和 zero_grad()
+            loss_scaled = loss / self.gradient_accumulation_steps
+            loss_scaled.backward()
 
-            # Gradient clipping to prevent instability
-            torch.nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=1.0)
-
-            self.optimizer.step()
+            if (i + 1) % self.gradient_accumulation_steps == 0 or (i + 1) == total_batches:
+                # Gradient clipping to prevent instability
+                torch.nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=1.0)
+                self.optimizer.step()
+                self.optimizer.zero_grad()
 
             # Update loss meter (use original unscaled loss for logging)
             loss_meter.update(loss.item())

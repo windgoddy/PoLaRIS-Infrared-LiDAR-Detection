@@ -323,18 +323,97 @@ def generate_gaussian_target_batch(labels_batch, img_size, downscale=1, device='
 
 # ======================== BAGS: Box → Gaussian 实时转换（GPU）========================
 
+def _find_connected_components_gpu(mask):
+    """
+    在 GPU 上用迭代膨胀法找连通域（避免 CPU↔GPU 数据拷贝）。
+
+    原理：
+        对每个非零像素分配唯一 ID，然后反复将每个像素的 label 替换为
+        其 3×3 邻域中的最小 label，直到收敛。收敛后同一连通域共享最小 label。
+
+    Args:
+        mask: (H, W) 二值 Tensor，值 {0, 1}，device 可以是 GPU
+
+    Returns:
+        labels: (H, W) LongTensor，0=背景，>0=各连通域 ID（从 1 开始）
+        num_components: int，连通域数量
+    """
+    H, W = mask.shape
+    device = mask.device
+
+    # 为每个非零像素分配唯一 ID（1-based），背景为 0
+    flat_mask = mask.view(-1)
+    nonzero_indices = flat_mask.nonzero(as_tuple=False).squeeze(1)  # (N,)
+
+    if nonzero_indices.numel() == 0:
+        return torch.zeros(H, W, dtype=torch.long, device=device), 0
+
+    labels = torch.zeros(H * W, dtype=torch.long, device=device)
+    labels[nonzero_indices] = nonzero_indices + 1  # 1-based unique IDs
+
+    labels = labels.view(H, W)
+
+    # 迭代传播：每轮将每个像素的 label 替换为 3×3 邻域中的最小非零 label
+    # 对于稀疏小目标，通常 10-30 轮即可收敛
+    for _ in range(max(H, W)):
+        prev = labels.clone()
+
+        # Pad labels for 3x3 neighborhood access
+        padded = torch.nn.functional.pad(
+            labels.unsqueeze(0).unsqueeze(0).float(), (1, 1, 1, 1), mode='constant', value=0
+        ).squeeze(0).squeeze(0).long()
+
+        # 收集 3×3 邻域（8-连通）
+        neighbors = torch.stack([
+            padded[0:H, 0:W], padded[0:H, 1:W+1], padded[0:H, 2:W+2],
+            padded[1:H+1, 0:W], padded[1:H+1, 1:W+1], padded[1:H+1, 2:W+2],
+            padded[2:H+2, 0:W], padded[2:H+2, 1:W+1], padded[2:H+2, 2:W+2],
+        ], dim=0)  # (9, H, W)
+
+        # 将 0（背景）替换为极大值，以便 min 操作忽略背景
+        fg_mask = (neighbors > 0)
+        neighbors_masked = neighbors.clone()
+        neighbors_masked[~fg_mask] = H * W + 1
+
+        # 每个前景像素取邻域最小 label
+        min_labels, _ = neighbors_masked.min(dim=0)  # (H, W)
+
+        # 只更新前景像素
+        is_fg = (labels > 0)
+        labels[is_fg] = min_labels[is_fg]
+
+        # 收敛检查
+        if torch.equal(labels, prev):
+            break
+
+    # 重新编号为连续的 1, 2, 3, ...
+    unique_labels = labels.unique()
+    unique_labels = unique_labels[unique_labels > 0]
+    num_components = unique_labels.numel()
+
+    relabeled = torch.zeros_like(labels)
+    for new_id, old_id in enumerate(unique_labels, start=1):
+        relabeled[labels == old_id] = new_id
+
+    return relabeled, num_components
+
+
 def convert_box_mask_to_gaussian(box_mask, sigma_scale=6.0, min_sigma=2.0):
     """
     将二值矩形框 Mask 实时转换为软高斯热图（BAGS 策略核心工具）。
 
+    [FIX 2026-03-04] 支持多目标：使用连通域分析分离不同目标框，
+    为每个目标独立生成高斯，然后取 max 合并。
+
     全 PyTorch GPU 实现，可在训练循环中高效调用（无 CPU↔GPU 数据拷贝）。
 
     原理：
-        1. 对 Batch 中每张图，找到二值 Mask 的外接矩形（x_min, x_max, y_min, y_max）
-        2. 以矩形中心为原点，生成各向异性 2D 高斯分布
+        1. 对 Batch 中每张图，用连通域分析分离不同的矩形框
+        2. 对每个目标框，以其中心为原点生成各向异性 2D 高斯
            sigma_y = box_height / sigma_scale   (默认 sigma = h/6，使 ±3σ 覆盖框高)
            sigma_x = box_width  / sigma_scale   (同理)
-        3. 高斯峰值归一化为 1.0（中心处 exp(0) = 1）
+        3. 多个高斯用 max 合并（避免重叠区域值超过 1.0）
+        4. 中心坐标 round 到最近整数，确保至少一个像素精确为 1.0
 
     Args:
         box_mask   : (B, 1, H, W) 二值矩形框 Mask，值为 {0, 1}（float/bool 均可）
@@ -347,18 +426,18 @@ def convert_box_mask_to_gaussian(box_mask, sigma_scale=6.0, min_sigma=2.0):
 
     Example:
         >>> box = torch.zeros(4, 1, 256, 256)
-        >>> box[:, :, 100:120, 80:110] = 1.0   # 20×30 的矩形框
+        >>> box[:, :, 100:120, 80:110] = 1.0   # 目标 1
+        >>> box[:, :, 200:210, 30:50] = 1.0    # 目标 2（不同位置）
         >>> gauss = convert_box_mask_to_gaussian(box)
         >>> gauss.shape          # (4, 1, 256, 256)
-        >>> gauss[:, :, 110, 95].item()  # ≈ 1.0（框中心）
+        >>> # 两个高斯峰值各自为 1.0
     """
     B, _, H, W = box_mask.shape
     device = box_mask.device
 
-    # 预生成坐标网格（在循环外一次完成，复用到每张图）
+    # 预生成坐标网格（在循环外一次完成，复用到每张图每个目标）
     y_grid = torch.arange(H, dtype=torch.float32, device=device)
     x_grid = torch.arange(W, dtype=torch.float32, device=device)
-    # torch.meshgrid 默认 ij 索引：yy[i,j]=y_grid[i], xx[i,j]=x_grid[j]
     yy, xx = torch.meshgrid(y_grid, x_grid)  # (H, W) each
 
     gaussian = torch.zeros(B, 1, H, W, dtype=torch.float32, device=device)
@@ -366,35 +445,43 @@ def convert_box_mask_to_gaussian(box_mask, sigma_scale=6.0, min_sigma=2.0):
     for b in range(B):
         mask = box_mask[b, 0]  # (H, W)
 
-        # 找所有非零像素坐标（全 GPU 操作）
-        nonzero_idx = mask.nonzero(as_tuple=False)  # (N, 2): [row(y), col(x)]
-
-        if nonzero_idx.numel() == 0:
+        if mask.sum() == 0:
             continue  # 该图无目标，保持全零
 
-        # 外接矩形边界
-        y_min = nonzero_idx[:, 0].min().float()
-        y_max = nonzero_idx[:, 0].max().float()
-        x_min = nonzero_idx[:, 1].min().float()
-        x_max = nonzero_idx[:, 1].max().float()
+        # 连通域分析：分离不同目标框
+        comp_labels, num_components = _find_connected_components_gpu(mask)
 
-        # 高斯中心 = 矩形中心
-        cy = (y_min + y_max) / 2.0
-        cx = (x_min + x_max) / 2.0
+        for comp_id in range(1, num_components + 1):
+            comp_mask = (comp_labels == comp_id)
+            nonzero_idx = comp_mask.nonzero(as_tuple=False)  # (N, 2): [row(y), col(x)]
 
-        # sigma 与框尺寸成比例，并保证最小值
-        box_h = (y_max - y_min + 1).clamp(min=1.0)
-        box_w = (x_max - x_min + 1).clamp(min=1.0)
-        sigma_y = (box_h / sigma_scale).clamp(min=float(min_sigma))
-        sigma_x = (box_w / sigma_scale).clamp(min=float(min_sigma))
+            if nonzero_idx.numel() == 0:
+                continue
 
-        # 各向异性 2D 高斯（峰值 = 1.0）
-        g = torch.exp(
-            -((yy - cy) ** 2 / (2.0 * sigma_y ** 2) +
-              (xx - cx) ** 2 / (2.0 * sigma_x ** 2))
-        )  # (H, W)
+            # 该目标的外接矩形边界
+            y_min = nonzero_idx[:, 0].min().float()
+            y_max = nonzero_idx[:, 0].max().float()
+            x_min = nonzero_idx[:, 1].min().float()
+            x_max = nonzero_idx[:, 1].max().float()
 
-        gaussian[b, 0] = g
+            # [FIX] 高斯中心 round 到最近整数，确保网格上有 exp(0)=1.0 的像素
+            cy = torch.round((y_min + y_max) / 2.0)
+            cx = torch.round((x_min + x_max) / 2.0)
+
+            # sigma 与框尺寸成比例，并保证最小值
+            box_h = (y_max - y_min + 1).clamp(min=1.0)
+            box_w = (x_max - x_min + 1).clamp(min=1.0)
+            sigma_y = (box_h / sigma_scale).clamp(min=float(min_sigma))
+            sigma_x = (box_w / sigma_scale).clamp(min=float(min_sigma))
+
+            # 各向异性 2D 高斯（峰值 = 1.0，因为 center 在整数格点上）
+            g = torch.exp(
+                -((yy - cy) ** 2 / (2.0 * sigma_y ** 2) +
+                  (xx - cx) ** 2 / (2.0 * sigma_x ** 2))
+            )  # (H, W)
+
+            # 用 max 合并，避免重叠区域超过 1.0
+            gaussian[b, 0] = torch.max(gaussian[b, 0], g)
 
     return gaussian
 
