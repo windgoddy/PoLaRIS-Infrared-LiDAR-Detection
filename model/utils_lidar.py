@@ -30,6 +30,43 @@ def get_img_ids_from_dir(images_dir, suffix='.png'):
     img_ids = [f.replace(suffix, '') for f in img_files]
     return sorted(img_ids)
 
+
+def bin_to_depth_image(lidar_points, img_size):
+    """
+    Project pre-aligned lidar_roi .bin points to a 2D depth image.
+
+    Fallback path when depth_maps/*.npy does not exist.
+    'lidar_roi' points are projected onto the camera image plane beforehand
+    (using calibration), so (x, y) are already pixel coordinates.
+
+    Args:
+        lidar_points: (N, 4) numpy array  [x=col, y=row, z=depth, intensity]
+                      Empty array → all-zero image.
+        img_size:     PIL image size tuple (width, height)
+
+    Returns:
+        PIL Image mode 'F' (float32), depth in original z units (meters).
+    """
+    W, H = img_size
+    depth_map = np.zeros((H, W), dtype=np.float32)
+
+    if len(lidar_points) == 0:
+        return Image.fromarray(depth_map, mode='F')
+
+    cols   = np.round(lidar_points[:, 0]).astype(np.int32)
+    rows   = np.round(lidar_points[:, 1]).astype(np.int32)
+    depths = lidar_points[:, 2].astype(np.float32)
+
+    valid = (cols >= 0) & (cols < W) & (rows >= 0) & (rows < H) & (depths > 0)
+    cols, rows, depths = cols[valid], rows[valid], depths[valid]
+
+    if len(cols) > 0:
+        # MaxPool semantics: keep maximum depth for overlapping pixels
+        # (consistent with LiDARDownsampler design choice)
+        np.maximum.at(depth_map, (rows, cols), depths)
+
+    return Image.fromarray(depth_map, mode='F')
+
 class PoLaRISTrainLoader(Dataset):
     """
     Training Dataset Loader for PoLaRIS with LiDAR fusion
@@ -330,8 +367,13 @@ class PoLaRISTrainLoader(Dataset):
         if self.in_channels == 2:
             depth = self._load_depth(depth_path)
             if depth is None:
-                # Create zero depth map if not found
-                depth = Image.new('F', img.size, 0.0)
+                # Fallback: project lidar_roi .bin → 2D depth image
+                # Triggered when depth_maps/*.npy absent (e.g. Pohang-Canal-3k)
+                lidar_for_depth = self._load_lidar(lidar_path)
+                depth = bin_to_depth_image(lidar_for_depth, img.size)
+                if np.max(np.array(depth)) == 0:
+                    # No valid points either → genuine zero
+                    depth = Image.new('F', img.size, 0.0)
 
         # Load GT mask
         mask = Image.open(label_path).convert('L')
@@ -579,7 +621,11 @@ class PoLaRISTestLoader(Dataset):
         if self.in_channels == 2:
             depth = self._load_depth(depth_path)
             if depth is None:
-                depth = Image.new('F', img.size, 0.0)
+                # Fallback: project lidar_roi .bin → 2D depth image
+                lidar_for_depth = self._load_lidar(lidar_path)
+                depth = bin_to_depth_image(lidar_for_depth, img.size)
+                if np.max(np.array(depth)) == 0:
+                    depth = Image.new('F', img.size, 0.0)
 
         # Transform
         img, mask, depth = self._testval_sync_transform(img, mask, depth)
