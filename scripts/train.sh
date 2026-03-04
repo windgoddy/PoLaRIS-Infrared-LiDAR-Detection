@@ -349,11 +349,14 @@ case $MODE in
             fi
         done
         SUCCESS=false
-        LOG_FILE="/tmp/mamba_unetpp_train_$$.log"
+        LAST_LOG_FILE=""
 
         for TRY_BATCH in "${BATCH_SIZES[@]}"; do
             echo ""
             echo "🔄 尝试 Batch Size = $TRY_BATCH"
+            # 每次重试使用独立日志，避免旧 OOM 信息干扰新一轮的错误判断
+            LOG_FILE="/tmp/mamba_unetpp_train_$$_bs${TRY_BATCH}.log"
+            LAST_LOG_FILE="$LOG_FILE"
 
             # [FIX 2026-03-03] 导师诊断：BatchNorm + 小Batch的致命组合
             # 核心修复：
@@ -448,12 +451,24 @@ case $MODE in
                 echo "=========================================="
                 if [ $TRAIN_EXIT_CODE -eq 0 ]; then
                     echo "✅ 训练成功完成 (Batch Size = $TRY_BATCH)"
+                    echo "=========================================="
+                    break
+                elif grep -qE "OutOfMemoryError|CUDA out of memory" "$LOG_FILE"; then
+                    echo "❌ 训练中途 OOM (Batch Size = $TRY_BATCH)"
+                    echo "=========================================="
+                    SUCCESS=false
+                    if [ "$TRY_BATCH" = "${BATCH_SIZES[-1]}" ]; then
+                        echo "❌ 即使 Batch Size = $TRY_BATCH 仍然 OOM，放弃"
+                        break
+                    fi
+                    echo "⚠️  尝试更小的 batch size..."
+                    sleep 2
                 else
                     echo "❌ 训练异常退出 (退出码: $TRAIN_EXIT_CODE)"
                     echo "查看完整日志: $LOG_FILE"
+                    echo "=========================================="
+                    break
                 fi
-                echo "=========================================="
-                break
             else
                 # 杀死进程（如果还在运行）
                 kill $TRAIN_PID 2>/dev/null || true
