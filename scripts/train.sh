@@ -437,7 +437,8 @@ case $MODE in
                 echo "=========================================="
                 echo "开始显示训练日志 (Ctrl+C 退出查看但不停止训练)"
                 echo "=========================================="
-                tail -f "$LOG_FILE" &
+                # 过滤掉 Python Traceback 噪音，只显示训练进度
+                tail -f "$LOG_FILE" | grep --line-buffered -v -E "^Traceback |^  File \"|^    [a-z_].*Error|torch\.cuda\.|\.py\", line [0-9]" &
                 TAIL_PID=$!
 
                 # 等待训练完成
