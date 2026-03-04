@@ -842,6 +842,13 @@ class Trainer:
             # Load optimizer state
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
+            # Load scheduler state (critical for CosineAnnealingLR to continue correctly)
+            if 'scheduler_state_dict' in checkpoint:
+                self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                print(f"✅ Loaded scheduler state (LR will continue from correct cosine position)")
+            else:
+                print(f"⚠️  No scheduler state in checkpoint — LR schedule will restart from epoch 0")
+
             # Load metrics
             if 'iou' in checkpoint:
                 self.best_iou = checkpoint['iou']
@@ -1233,6 +1240,9 @@ class Trainer:
                         'epoch': epoch,
                         'model_state_dict': model_state,
                         'optimizer_state_dict': self.optimizer.state_dict(),
+                        'scheduler_state_dict': self.scheduler.state_dict(),
+                        'iou': self.best_iou,
+                        'box_iou': self.best_box_iou,
                     }, checkpoint_path)
                     print(f"✅ Saved checkpoint: {checkpoint_path}")
                 except RuntimeError as e:

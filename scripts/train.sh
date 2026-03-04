@@ -69,6 +69,8 @@ EPOCHS=2000
 ORACLE_MASKS="oracle_masks"
 THRESHOLD=""  # 空字符串表示自动选择
 BATCH_SIZE=8
+RESUME=""     # checkpoint 路径，空字符串表示从头开始
+SAVE_DIR=""   # 指定实验目录（resume时应与原目录一致）
 
 # 解析第一个参数作为模式（如果提供）
 if [[ $# -gt 0 && $1 =~ ^(baseline1|baseline2|cat2|dnanet_lidar|16bit-ir|16bit|mamba_unetpp)$ ]]; then
@@ -105,6 +107,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --batch-size)
             BATCH_SIZE="$2"
+            shift 2
+            ;;
+        --resume)
+            RESUME="$2"
+            shift 2
+            ;;
+        --save-dir)
+            SAVE_DIR="$2"
             shift 2
             ;;
         *)
@@ -368,7 +378,9 @@ case $MODE in
                 --workers 4 \
                 --use_lidar False \
                 --use_deep_supervision True \
-                --use_augmentation True > "$LOG_FILE" 2>&1 &
+                --use_augmentation True \
+                ${RESUME:+--resume "$RESUME"} \
+                ${SAVE_DIR:+--save_dir "$SAVE_DIR"} > "$LOG_FILE" 2>&1 &
 
             TRAIN_PID=$!
             echo "📝 训练进程 PID: $TRAIN_PID"
