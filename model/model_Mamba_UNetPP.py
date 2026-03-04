@@ -18,6 +18,7 @@ Date: 2026-03-02
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 # Import Mamba block from existing code
 from model_Mamba.core.polaris_mamba import VSSBlock
@@ -36,12 +37,14 @@ class MambaUNetPlusPlus(nn.Module):
     2. Linear complexity vs quadratic (Transformer)
     """
 
-    def __init__(self, num_classes=1, input_channels=3, nb_filter=[16, 32, 64, 128, 256], deep_supervision=False):
+    def __init__(self, num_classes=1, input_channels=3, nb_filter=[16, 32, 64, 128, 256],
+                 deep_supervision=False, use_lidar=False):
         super().__init__()
 
         self.pool = nn.MaxPool2d(2, 2)
         self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
         self.deep_supervision = deep_supervision
+        self.use_lidar = use_lidar   # [LiDAR] enable SS2D gating
 
         # ===== Encoder (保留CNN特征提取能力) =====
         # Shallow layers: CNN blocks (for local features)
@@ -49,9 +52,9 @@ class MambaUNetPlusPlus(nn.Module):
         self.conv1_0 = self._make_cnn_block(nb_filter[0], nb_filter[1])
 
         # Deep layers: Mamba blocks (for global context)
-        self.conv2_0 = self._make_mamba_block(nb_filter[1], nb_filter[2])
-        self.conv3_0 = self._make_mamba_block(nb_filter[2], nb_filter[3])
-        self.conv4_0 = self._make_mamba_block(nb_filter[3], nb_filter[4])
+        self.conv2_0 = self._make_mamba_block(nb_filter[1], nb_filter[2], use_lidar)
+        self.conv3_0 = self._make_mamba_block(nb_filter[2], nb_filter[3], use_lidar)
+        self.conv4_0 = self._make_mamba_block(nb_filter[3], nb_filter[4], use_lidar)
 
         # ===== Decoder with Dense Connections (UNet++ style) =====
         # Level 0 (shallowest, 256x256)
@@ -66,11 +69,11 @@ class MambaUNetPlusPlus(nn.Module):
         self.conv1_3 = self._make_cnn_block(nb_filter[1]*3 + nb_filter[2], nb_filter[1])
 
         # Level 2 (64x64)
-        self.conv2_1 = self._make_mamba_block(nb_filter[2] + nb_filter[3], nb_filter[2])
-        self.conv2_2 = self._make_mamba_block(nb_filter[2]*2 + nb_filter[3], nb_filter[2])
+        self.conv2_1 = self._make_mamba_block(nb_filter[2] + nb_filter[3], nb_filter[2], use_lidar)
+        self.conv2_2 = self._make_mamba_block(nb_filter[2]*2 + nb_filter[3], nb_filter[2], use_lidar)
 
         # Level 3 (32x32)
-        self.conv3_1 = self._make_mamba_block(nb_filter[3] + nb_filter[4], nb_filter[3])
+        self.conv3_1 = self._make_mamba_block(nb_filter[3] + nb_filter[4], nb_filter[3], use_lidar)
 
         # Final output layers
         # [FIX 2026-03-02] Deep Supervision: multiple output heads for UNet++ columns
@@ -104,22 +107,22 @@ class MambaUNetPlusPlus(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-    def _make_mamba_block(self, in_ch, out_ch):
+    def _make_mamba_block(self, in_ch, out_ch, use_lidar=False):
         """
         Mamba block wrapper for UNet integration.
 
         Note: VSSBlock expects (B, H, W, C) format,
         so we need to add permute operations.
         """
-        return MambaBlockWrapper(in_ch, out_ch)
+        return MambaBlockWrapper(in_ch, out_ch, use_lidar_gate=use_lidar)
 
     def forward(self, x, lidar=None):
         """
         Forward pass with dense skip connections.
 
         Args:
-            x: (B, C, H, W) input image
-            lidar: Optional LiDAR input (ignored in current version)
+            x: (B, C, H, W) input image (1-ch IR when use_lidar=True, 3-ch otherwise)
+            lidar: (B, 1, H, W) LiDAR depth map (optional; used only when use_lidar=True)
 
         Returns:
             If deep_supervision=True:
@@ -130,9 +133,19 @@ class MambaUNetPlusPlus(nn.Module):
         # ===== Encoder =====
         x0_0 = self.conv0_0(x)
         x1_0 = self.conv1_0(self.pool(x0_0))
-        x2_0 = self.conv2_0(self.pool(x1_0))
-        x3_0 = self.conv3_0(self.pool(x2_0))
-        x4_0 = self.conv4_0(self.pool(x3_0))
+
+        # [LiDAR] Pre-downsample depth map to match Mamba stage spatial resolutions.
+        # Input x is (B, C, H, W); after successive 2x pools: H/4, H/8, H/16.
+        if lidar is not None and self.use_lidar:
+            lidar_f4  = F.max_pool2d(lidar, kernel_size=4,  stride=4)   # (B,1,H/4, W/4)
+            lidar_f8  = F.max_pool2d(lidar, kernel_size=8,  stride=8)   # (B,1,H/8, W/8)
+            lidar_f16 = F.max_pool2d(lidar, kernel_size=16, stride=16)  # (B,1,H/16,W/16)
+        else:
+            lidar_f4 = lidar_f8 = lidar_f16 = None
+
+        x2_0 = self.conv2_0(self.pool(x1_0), lidar_f4)
+        x3_0 = self.conv3_0(self.pool(x2_0), lidar_f8)
+        x4_0 = self.conv4_0(self.pool(x3_0), lidar_f16)
 
         # ===== Decoder with Dense Connections =====
         # UNet++ 规则：X^{i,j} = Conv([X^{i,0}, ..., X^{i,j-1}, Upsample(X^{i+1,j-1})])
@@ -141,13 +154,13 @@ class MambaUNetPlusPlus(nn.Module):
         # Column 1
         x0_1 = self.conv0_1(torch.cat([x0_0, self.up(x1_0)], 1))
         x1_1 = self.conv1_1(torch.cat([x1_0, self.up(x2_0)], 1))
-        x2_1 = self.conv2_1(torch.cat([x2_0, self.up(x3_0)], 1))
-        x3_1 = self.conv3_1(torch.cat([x3_0, self.up(x4_0)], 1))
+        x2_1 = self.conv2_1(torch.cat([x2_0, self.up(x3_0)], 1), lidar_f4)
+        x3_1 = self.conv3_1(torch.cat([x3_0, self.up(x4_0)], 1), lidar_f8)
 
         # Column 2
         x0_2 = self.conv0_2(torch.cat([x0_0, x0_1, self.up(x1_1)], 1))
         x1_2 = self.conv1_2(torch.cat([x1_0, x1_1, self.up(x2_1)], 1))
-        x2_2 = self.conv2_2(torch.cat([x2_0, x2_1, self.up(x3_1)], 1))
+        x2_2 = self.conv2_2(torch.cat([x2_0, x2_1, self.up(x3_1)], 1), lidar_f4)
 
         # Column 3
         x0_3 = self.conv0_3(torch.cat([x0_0, x0_1, x0_2, self.up(x1_2)], 1))
@@ -181,8 +194,9 @@ class MambaBlockWrapper(nn.Module):
     1. Channel conversion (in_ch → out_ch)
     2. Format conversion (BCHW ↔ BHWC)
     3. [FIX 2026-03-02] Spatial restore: bridge the semantic gap between Mamba and CNN
+    4. [LiDAR] Optional LiDAR gating via SS2D lidar_gate_conv
     """
-    def __init__(self, in_ch, out_ch):
+    def __init__(self, in_ch, out_ch, use_lidar_gate=False):
         super().__init__()
 
         # Project channels if needed
@@ -193,7 +207,7 @@ class MambaBlockWrapper(nn.Module):
         self.mamba = VSSBlock(
             hidden_dim=out_ch,
             drop_path=0.1,
-            use_lidar_gate=False,  # Disable LiDAR for now
+            use_lidar_gate=use_lidar_gate,  # [LiDAR] controlled by caller
         )
 
         # [FIX 2026-03-02] Spatial restore layer
@@ -201,10 +215,11 @@ class MambaBlockWrapper(nn.Module):
         # This bridges the semantic gap between Mamba's global context and CNN's local features
         self.spatial_restore = nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1, groups=out_ch)
 
-    def forward(self, x):
+    def forward(self, x, lidar=None):
         """
         Args:
             x: (B, C, H, W)
+            lidar: (B, 1, H, W) LiDAR depth at this stage's resolution (optional)
         Returns:
             out: (B, out_ch, H, W)
         """
@@ -216,7 +231,8 @@ class MambaBlockWrapper(nn.Module):
         x_mamba = identity.permute(0, 2, 3, 1)  # (B, H, W, C)
 
         # Mamba block (global context modeling)
-        x_mamba = self.mamba(x_mamba)  # (B, H, W, C)
+        # [LiDAR] Pass lidar_feat so SS2D can apply gating if use_lidar_gate=True
+        x_mamba = self.mamba(x_mamba, lidar)  # (B, H, W, C)
 
         # Convert back
         x_mamba = x_mamba.permute(0, 3, 1, 2)  # (B, C, H, W)
@@ -229,32 +245,34 @@ class MambaBlockWrapper(nn.Module):
 
 
 # ===== Factory function for easy instantiation =====
-def mamba_unetplusplus(in_channels=3, num_classes=1, deep_supervision=False):
+def mamba_unetplusplus(in_channels=3, num_classes=1, deep_supervision=False, use_lidar=False):
     """
     Create Mamba-UNet++ model.
 
     Args:
-        in_channels: Number of input channels (1=IR, 2=IR+Depth, 3=RGB)
+        in_channels: Number of input channels for the IR branch
+                     (1 when using PoLaRIS loader with in_channels=2 / LiDAR split off,
+                      3 when using 8-bit RGB-replicated loader without LiDAR)
         num_classes: Number of output classes (1 for binary segmentation)
         deep_supervision: Enable deep supervision (recommended for small targets)
+        use_lidar: Enable SS2D LiDAR gating in all Mamba blocks
 
     Returns:
         model: MambaUNetPlusPlus instance
 
     Example:
-        >>> model = mamba_unetplusplus(in_channels=3, num_classes=1, deep_supervision=True)
-        >>> x = torch.randn(4, 3, 256, 256)
-        >>> out = model(x)
-        >>> if isinstance(out, list):
-        >>>     print(f"Deep supervision: {len(out)} outputs")
-        >>> else:
-        >>>     print(out.shape)  # (4, 1, 256, 256)
+        >>> model = mamba_unetplusplus(in_channels=1, num_classes=1,
+        ...                            deep_supervision=True, use_lidar=True)
+        >>> ir = torch.randn(4, 1, 256, 256)
+        >>> lidar = torch.randn(4, 1, 256, 256)
+        >>> out = model(ir, lidar)
     """
     return MambaUNetPlusPlus(
         num_classes=num_classes,
         input_channels=in_channels,
         nb_filter=[16, 32, 64, 128, 256],  # Same as DNANet
         deep_supervision=deep_supervision,
+        use_lidar=use_lidar,
     )
 
 

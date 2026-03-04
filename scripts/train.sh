@@ -323,12 +323,11 @@ case $MODE in
         ;;
 
     mamba_unetpp)
-        echo "🎯 Mamba-UNet++ Final Baseline: 回归本质，工程致胜"
+        echo "🔬 Mamba-UNet++ LiDAR Phase1: 启用 SS2D LiDAR 门控"
+        echo "  ✓ use_lidar=True  → SS2D 内部 LiDAR 门控注入"
+        echo "  ✓ in_channels=2   → PoLaRIS loader (IR 1ch + Depth 1ch 拆分)"
         echo "  ✓ Loss: Hybrid (Focal + Dice + Projection)"
-        echo "  ✓ Dice Weight = 0.1  → 辅助分割，主导权交给 Focal"
-        echo "  ✓ Projection Weight = 2.0 → 边界约束，防止溢出"
-        echo "  ✓ GroupNorm + AdamW + Cosine → 稳定收敛"
-        echo "  ✓ Augmentation + Deep Supervision → 抗过拟合"
+        echo "  ✓ IR 基线 BoxIoU=0.6464，目标 ≥0.67"
 
         # 在 cd 之前将相对路径转为绝对路径，避免进入子目录后路径失效
         ROOT_ABS="$(pwd)"
@@ -358,17 +357,18 @@ case $MODE in
             LOG_FILE="/tmp/mamba_unetpp_train_$$_bs${TRY_BATCH}.log"
             LAST_LOG_FILE="$LOG_FILE"
 
-            # [Phase 2: Augmentation 抗过拟合 2026-03-04]
-            # Epoch ~82 出现过拟合拐点（Test Loss > Train Loss, Gap≈+0.2）
-            # 从最佳 checkpoint 恢复，开启 augmentation 抑制过拟合
-            # 其余参数保持不变
+            # [Phase 1: LiDAR Gate 2026-03-04]
+            # 在 Mamba-UNet++ 基础上启用 SS2D LiDAR 门控 (use_lidar=True)
+            # 数据: PoLaRIS loader, in_channels=2 (IR 1ch + Depth 1ch 拆分)
+            # depth_maps 来自 Pohang-Canal/depth_maps/*.npy（预投影深度图）
+            # IR 基线 Epoch115 BoxIoU=0.6464，目标: ≥0.67
             python train.py \
-                --experiment_name MambaUNetPP_FinalBaseline \
+                --experiment_name MambaUNetPP_LiDAR_Phase1 \
                 --model mamba_unetpp \
                 --root ../dataset/ \
                 --dataset $DATASET \
                 --split_method $SPLIT_METHOD \
-                --in_channels 3 \
+                --in_channels 2 \
                 --image_folder images-8bit \
                 --suffix .png \
                 --base_size 256 \
@@ -383,8 +383,9 @@ case $MODE in
                 --scheduler CosineAnnealingLR \
                 --min_lr 1e-6 \
                 --seed 42 \
-                --use_polaris_loader False \
+                --use_polaris_loader True \
                 --normalize_16bit False \
+                --depth_maps_dir ../dataset/Pohang-Canal/depth_maps \
                 --loss_type hybrid \
                 --focal_alpha 0.25 \
                 --focal_gamma 4.0 \
@@ -392,7 +393,7 @@ case $MODE in
                 --projection_weight 2.0 \
                 --peak_threshold $THRESHOLD \
                 --workers 4 \
-                --use_lidar False \
+                --use_lidar True \
                 --use_deep_supervision True \
                 --use_augmentation False \
                 ${RESUME:+--resume "$RESUME"} \

@@ -45,7 +45,8 @@ class PoLaRISTrainLoader(Dataset):
 
     def __init__(self, dataset_dir, img_id=None, base_size=512, crop_size=480,
                  transform=None, suffix='.png', normalize_16bit=True, normalize_mode='minmax',
-                 in_channels=1, image_folder='images', oracle_masks_folder='oracle_masks'):
+                 in_channels=1, image_folder='images', oracle_masks_folder='oracle_masks',
+                 depth_maps_dir=None):
         """
         Args:
             normalize_16bit: bool or str, whether to normalize 16-bit images (True/False or 'True'/'False')
@@ -54,6 +55,8 @@ class PoLaRISTrainLoader(Dataset):
                 - 'global': Global scaling with fixed range
                 - 'percentile': Percentile-based clipping (reduces outlier impact)
                 - 'clahe': CLAHE (Contrast Limited Adaptive Histogram Equalization)
+            depth_maps_dir: optional override path for pre-projected depth maps (.npy).
+                            If None, defaults to {dataset_dir}/depth_maps.
         """
         super(PoLaRISTrainLoader, self).__init__()
 
@@ -70,7 +73,8 @@ class PoLaRISTrainLoader(Dataset):
         self.masks = os.path.join(dataset_dir, 'masks')
         self.lidar_roi = os.path.join(dataset_dir, 'lidar_roi')
         self.oracle_masks = os.path.join(dataset_dir, oracle_masks_folder)
-        self.depth_maps = os.path.join(dataset_dir, 'depth_maps')
+        # Allow external depth_maps directory (e.g. from a different dataset folder)
+        self.depth_maps = depth_maps_dir if depth_maps_dir is not None else os.path.join(dataset_dir, 'depth_maps')
         self.base_size = base_size
         self.crop_size = crop_size
         self.suffix = suffix
@@ -409,7 +413,7 @@ class PoLaRISTestLoader(Dataset):
 
     def __init__(self, dataset_dir, img_id=None, base_size=512, crop_size=480,
                  transform=None, suffix='.png', normalize_16bit=True, normalize_mode='minmax',
-                 in_channels=1, image_folder='images'):
+                 in_channels=1, image_folder='images', depth_maps_dir=None):
         super(PoLaRISTestLoader, self).__init__()
 
         self.transform = transform
@@ -424,7 +428,8 @@ class PoLaRISTestLoader(Dataset):
         self._items = [str(i) for i in img_id]
         self.masks = os.path.join(dataset_dir, 'masks')
         self.lidar_roi = os.path.join(dataset_dir, 'lidar_roi')
-        self.depth_maps = os.path.join(dataset_dir, 'depth_maps')
+        # Allow external depth_maps directory (e.g. from a different dataset folder)
+        self.depth_maps = depth_maps_dir if depth_maps_dir is not None else os.path.join(dataset_dir, 'depth_maps')
         self.base_size = base_size
         self.crop_size = crop_size
         self.suffix = suffix

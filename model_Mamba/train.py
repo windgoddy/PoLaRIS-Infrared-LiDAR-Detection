@@ -143,6 +143,11 @@ def parse_args():
                         help='Use PoLaRISTrainLoader (True) or TrainSetLoader (False). '
                              'PoLaRISTrainLoader: supports 16-bit + LiDAR. '
                              'TrainSetLoader: 8-bit only, for fair comparison with DNANet.')
+    parser.add_argument('--depth_maps_dir', type=str, default=None,
+                        help='Optional: absolute or relative path to the pre-projected LiDAR depth '
+                             'maps directory (.npy files). If omitted, defaults to '
+                             '{dataset_dir}/depth_maps. Use this when depth maps live in a different '
+                             'dataset folder (e.g. "../dataset/Pohang-Canal/depth_maps").')
 
     # Gaussian target generation
     parser.add_argument('--gaussian_iou', type=float, default=0.7,
@@ -441,6 +446,10 @@ class Trainer:
         
         if use_polaris_loader:
             print(f"✓ Using PoLaRISTrainLoader (16-bit + LiDAR support)")
+            # Resolve optional external depth-maps directory
+            depth_maps_dir = args.depth_maps_dir if hasattr(args, 'depth_maps_dir') else None
+            if depth_maps_dir is not None:
+                print(f"  - Depth maps override: {depth_maps_dir}")
             # Base loaders with 16-bit and LiDAR support
             base_train_loader = PoLaRISTrainLoader(
                 dataset_dir=dataset_dir,
@@ -453,6 +462,7 @@ class Trainer:
                 normalize_mode=args.normalize_mode,
                 in_channels=args.in_channels,
                 image_folder=args.image_folder,
+                depth_maps_dir=depth_maps_dir,
             )
             base_test_loader = PoLaRISTestLoader(
                 dataset_dir=dataset_dir,
@@ -465,6 +475,7 @@ class Trainer:
                 normalize_mode=args.normalize_mode,
                 in_channels=args.in_channels,
                 image_folder=args.image_folder,
+                depth_maps_dir=depth_maps_dir,
             )
         else:
             print(f"✓ Using TrainSetLoader (8-bit only, DNANet-compatible)")
@@ -567,12 +578,19 @@ class Trainer:
             # [FIX 2026-03-02] Added deep_supervision support
             # [FIX 2026-03-04] use_deep_supervision 是字符串 'True'/'False'，
             # 必须转为 bool，否则 'False' 作为非空字符串也是 truthy
+            # [LiDAR 2026-03-04] When use_polaris_loader=True and in_channels=2, the data pipeline
+            # splits the stacked tensor into ir_img (1ch) + lidar_img (1ch). The model therefore
+            # receives a 1-channel IR input; use ir_channels=1 accordingly.
+            use_polaris = (args.use_polaris_loader == 'True')
+            ir_channels = 1 if (use_polaris and args.in_channels == 2) else args.in_channels
             self.net = mamba_unetplusplus(
-                in_channels=args.in_channels,
+                in_channels=ir_channels,
                 num_classes=1,
-                deep_supervision=use_deep_supervision  # 使用 line 541 已转换的 bool 变量
+                deep_supervision=use_deep_supervision,
+                use_lidar=use_lidar,   # [LiDAR] enable SS2D gating
             )
-            print(f"✓ Using Mamba-UNet++ Hybrid (in_channels={args.in_channels}, deep_supervision={use_deep_supervision})")
+            print(f"✓ Using Mamba-UNet++ Hybrid (ir_channels={ir_channels}, "
+                  f"deep_supervision={use_deep_supervision}, use_lidar={use_lidar})")
         else:
             raise ValueError(f"Unknown model: {args.model}")
 
