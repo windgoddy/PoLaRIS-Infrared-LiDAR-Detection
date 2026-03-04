@@ -175,8 +175,9 @@ def parse_args():
 
     # Loss function (2026-02-03: Extended with advanced loss options)
     parser.add_argument('--loss_type', type=str, default='improved_bce_dice',
-                        choices=['improved_bce_dice', 'projection', 'hybrid', 'focal', 'combined'],
-                        help='Loss function type: improved_bce_dice (baseline), projection (weak-supervision), hybrid (recommended for Box GT)')
+                        choices=['improved_bce_dice', 'projection', 'hybrid', 'focal', 'combined', 'gaussian_focal'],
+                        help='Loss function type: improved_bce_dice (baseline), projection (weak-supervision), '
+                             'hybrid (recommended for Box GT), gaussian_focal (BAGS strategy: Box→Gaussian realtime)')
     parser.add_argument('--focal_alpha', type=float, default=0.25,
                         help='Focal loss alpha parameter (positive sample weight)')
     parser.add_argument('--focal_gamma', type=float, default=2.5,
@@ -190,6 +191,11 @@ def parse_args():
                         help='Projection mode: max (default, sensitive to sparse targets) or mean')
     parser.add_argument('--ohem_ratio', type=float, default=0.0,
                         help='OHEM ratio (0.0 = disabled)')
+    # BAGS strategy (gaussian_focal loss)
+    parser.add_argument('--gaussian_sigma_scale', type=float, default=6.0,
+                        help='BAGS: sigma = box_dim / sigma_scale (default 6.0, ±3σ covers full box)')
+    parser.add_argument('--gaussian_min_sigma', type=float, default=2.0,
+                        help='BAGS: minimum Gaussian sigma in pixels (default 2.0)')
     # Legacy parameters (for backward compatibility)
     parser.add_argument('--loss_alpha', type=float, default=2.0,
                         help='[DEPRECATED] Focal loss alpha parameter (use --focal_alpha instead)')
@@ -592,6 +598,9 @@ class Trainer:
             'projection_weight': args.projection_weight,
             'projection_mode': args.projection_mode,
             'ohem_ratio': args.ohem_ratio,
+            # BAGS strategy parameters
+            'gaussian_sigma_scale': args.gaussian_sigma_scale,
+            'gaussian_min_sigma': args.gaussian_min_sigma,
         }
         
         self.criterion = LossFactory.create(args.loss_type, **loss_config)
@@ -629,6 +638,14 @@ class Trainer:
         if args.loss_type in ['projection', 'hybrid']:
             print(f"  - Projection weight: {args.projection_weight} (boundary constraint)")
             print(f"  - Projection mode: {args.projection_mode} (max=sensitive, mean=smooth)")
+        if args.loss_type == 'gaussian_focal':
+            print(f"  ★ BAGS Strategy: Box Mask → Gaussian Heatmap (realtime GPU conversion)")
+            print(f"  - GaussianFocal α: {args.focal_alpha} (foreground focus)")
+            print(f"  - GaussianFocal β: {args.focal_gamma} (background penalty decay)")
+            print(f"  - Sigma scale: {args.gaussian_sigma_scale} (σ = box_dim / {args.gaussian_sigma_scale})")
+            print(f"  - Min sigma:   {args.gaussian_min_sigma} px")
+            print(f"  - Projection weight: {args.projection_weight} (box boundary auxiliary)")
+            print(f"  - Dice weight: 0.0 (disabled, incompatible with soft Gaussian targets)")
         if args.ohem_ratio > 0:
             print(f"  - OHEM ratio: {args.ohem_ratio} (hard example mining)")
         if self.use_scene_weights:

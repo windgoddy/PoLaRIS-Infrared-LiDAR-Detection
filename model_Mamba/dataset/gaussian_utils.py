@@ -321,6 +321,84 @@ def generate_gaussian_target_batch(labels_batch, img_size, downscale=1, device='
     return heatmaps
 
 
+# ======================== BAGS: Box → Gaussian 实时转换（GPU）========================
+
+def convert_box_mask_to_gaussian(box_mask, sigma_scale=6.0, min_sigma=2.0):
+    """
+    将二值矩形框 Mask 实时转换为软高斯热图（BAGS 策略核心工具）。
+
+    全 PyTorch GPU 实现，可在训练循环中高效调用（无 CPU↔GPU 数据拷贝）。
+
+    原理：
+        1. 对 Batch 中每张图，找到二值 Mask 的外接矩形（x_min, x_max, y_min, y_max）
+        2. 以矩形中心为原点，生成各向异性 2D 高斯分布
+           sigma_y = box_height / sigma_scale   (默认 sigma = h/6，使 ±3σ 覆盖框高)
+           sigma_x = box_width  / sigma_scale   (同理)
+        3. 高斯峰值归一化为 1.0（中心处 exp(0) = 1）
+
+    Args:
+        box_mask   : (B, 1, H, W) 二值矩形框 Mask，值为 {0, 1}（float/bool 均可）
+        sigma_scale: sigma = box_dim / sigma_scale（默认 6.0，±3σ 覆盖整个框）
+        min_sigma  : sigma 的下界（像素），防止极小目标退化为单点（默认 2.0）
+
+    Returns:
+        gaussian: (B, 1, H, W) 软高斯热图，dtype=float32，范围 [0, 1]
+                  中心峰值 = 1.0；背景趋近 0；无目标的图保持全零
+
+    Example:
+        >>> box = torch.zeros(4, 1, 256, 256)
+        >>> box[:, :, 100:120, 80:110] = 1.0   # 20×30 的矩形框
+        >>> gauss = convert_box_mask_to_gaussian(box)
+        >>> gauss.shape          # (4, 1, 256, 256)
+        >>> gauss[:, :, 110, 95].item()  # ≈ 1.0（框中心）
+    """
+    B, _, H, W = box_mask.shape
+    device = box_mask.device
+
+    # 预生成坐标网格（在循环外一次完成，复用到每张图）
+    y_grid = torch.arange(H, dtype=torch.float32, device=device)
+    x_grid = torch.arange(W, dtype=torch.float32, device=device)
+    # torch.meshgrid 默认 ij 索引：yy[i,j]=y_grid[i], xx[i,j]=x_grid[j]
+    yy, xx = torch.meshgrid(y_grid, x_grid)  # (H, W) each
+
+    gaussian = torch.zeros(B, 1, H, W, dtype=torch.float32, device=device)
+
+    for b in range(B):
+        mask = box_mask[b, 0]  # (H, W)
+
+        # 找所有非零像素坐标（全 GPU 操作）
+        nonzero_idx = mask.nonzero(as_tuple=False)  # (N, 2): [row(y), col(x)]
+
+        if nonzero_idx.numel() == 0:
+            continue  # 该图无目标，保持全零
+
+        # 外接矩形边界
+        y_min = nonzero_idx[:, 0].min().float()
+        y_max = nonzero_idx[:, 0].max().float()
+        x_min = nonzero_idx[:, 1].min().float()
+        x_max = nonzero_idx[:, 1].max().float()
+
+        # 高斯中心 = 矩形中心
+        cy = (y_min + y_max) / 2.0
+        cx = (x_min + x_max) / 2.0
+
+        # sigma 与框尺寸成比例，并保证最小值
+        box_h = (y_max - y_min + 1).clamp(min=1.0)
+        box_w = (x_max - x_min + 1).clamp(min=1.0)
+        sigma_y = (box_h / sigma_scale).clamp(min=float(min_sigma))
+        sigma_x = (box_w / sigma_scale).clamp(min=float(min_sigma))
+
+        # 各向异性 2D 高斯（峰值 = 1.0）
+        g = torch.exp(
+            -((yy - cy) ** 2 / (2.0 * sigma_y ** 2) +
+              (xx - cx) ** 2 / (2.0 * sigma_x ** 2))
+        )  # (H, W)
+
+        gaussian[b, 0] = g
+
+    return gaussian
+
+
 # ======================== Unit Test ========================
 
 if __name__ == "__main__":

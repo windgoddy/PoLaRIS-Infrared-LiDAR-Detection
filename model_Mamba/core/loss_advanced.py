@@ -20,11 +20,14 @@ import torch.nn.functional as F
 # Handle both package import and direct execution
 try:
     from .loss_improved import FocalBCELoss, DiceLoss
+    from ..dataset.gaussian_utils import convert_box_mask_to_gaussian
 except ImportError:
     import sys
     import os
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
     from loss_improved import FocalBCELoss, DiceLoss
+    from dataset.gaussian_utils import convert_box_mask_to_gaussian
 
 
 class BoxProjectionLoss(nn.Module):
@@ -273,6 +276,141 @@ class HybridLoss(nn.Module):
         return total_loss
 
 
+class GaussianFocalLoss(nn.Module):
+    """
+    CornerNet/CenterNet 风格的 Penalty-Reduced Focal Loss。
+
+    专为软高斯热图目标（Float Target, Y ∈ [0, 1]）设计，是 BAGS 策略的核心损失。
+
+    公式：
+        前景峰值像素 (Y == 1):
+            L = -(1 - p)^α * log(p)
+        背景/过渡区像素 (Y < 1):
+            L = -(1 - Y)^β * p^α * log(1 - p)
+
+    关键设计：
+        (1-Y)^β 在峰值附近（Y≈1 ⟹ 1-Y≈0）将背景惩罚压制到接近 0，
+        使得高斯中心周围的过渡区不被当作"假阳性"惩罚，
+        模型可以自由学习"热点"的真实形状，而不是被迫填满矩形框。
+
+    Args:
+        alpha: 前景聚焦参数，控制难易样本的权重衰减（默认 2.0）
+        beta:  背景惩罚衰减参数，越大则峰值附近的过渡区越宽容（默认 4.0）
+
+    Reference:
+        CornerNet: Detecting Objects as Paired Keypoints (Law & Deng, ECCV 2018)
+        CenterNet: Objects as Points (Zhou et al., 2019)
+    """
+    def __init__(self, alpha=2.0, beta=4.0):
+        super(GaussianFocalLoss, self).__init__()
+        self.alpha = alpha
+        self.beta = beta
+
+    def forward(self, pred, target):
+        """
+        Args:
+            pred  : (B, 1, H, W) 模型输出，经过 sigmoid，范围 [0, 1]
+            target: (B, 1, H, W) 软高斯热图，范围 [0, 1]，峰值为 1.0
+        Returns:
+            loss: scalar，按前景像素数归一化
+        """
+        eps = 1e-7
+        pred = torch.clamp(pred, eps, 1.0 - eps)
+
+        # 前景掩码：高斯中心（精确 == 1.0）
+        pos_mask = target.eq(1.0).float()
+        neg_mask = target.lt(1.0).float()
+
+        # 前景损失（只在峰值像素计算）
+        pos_loss = pos_mask * (-(1.0 - pred).pow(self.alpha) * torch.log(pred))
+
+        # 背景损失（过渡区由 (1-Y)^β 自动衰减）
+        neg_loss = neg_mask * (
+            -(1.0 - target).pow(self.beta) *
+            pred.pow(self.alpha) *
+            torch.log(1.0 - pred)
+        )
+
+        num_pos = pos_mask.sum().clamp(min=1.0)
+        loss = (pos_loss + neg_loss).sum() / num_pos
+        return loss
+
+
+class GaussianHybridLoss(nn.Module):
+    """
+    BAGS 策略混合损失：GaussianFocalLoss + BoxProjectionLoss。
+
+    设计理念：
+        ┌─────────────────────────────────────────────────────────┐
+        │  Box Mask (DataLoader 输出，原始矩形 GT)                 │
+        │       │                                                  │
+        │       ├──→ convert_box_mask_to_gaussian()               │
+        │       │         ↓                                        │
+        │       │    Gaussian Target (软热图)                      │
+        │       │         ↓                                        │
+        │       │    GaussianFocalLoss(pred, gaussian_target)      │
+        │       │    ← 学习"热点"形状，不强求填满矩形              │
+        │       │                                                  │
+        │       └──→ BoxProjectionLoss(pred, box_mask)            │
+        │            ← 约束预测范围不超出 Box 边界                  │
+        └─────────────────────────────────────────────────────────┘
+
+    关键优势：
+        ✅ DataLoader 不需要任何修改（仍读取二值矩形 Mask）
+        ✅ Box → Gaussian 转换在 GPU 上实时完成，无额外 CPU 开销
+        ✅ Dice Loss 彻底移除（Dice 会强迫填满矩形，与 BAGS 目标冲突）
+        ✅ Projection Loss 保留为边界约束（防止模型预测范围跑出 Box 外）
+
+    Args:
+        alpha           : GaussianFocalLoss 前景聚焦参数（默认 2.0）
+        beta            : GaussianFocalLoss 背景衰减参数（默认 4.0）
+        projection_weight: BoxProjectionLoss 权重（默认 2.0）
+        projection_mode : 'max' 或 'mean'（默认 'max'）
+        sigma_scale     : Gaussian sigma = box_dim / sigma_scale（默认 6.0）
+        min_sigma       : sigma 下界，防止极小目标退化（默认 2.0）
+    """
+    def __init__(
+        self,
+        alpha=2.0,
+        beta=4.0,
+        projection_weight=2.0,
+        projection_mode='max',
+        sigma_scale=6.0,
+        min_sigma=2.0,
+    ):
+        super(GaussianHybridLoss, self).__init__()
+        self.gaussian_focal = GaussianFocalLoss(alpha=alpha, beta=beta)
+        self.proj_loss = BoxProjectionLoss(projection_mode=projection_mode, loss_type='bce')
+        self.projection_weight = projection_weight
+        self.sigma_scale = sigma_scale
+        self.min_sigma = min_sigma
+
+    def forward(self, pred, target):
+        """
+        Args:
+            pred  : (B, 1, H, W) 模型输出 [0, 1]
+            target: (B, 1, H, W) 原始 Box 二值 Mask {0, 1}（DataLoader 原始输出）
+        Returns:
+            loss: scalar
+        """
+        target = target.float()
+
+        # Step 1: Box Mask → 软高斯热图（GPU 内联转换）
+        gaussian_target = convert_box_mask_to_gaussian(
+            target,
+            sigma_scale=self.sigma_scale,
+            min_sigma=self.min_sigma,
+        )
+
+        # Step 2: 主损失 —— Gaussian Focal（学习热点分布）
+        loss_gauss = self.gaussian_focal(pred, gaussian_target)
+
+        # Step 3: 辅助损失 —— Box Projection（约束边界范围，使用原始矩形 GT）
+        loss_proj = self.proj_loss(pred, target)
+
+        return loss_gauss + self.projection_weight * loss_proj
+
+
 class LossFactory:
     """
     Loss 工厂类：统一管理多种 Loss 函数
@@ -331,10 +469,21 @@ class LossFactory:
                 projection_mode=kwargs.get('projection_mode', 'max'),
                 ohem_ratio=kwargs.get('ohem_ratio', 0.0)
             )
-        
+
+        elif loss_type == 'gaussian_focal':
+            # BAGS 策略：Box Mask 实时转 Gaussian + Focal Loss + Projection 辅助
+            return GaussianHybridLoss(
+                alpha=kwargs.get('focal_alpha', 2.0),
+                beta=kwargs.get('focal_gamma', 4.0),
+                projection_weight=kwargs.get('projection_weight', 2.0),
+                projection_mode=kwargs.get('projection_mode', 'max'),
+                sigma_scale=kwargs.get('gaussian_sigma_scale', 6.0),
+                min_sigma=kwargs.get('gaussian_min_sigma', 2.0),
+            )
+
         else:
             raise ValueError(f"Unknown loss_type: {loss_type}. "
-                           f"Supported: 'improved_bce_dice', 'projection', 'hybrid'")
+                           f"Supported: 'improved_bce_dice', 'projection', 'hybrid', 'gaussian_focal'")
     
     @staticmethod
     def get_loss_name(loss_type, **kwargs):
@@ -361,7 +510,14 @@ class LossFactory:
             proj_w = kwargs.get('projection_weight', 1.0)
             mode = kwargs.get('projection_mode', 'max')
             return f"Hybrid_a{alpha}_g{gamma}_d{dice_w}_p{proj_w}_{mode}"
-        
+
+        elif loss_type == 'gaussian_focal':
+            alpha = kwargs.get('focal_alpha', 2.0)
+            beta = kwargs.get('focal_gamma', 4.0)
+            proj_w = kwargs.get('projection_weight', 2.0)
+            sigma = kwargs.get('gaussian_sigma_scale', 6.0)
+            return f"GaussianFocal_a{alpha}_b{beta}_p{proj_w}_s{sigma}"
+
         return "UnknownLoss"
 
 
