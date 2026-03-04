@@ -324,11 +324,12 @@ case $MODE in
         ;;
 
     mamba_unetpp)
-        echo "🎯 Mamba-UNet++ V2: 混合架构（优化版）"
-        echo "  ✓ Spatial Restore Layer (修复语义代沟)"
-        echo "  ✓ Deep Supervision (UNet++ 核心)"
-        echo "  ✓ 残差连接 (稳定训练)"
-        echo "  ✓ Dice Weight = 4.0 (提高像素精度)"
+        echo "🎯 Mamba-UNet++ Final Baseline: 回归本质，工程致胜"
+        echo "  ✓ Loss: Hybrid (Focal + Dice + Projection)"
+        echo "  ✓ Dice Weight = 1.0  → 填满矩形框，保证 Box IoU"
+        echo "  ✓ Projection Weight = 2.0 → 边界约束，防止溢出"
+        echo "  ✓ GroupNorm + AdamW + Cosine → 稳定收敛"
+        echo "  ✓ Augmentation + Deep Supervision → 抗过拟合"
 
         # 在 cd 之前将相对路径转为绝对路径，避免进入子目录后路径失效
         ROOT_ABS="$(pwd)"
@@ -358,14 +359,14 @@ case $MODE in
             LOG_FILE="/tmp/mamba_unetpp_train_$$_bs${TRY_BATCH}.log"
             LAST_LOG_FILE="$LOG_FILE"
 
-            # [FIX 2026-03-03] 导师诊断：BatchNorm + 小Batch的致命组合
-            # 核心修复：
-            # 1. 模型代码已改用 GroupNorm（不依赖 Batch Size）
-            # 2. 降低学习率 (0.0005 → 0.0004) ← GroupNorm 更稳定，可用稍高 LR
-            # 3. 缩短训练周期 (500 → 300) ← 配合 GroupNorm 快速收敛
-            # 4. 保持数据增强、梯度累积、深度监督
+            # [Final Baseline 2026-03-04]
+            # 战略回归：Hybrid Loss (Focal + Dice + Projection)
+            # Dice=1.0 填满框 → Box IoU 评估天然对齐
+            # Projection=2.0 约束边界防溢出
+            # Focal α=0.25 γ=2.0 标准配置压制虚警
+            # GroupNorm 已固化在模型代码中，本次无需修改模型
             python train.py \
-                --experiment_name MambaUNetPP_V5_Cat2_HybridNoDice \
+                --experiment_name MambaUNetPP_FinalBaseline \
                 --model mamba_unetpp \
                 --root ../dataset/ \
                 --dataset $DATASET \
@@ -380,7 +381,7 @@ case $MODE in
                 --gradient_accumulation_steps 4 \
                 --epochs 500 \
                 --optimizer AdamW \
-                --lr 0.0004 \
+                --lr 0.0003 \
                 --weight_decay 0.05 \
                 --scheduler CosineAnnealingLR \
                 --min_lr 1e-6 \
@@ -388,9 +389,10 @@ case $MODE in
                 --use_polaris_loader False \
                 --normalize_16bit False \
                 --loss_type hybrid \
-                --dice_weight 0.1 \
+                --focal_alpha 0.25 \
+                --focal_gamma 2.0 \
+                --dice_weight 1.0 \
                 --projection_weight 2.0 \
-                --focal_gamma 4.0 \
                 --peak_threshold $THRESHOLD \
                 --workers 4 \
                 --use_lidar False \
