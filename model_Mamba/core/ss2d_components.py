@@ -1,15 +1,19 @@
 """
-SS2D Components with LiDAR Gated Injection
-===========================================
+SS2D Components with LiDAR / Local-SNR Gated Injection
+=======================================================
 
 This file contains the core Mamba (State Space Model) components adapted from
-the lidar-mamba project, with key modifications to support LiDAR gated injection.
+the lidar-mamba project, with key modifications to support gated injection.
 
 Key Changes from Original LIDAR Implementation:
 1. SS2D.forward() now accepts an optional `lidar_feat` parameter
 2. LiDAR features are used to generate gating weights (0~1) via Sigmoid
-3. Infrared features are modulated by LiDAR gate: x_scan = x_scan * (1 + gate)
-4. When LiDAR is absent (all zeros), gate → 0, falling back to pure infrared
+3. Infrared features are modulated: x_scan = x_scan * (1 + scale * (gate - 0.5))
+   (scale starts at 0 → identity; learned scale allows both suppression and amplification)
+4. When LiDAR is absent (lidar_feat=None), LocalSNRGate activates automatically:
+   - Computes per-channel local SNR = relu(x - mu) / (sigma + eps)
+   - High SNR → isolated bright target on calm sea → Mamba focuses (gate ≈ 1)
+   - Low SNR → clutter with high local variance, e.g. coastline → Mamba suppresses (gate ≈ 0)
 
 Components:
 - CrossScan: Scans features in 4 directions (→, ←, ↓, ↑)
@@ -29,6 +33,69 @@ import math
 
 # Use compatibility layer for mamba_ssm
 from .mamba_compat import selective_scan_compat, MAMBA_AVAILABLE
+
+
+class LocalSNRGate(nn.Module):
+    """
+    Local Signal-to-Noise Ratio Gate.
+
+    Computes per-location SNR within a spatial neighbourhood:
+
+        SNR(p) = ReLU( x(p) - mu_local(p) ) / ( sigma_local(p) + eps )
+
+    Physical intuition for infrared small-target detection:
+      - Isolated ship on calm sea  : x >> mu, sigma_local ≈ 0  → SNR high → gate ≈ 1
+      - Coastline / rock clutter   : sigma_local large (chaotic) → SNR suppressed → gate ≈ 0
+      - Uniform dark sea background: x ≈ mu, relu → 0            → gate ≈ 0
+
+    Output gate is in [0, 1] and used as:
+        x_scan = x_scan * (1 + snr_gate_scale * (gate - 0.5))
+    so that gate > 0.5 amplifies and gate < 0.5 suppresses, with scale learned from 0.
+
+    Args:
+        channels   : number of feature channels (= d_inner)
+        kernel_size: neighbourhood size for mu/sigma estimation (default=7)
+    """
+    def __init__(self, channels: int, kernel_size: int = 7):
+        super().__init__()
+        self.avg_pool = nn.AvgPool2d(kernel_size, stride=1, padding=kernel_size // 2)
+
+        # Find largest valid group count ≤ 32 that divides channels evenly
+        n_groups = min(32, channels)
+        while channels % n_groups != 0:
+            n_groups //= 2
+        if n_groups == 0:
+            n_groups = 1
+
+        # Depthwise conv + GroupNorm + Sigmoid
+        # Depthwise preserves per-channel SNR semantics; GroupNorm stabilises scale
+        self.gate_calibrate = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=1, groups=channels, bias=True),
+            nn.GroupNorm(n_groups, channels),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: (B, C, H, W) feature map (x_conv after SiLU in SS2D)
+        Returns:
+            gate: (B, C, H, W) in [0, 1]
+        """
+        # Local mean
+        mu = self.avg_pool(x)                                    # (B, C, H, W)
+
+        # Local variance via E[x²] - E[x]²; clamp to avoid sqrt(negative)
+        sq_avg = self.avg_pool(x ** 2)
+        var    = torch.clamp(sq_avg - mu ** 2, min=1e-6)
+        sigma  = torch.sqrt(var)                                  # (B, C, H, W)
+
+        # Local SNR — only care about signal *above* local mean (ReLU)
+        snr  = F.relu(x - mu) / (sigma + 1e-4)                   # (B, C, H, W)
+
+        # Map SNR → calibrated gate in [0, 1]
+        gate = self.gate_calibrate(snr)                           # (B, C, H, W)
+        return gate
 
 
 class CrossScan(nn.Module):
@@ -191,20 +258,29 @@ class SS2D(nn.Module):
         # Output projection
         self.out_proj = nn.Linear(self.d_inner, d_model, bias=False)
 
-        # LiDAR gate projection (if enabled)
-        # [Phase 2] k=7 vs k=3: larger receptive field captures flat sea-surface geometry
-        # better for distinguishing foreground protrusions from background.
+        # Gate projection (if enabled)
+        # Dual-mode:
+        #   lidar_feat provided  → LiDAR-Gated Injection (original Phase 1/2 design)
+        #   lidar_feat is None   → Local-SNR Gate (pure-IR mode, SNR-Gated Mamba)
         if self.use_lidar_gate:
+            # --- LiDAR gate (used when lidar_feat is provided) ---
             self.lidar_gate_conv = nn.Sequential(
                 nn.Conv2d(1, self.d_inner, kernel_size=7, padding=3, bias=True),
                 nn.BatchNorm2d(self.d_inner),
                 nn.SiLU(),
                 nn.Conv2d(self.d_inner, self.d_inner, kernel_size=1, bias=True),
             )
-            # [Phase 2] Learnable gate strength initialized small (0.1).
-            # Prevents LiDAR from overwhelming IR features at training start.
-            # Gradually learns the right contribution magnitude.
+            # Learnable gate strength; starts small so LiDAR barely nudges IR at epoch 0
             self.lidar_gate_scale = nn.Parameter(torch.ones(1) * 0.1)
+
+            # --- Local SNR gate (activated when lidar_feat is None, i.e. pure-IR mode) ---
+            # kernel_size=7 captures ~7×7 neighbourhood for mu/sigma estimation.
+            # Large enough to sample sea-surface statistics around the target.
+            self.snr_gate = LocalSNRGate(self.d_inner, kernel_size=7)
+            # Scale starts at 0 (identity: no modulation) and is learned by the optimizer.
+            # Positive scale → SNR-high regions amplified, SNR-low suppressed.
+            # Allows the model to decide how strongly to trust the SNR prior.
+            self.snr_gate_scale = nn.Parameter(torch.zeros(1))
 
         # Cross-scan modules
         self.cross_scan = CrossScan()
@@ -232,20 +308,26 @@ class SS2D(nn.Module):
         # 3. Cross-scan
         x_scan = self.cross_scan(x_conv)  # (B, 4, D_inner, L)
 
-        # 4. **LiDAR Gated Injection**
-        if lidar_feat is not None and self.use_lidar_gate:
-            # Generate gate from LiDAR (B, 1, H, W) → (B, D_inner, H, W)
-            gate = self.lidar_gate_conv(lidar_feat)  # (B, D_inner, H, W)
-            gate = torch.sigmoid(gate)  # Normalize to [0, 1]
-
-            # Flatten and replicate for 4 directions
-            gate_scan = self.cross_scan(gate)  # (B, 4, D_inner, L)
-
-            # [Phase 2] Modulate with learnable scale initialized to 0.1:
-            #   x_scan = x_scan * (1 + scale * gate_scan)
-            # scale starts small so LiDAR barely nudges IR at epoch 0,
-            # then grows to whatever magnitude the optimizer finds optimal.
-            x_scan = x_scan * (1.0 + self.lidar_gate_scale * gate_scan)
+        # 4. **Gated Injection** (dual-mode)
+        if self.use_lidar_gate:
+            if lidar_feat is not None:
+                # --- LiDAR Gate mode ---
+                # Generate gate from LiDAR (B, 1, H, W) → (B, D_inner, H, W)
+                gate      = self.lidar_gate_conv(lidar_feat)       # (B, D_inner, H, W)
+                gate      = torch.sigmoid(gate)                    # → [0, 1]
+                gate_scan = self.cross_scan(gate)                  # (B, 4, D_inner, L)
+                # x_scan *= (1 + scale * gate_scan); scale starts at 0.1 (mild amplification)
+                x_scan = x_scan * (1.0 + self.lidar_gate_scale * gate_scan)
+            else:
+                # --- Local SNR Gate mode (pure-IR) ---
+                # No LiDAR available → derive gate from feature statistics.
+                # SNR-high (isolated target on calm sea) → gate > 0.5 → amplify.
+                # SNR-low  (coastline clutter, high local sigma) → gate < 0.5 → suppress.
+                gate      = self.snr_gate(x_conv)                  # (B, D_inner, H, W)
+                gate_scan = self.cross_scan(gate)                  # (B, 4, D_inner, L)
+                # Bidirectional modulation: (gate-0.5) ∈ [-0.5, 0.5]
+                # scale starts at 0 → identity at epoch 0, gradually learned.
+                x_scan = x_scan * (1.0 + self.snr_gate_scale * (gate_scan - 0.5))
 
         # 5. Apply SSM (Selective Scan)
         y_scan = self._selective_scan(x_scan)  # (B, 4, D_inner, L)

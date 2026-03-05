@@ -437,8 +437,8 @@ case $MODE in
                 echo "=========================================="
                 echo "开始显示训练日志 (Ctrl+C 退出查看但不停止训练)"
                 echo "=========================================="
-                # 过滤掉 Python Traceback 噪音，只显示训练进度
-                tail -f "$LOG_FILE" | grep --line-buffered -v -E "^Traceback |^  File \"|^    [a-z_].*Error|torch\.cuda\.|\.py\", line [0-9]" &
+                # 直接 tail -f，不加 grep 管道：tqdm 进度条用 \r 更新，grep 会阻塞到 \n 才输出导致看不到中间状态
+                tail -f "$LOG_FILE" &
                 TAIL_PID=$!
 
                 # 等待训练完成
