@@ -25,6 +25,7 @@
 #
 # 示例:
 #   ./scripts/train.sh baseline1                                        # DNANet baseline，自动选择GPU
+#   ./scripts/train.sh mamba_unetpp                                     # Mamba-UNet++，自动选择GPU
 #   ./scripts/train.sh cat2 --gpu 0                                     # Cat2数据集，指定GPU 0
 #   ./scripts/train.sh cat2 --batch-size 4                              # Cat2数据集，batch=4
 #   ./scripts/train.sh dnanet_lidar --split-method 50_50_cat2           # DNANet多模态+Cat2
@@ -69,6 +70,7 @@ EPOCHS=2000
 ORACLE_MASKS="oracle_masks"
 THRESHOLD=""  # 空字符串表示自动选择
 BATCH_SIZE=8
+IN_CHANNELS=2  # 输入通道数：1=纯红外(SNR Gate, Exp B), 2=IR+深度图(LiDAR Gate, Exp C)
 RESUME=""     # checkpoint 路径，空字符串表示从头开始
 SAVE_DIR=""   # 指定实验目录（resume时应与原目录一致）
 
@@ -115,6 +117,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --save-dir)
             SAVE_DIR="$2"
+            shift 2
+            ;;
+        --in-channels)
+            IN_CHANNELS="$2"
             shift 2
             ;;
         *)
@@ -323,11 +329,16 @@ case $MODE in
         ;;
 
     mamba_unetpp)
-        echo "🔬 Mamba-UNet++ LiDAR Phase1: 启用 SS2D LiDAR 门控"
-        echo "  ✓ use_lidar=True  → SS2D 内部 LiDAR 门控注入"
-        echo "  ✓ in_channels=2   → PoLaRIS loader (IR 1ch + Depth 1ch 拆分)"
+        if [ "$IN_CHANNELS" = "1" ]; then
+            echo "🔬 Mamba-UNet++ SNR Gate (Exp B): 纯红外 + 局部SNR门控"
+            echo "  ✓ in_channels=1 → 单红外，lidar_feat全零 → lidar_is_real=False"
+            echo "  ✓ use_lidar=True → SS2D 内部 SNR Gate 分支激活"
+        else
+            echo "🔬 Mamba-UNet++ LiDAR Gate (Exp C): IR + 深度图 + LiDAR门控"
+            echo "  ✓ in_channels=2 → PoLaRIS loader (IR 1ch + Depth 1ch 拆分)"
+            echo "  ✓ use_lidar=True → SS2D 内部 LiDAR Gate 分支激活"
+        fi
         echo "  ✓ Loss: Hybrid (Focal + Dice + Projection)"
-        echo "  ✓ IR 基线 BoxIoU=0.6464，目标 ≥0.67"
 
         # 在 cd 之前将相对路径转为绝对路径，避免进入子目录后路径失效
         ROOT_ABS="$(pwd)"
@@ -357,18 +368,24 @@ case $MODE in
             LOG_FILE="/tmp/mamba_unetpp_train_$$_bs${TRY_BATCH}.log"
             LAST_LOG_FILE="$LOG_FILE"
 
-            # [Phase 1: LiDAR Gate 2026-03-04]
-            # 在 Mamba-UNet++ 基础上启用 SS2D LiDAR 门控 (use_lidar=True)
-            # 数据: PoLaRIS loader, in_channels=2 (IR 1ch + Depth 1ch 拆分)
-            # depth_maps 来自 Pohang-Canal/depth_maps/*.npy（预投影深度图）
-            # IR 基线 Epoch115 BoxIoU=0.6464，目标: ≥0.67
+            # 根据 in_channels 动态设置实验名和 loader 参数
+            if [ "$IN_CHANNELS" = "1" ]; then
+                MAMBA_EXP_NAME="MambaUNetPP_SNRGate_ExpB"
+                POLARIS_ARG="False"
+                DEPTH_ARG=""
+            else
+                MAMBA_EXP_NAME="MambaUNetPP_LiDAR_ExpC"
+                POLARIS_ARG="True"
+                DEPTH_ARG="--depth_maps_dir ../dataset/Pohang-Canal/depth_maps"
+            fi
+
             python train.py \
-                --experiment_name MambaUNetPP_LiDAR_Phase1 \
+                --experiment_name $MAMBA_EXP_NAME \
                 --model mamba_unetpp \
                 --root ../dataset/ \
                 --dataset $DATASET \
                 --split_method $SPLIT_METHOD \
-                --in_channels 2 \
+                --in_channels $IN_CHANNELS \
                 --image_folder images-8bit \
                 --suffix .png \
                 --base_size 256 \
@@ -383,14 +400,14 @@ case $MODE in
                 --scheduler CosineAnnealingLR \
                 --min_lr 1e-6 \
                 --seed 42 \
-                --use_polaris_loader True \
+                --use_polaris_loader $POLARIS_ARG \
                 --normalize_16bit False \
-                --depth_maps_dir ../dataset/Pohang-Canal/depth_maps \
+                $DEPTH_ARG \
                 --loss_type hybrid \
                 --focal_alpha 0.25 \
-                --focal_gamma 4.0 \
-                --dice_weight 0.1 \
-                --projection_weight 2.0 \
+                --focal_gamma 2.0 \
+                --dice_weight 1.0 \
+                --projection_weight 0.5 \
                 --peak_threshold $THRESHOLD \
                 --workers 4 \
                 --use_lidar True \
@@ -484,19 +501,8 @@ case $MODE in
                         echo "⚠️  无法解析 Save Dir，将从头开始"
                     fi
                     echo "⚠️  尝试更小的 batch size..."
-                    # 等待 GPU 内存真正释放，避免 cuDNN 初始化失败
-                    echo "⏳ 等待 GPU $GPU 内存释放 (最多90秒)..."
-                    sleep 5
-                    for _drain_i in {1..17}; do
-                        _gpu_mem=$(nvidia-smi --query-gpu=memory.used \
-                            --format=csv,noheader,nounits -i "$GPU" 2>/dev/null | tr -d ' ')
-                        if [[ -n "$_gpu_mem" && "$_gpu_mem" -lt 500 ]]; then
-                            echo "✓ GPU $GPU 内存已释放 (${_gpu_mem}MB)，准备重试"
-                            break
-                        fi
-                        echo "  GPU $GPU 内存仍占用 ${_gpu_mem}MB，继续等待..."
-                        sleep 5
-                    done
+                    echo "⏳ 等待 10 秒让 CUDA 上下文释放..."
+                    sleep 10
                 else
                     echo "❌ 训练异常退出 (退出码: $TRAIN_EXIT_CODE)"
                     echo "查看完整日志: $LOG_FILE"

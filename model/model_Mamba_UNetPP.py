@@ -21,7 +21,46 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # Import Mamba block from existing code
-from model_Mamba.core.polaris_mamba import VSSBlock
+from model_Mamba.core.ss2d_components import VSSBlock
+
+
+class PhysicalSNRPrior(nn.Module):
+    """
+    Computes local SNR from raw IR image ONCE at input resolution (256×256).
+
+    Physical reasoning:
+      - At input resolution every pixel = real thermal radiance.
+      - 15×15 AvgPool covers only ~0.3% of the 256×256 image → genuine LOCAL stats.
+      - SNR high → isolated bright target on calm sea     → spatial prior ≈ 1.
+      - SNR low  → coastline clutter (high local variance) → spatial prior ≈ 0.
+
+    The [0,1] map is MaxPool-downsampled to each Mamba stage resolution and
+    injected BEFORE (not inside) the SSM, preserving physical meaning at all scales.
+    No learnable parameters — pure closed-form physics.
+    """
+    def __init__(self, kernel_size: int = 15):
+        super().__init__()
+        self.avg_pool = nn.AvgPool2d(kernel_size, stride=1, padding=kernel_size // 2)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: (B, 1, H, W) single-channel IR image (raw radiance)
+        Returns:
+            snr_norm: (B, 1, H, W) in [0, 1]
+        """
+        mu     = self.avg_pool(x)
+        sq_avg = self.avg_pool(x ** 2)
+        var    = torch.clamp(sq_avg - mu ** 2, min=1e-6)
+        sigma  = torch.sqrt(var)
+        snr    = F.relu(x - mu) / (sigma + 1e-4)
+
+        # Per-image min-max normalise → [0, 1]
+        B, C, H, W = snr.shape
+        snr_flat = snr.view(B, C, -1)
+        snr_min  = snr_flat.min(dim=-1, keepdim=True)[0].unsqueeze(-1)
+        snr_max  = snr_flat.max(dim=-1, keepdim=True)[0].unsqueeze(-1)
+        return (snr - snr_min) / (snr_max - snr_min + 1e-8)
 
 class MambaUNetPlusPlus(nn.Module):
     """
@@ -44,17 +83,22 @@ class MambaUNetPlusPlus(nn.Module):
         self.pool = nn.MaxPool2d(2, 2)
         self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
         self.deep_supervision = deep_supervision
-        self.use_lidar = use_lidar   # [LiDAR] enable SS2D gating
+        self.use_lidar = use_lidar   # enable physical prior injection
 
-        # ===== Encoder (保留CNN特征提取能力) =====
-        # Shallow layers: CNN blocks (for local features)
+        # PhysicalSNRPrior: no learnable parameters; computes closed-form SNR map
+        # at input resolution. Only instantiated when use_lidar=True.
+        if self.use_lidar:
+            self.snr_prior = PhysicalSNRPrior(kernel_size=15)
+
+        # ===== Encoder (CNN for local, Mamba for global) =====
+        # Shallow layers: CNN blocks (local texture, edge)
         self.conv0_0 = self._make_cnn_block(input_channels, nb_filter[0])
         self.conv1_0 = self._make_cnn_block(nb_filter[0], nb_filter[1])
 
-        # Deep layers: Mamba blocks (for global context)
-        self.conv2_0 = self._make_mamba_block(nb_filter[1], nb_filter[2], use_lidar)
-        self.conv3_0 = self._make_mamba_block(nb_filter[2], nb_filter[3], use_lidar)
-        self.conv4_0 = self._make_mamba_block(nb_filter[3], nb_filter[4], use_lidar)
+        # Deep layers: Mamba blocks (global context + prior-guided)
+        self.conv2_0 = self._make_mamba_block(nb_filter[1], nb_filter[2])
+        self.conv3_0 = self._make_mamba_block(nb_filter[2], nb_filter[3])
+        self.conv4_0 = self._make_mamba_block(nb_filter[3], nb_filter[4])
 
         # ===== Decoder with Dense Connections (UNet++ style) =====
         # Level 0 (shallowest, 256x256)
@@ -69,11 +113,11 @@ class MambaUNetPlusPlus(nn.Module):
         self.conv1_3 = self._make_cnn_block(nb_filter[1]*3 + nb_filter[2], nb_filter[1])
 
         # Level 2 (64x64)
-        self.conv2_1 = self._make_mamba_block(nb_filter[2] + nb_filter[3], nb_filter[2], use_lidar)
-        self.conv2_2 = self._make_mamba_block(nb_filter[2]*2 + nb_filter[3], nb_filter[2], use_lidar)
+        self.conv2_1 = self._make_mamba_block(nb_filter[2] + nb_filter[3], nb_filter[2])
+        self.conv2_2 = self._make_mamba_block(nb_filter[2]*2 + nb_filter[3], nb_filter[2])
 
         # Level 3 (32x32)
-        self.conv3_1 = self._make_mamba_block(nb_filter[3] + nb_filter[4], nb_filter[3], use_lidar)
+        self.conv3_1 = self._make_mamba_block(nb_filter[3] + nb_filter[4], nb_filter[3])
 
         # Final output layers
         # [FIX 2026-03-02] Deep Supervision: multiple output heads for UNet++ columns
@@ -107,45 +151,53 @@ class MambaUNetPlusPlus(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-    def _make_mamba_block(self, in_ch, out_ch, use_lidar=False):
-        """
-        Mamba block wrapper for UNet integration.
-
-        Note: VSSBlock expects (B, H, W, C) format,
-        so we need to add permute operations.
-        """
-        return MambaBlockWrapper(in_ch, out_ch, use_lidar_gate=use_lidar)
+    def _make_mamba_block(self, in_ch, out_ch):
+        """Mamba block wrapper for UNet integration."""
+        return MambaBlockWrapper(in_ch, out_ch)
 
     def forward(self, x, lidar=None):
         """
-        Forward pass with dense skip connections.
+        Forward pass with dense skip connections and physical prior injection.
 
         Args:
-            x: (B, C, H, W) input image (1-ch IR when use_lidar=True, 3-ch otherwise)
-            lidar: (B, 1, H, W) LiDAR depth map (optional; used only when use_lidar=True)
+            x    : (B, C, H, W) IR image (1-ch)
+            lidar: (B, 1, H, W) LiDAR depth (Exp C) or None/zeros (Exp B → SNR prior)
 
         Returns:
-            If deep_supervision=True:
-                [output1, output2, output3, output4]: List of predictions from each UNet++ column
-            Else:
-                output: (B, 1, H, W) final prediction map
+            deep_supervision=True : [output4, output3, output2, output1] (main first)
+            deep_supervision=False: (B, 1, H, W) final prediction
         """
+        # ===== Physical Prior Pyramid =====
+        # Computed ONCE at input resolution; no semantic contamination.
+        # PhysicalSNRPrior has no learnable params — safe inside no_grad.
+        if self.use_lidar:
+            with torch.no_grad():
+                lidar_is_real = (lidar is not None and
+                                 lidar.abs().max().item() > 1e-6)
+                if lidar_is_real:
+                    # Exp C: normalised LiDAR depth as spatial prior
+                    prior_full = lidar.clamp(min=0)
+                    B, C, H, W = prior_full.shape
+                    p_max = prior_full.view(B, C, -1).max(dim=-1, keepdim=True)[0].unsqueeze(-1)
+                    prior_full = prior_full / (p_max + 1e-8)
+                else:
+                    # Exp B: Physical SNR from raw IR (kernel=15 → 0.3% of 256² area)
+                    prior_full = self.snr_prior(x[:, :1])  # (B, 1, H, W)
+
+                # MaxPool downsample to Mamba stage resolutions (preserves peaks)
+                prior_64 = F.max_pool2d(prior_full, kernel_size=4,  stride=4)   # (B,1,64,64)
+                prior_32 = F.max_pool2d(prior_full, kernel_size=8,  stride=8)   # (B,1,32,32)
+                prior_16 = F.max_pool2d(prior_full, kernel_size=16, stride=16)  # (B,1,16,16)
+        else:
+            prior_64 = prior_32 = prior_16 = None
+
         # ===== Encoder =====
         x0_0 = self.conv0_0(x)
         x1_0 = self.conv1_0(self.pool(x0_0))
 
-        # [LiDAR] Pre-downsample depth map to match Mamba stage spatial resolutions.
-        # Input x is (B, C, H, W); after successive 2x pools: H/4, H/8, H/16.
-        if lidar is not None and self.use_lidar:
-            lidar_f4  = F.max_pool2d(lidar, kernel_size=4,  stride=4)   # (B,1,H/4, W/4)
-            lidar_f8  = F.max_pool2d(lidar, kernel_size=8,  stride=8)   # (B,1,H/8, W/8)
-            lidar_f16 = F.max_pool2d(lidar, kernel_size=16, stride=16)  # (B,1,H/16,W/16)
-        else:
-            lidar_f4 = lidar_f8 = lidar_f16 = None
-
-        x2_0 = self.conv2_0(self.pool(x1_0), lidar_f4)
-        x3_0 = self.conv3_0(self.pool(x2_0), lidar_f8)
-        x4_0 = self.conv4_0(self.pool(x3_0), lidar_f16)
+        x2_0 = self.conv2_0(self.pool(x1_0), prior_64)
+        x3_0 = self.conv3_0(self.pool(x2_0), prior_32)
+        x4_0 = self.conv4_0(self.pool(x3_0), prior_16)
 
         # ===== Decoder with Dense Connections =====
         # UNet++ 规则：X^{i,j} = Conv([X^{i,0}, ..., X^{i,j-1}, Upsample(X^{i+1,j-1})])
@@ -154,13 +206,13 @@ class MambaUNetPlusPlus(nn.Module):
         # Column 1
         x0_1 = self.conv0_1(torch.cat([x0_0, self.up(x1_0)], 1))
         x1_1 = self.conv1_1(torch.cat([x1_0, self.up(x2_0)], 1))
-        x2_1 = self.conv2_1(torch.cat([x2_0, self.up(x3_0)], 1), lidar_f4)
-        x3_1 = self.conv3_1(torch.cat([x3_0, self.up(x4_0)], 1), lidar_f8)
+        x2_1 = self.conv2_1(torch.cat([x2_0, self.up(x3_0)], 1), prior_64)
+        x3_1 = self.conv3_1(torch.cat([x3_0, self.up(x4_0)], 1), prior_32)
 
         # Column 2
         x0_2 = self.conv0_2(torch.cat([x0_0, x0_1, self.up(x1_1)], 1))
         x1_2 = self.conv1_2(torch.cat([x1_0, x1_1, self.up(x2_1)], 1))
-        x2_2 = self.conv2_2(torch.cat([x2_0, x2_1, self.up(x3_1)], 1), lidar_f4)
+        x2_2 = self.conv2_2(torch.cat([x2_0, x2_1, self.up(x3_1)], 1), prior_64)
 
         # Column 3
         x0_3 = self.conv0_3(torch.cat([x0_0, x0_1, x0_2, self.up(x1_2)], 1))
@@ -188,60 +240,55 @@ class MambaUNetPlusPlus(nn.Module):
 
 class MambaBlockWrapper(nn.Module):
     """
-    Wrapper to make VSSBlock compatible with UNet structure.
+    Wrapper making VSSBlock compatible with the UNet++ structure.
 
-    Handles:
-    1. Channel conversion (in_ch → out_ch)
-    2. Format conversion (BCHW ↔ BHWC)
-    3. [FIX 2026-03-02] Spatial restore: bridge the semantic gap between Mamba and CNN
-    4. [LiDAR] Optional LiDAR gating via SS2D lidar_gate_conv
+    Physical SNR Prior Architecture (2026-03-05):
+    1. Channel projection    (in_ch → out_ch)
+    2. Spatial prior injection BEFORE Mamba:
+           x_in = identity * (1 + prior_scale * spatial_prior)
+       - prior_scale: learnable scalar, init=0 → pure identity at epoch 0
+       - spatial_prior: downsampled PhysicalSNRPrior (or LiDAR depth), in [0,1]
+       - Ships (high local SNR) get amplified into Mamba; coastline suppressed.
+       - Prior computed at INPUT resolution — physical meaning preserved at all depths.
+    3. VSSBlock   (pure Mamba, no internal gating)
+    4. spatial_restore depthwise conv (bridges Mamba global ↔ CNN local)
+    5. Residual connection (identity WITHOUT prior, stable gradient flow)
     """
-    def __init__(self, in_ch, out_ch, use_lidar_gate=False):
+    def __init__(self, in_ch, out_ch):
         super().__init__()
 
-        # Project channels if needed
         self.proj_in = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
 
-        # Mamba block (expects BHWC format)
-        # VSSBlock already contains internal LayerNorm; no extra norm needed here
-        self.mamba = VSSBlock(
-            hidden_dim=out_ch,
-            drop_path=0.1,
-            use_lidar_gate=use_lidar_gate,  # [LiDAR] controlled by caller
-        )
+        # Trust scalar for physical prior.
+        # Init=0 → identity.  Model learns how much to rely on the prior at each scale.
+        # Gradient flows correctly: d(loss)/d(prior_scale) uses prior as a fixed constant.
+        self.prior_scale = nn.Parameter(torch.zeros(1))
 
-        # [FIX 2026-03-02] Spatial restore layer
-        # Use depthwise convolution to convert global Mamba features back to local-friendly features
-        # This bridges the semantic gap between Mamba's global context and CNN's local features
+        self.mamba = VSSBlock(hidden_dim=out_ch, drop_path=0.1)
         self.spatial_restore = nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1, groups=out_ch)
 
-    def forward(self, x, lidar=None):
+    def forward(self, x, spatial_prior=None):
         """
         Args:
-            x: (B, C, H, W)
-            lidar: (B, 1, H, W) LiDAR depth at this stage's resolution (optional)
+            x             : (B, C, H, W)
+            spatial_prior : (B, 1, H, W) downsampled physical prior in [0,1], or None
         Returns:
             out: (B, out_ch, H, W)
         """
-        # Channel projection
-        identity = self.proj_in(x)  # (B, out_ch, H, W) - save for residual
+        identity = self.proj_in(x)                       # (B, out_ch, H, W) — residual
 
-        # Convert to Mamba format
-        B, C, H, W = identity.shape
-        x_mamba = identity.permute(0, 2, 3, 1)  # (B, H, W, C)
+        # Inject prior into Mamba input path (not the residual path)
+        x_in = identity
+        if spatial_prior is not None:
+            x_in = identity * (1.0 + self.prior_scale * spatial_prior)
 
-        # Mamba block (global context modeling)
-        # [LiDAR] Pass lidar_feat so SS2D can apply gating if use_lidar_gate=True
-        x_mamba = self.mamba(x_mamba, lidar)  # (B, H, W, C)
+        B, C, H, W = x_in.shape
+        x_mamba = x_in.permute(0, 2, 3, 1)              # (B, H, W, C)
+        x_mamba = self.mamba(x_mamba)                    # (B, H, W, C)  — pure Mamba
+        x_mamba = x_mamba.permute(0, 3, 1, 2)           # (B, C, H, W)
+        x_mamba = self.spatial_restore(x_mamba)          # local feature restoration
 
-        # Convert back
-        x_mamba = x_mamba.permute(0, 3, 1, 2)  # (B, C, H, W)
-
-        # [FIX 2026-03-02] Restore spatial details with depthwise conv
-        x_mamba = self.spatial_restore(x_mamba)
-
-        # [FIX 2026-03-02] Add residual connection for stability
-        return identity + x_mamba
+        return identity + x_mamba                        # residual skips the prior path
 
 
 # ===== Factory function for easy instantiation =====
