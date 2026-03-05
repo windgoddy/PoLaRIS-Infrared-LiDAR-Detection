@@ -192,13 +192,19 @@ class SS2D(nn.Module):
         self.out_proj = nn.Linear(self.d_inner, d_model, bias=False)
 
         # LiDAR gate projection (if enabled)
+        # [Phase 2] k=7 vs k=3: larger receptive field captures flat sea-surface geometry
+        # better for distinguishing foreground protrusions from background.
         if self.use_lidar_gate:
             self.lidar_gate_conv = nn.Sequential(
-                nn.Conv2d(1, self.d_inner, kernel_size=3, padding=1, bias=True),
+                nn.Conv2d(1, self.d_inner, kernel_size=7, padding=3, bias=True),
                 nn.BatchNorm2d(self.d_inner),
                 nn.SiLU(),
                 nn.Conv2d(self.d_inner, self.d_inner, kernel_size=1, bias=True),
             )
+            # [Phase 2] Learnable gate strength initialized small (0.1).
+            # Prevents LiDAR from overwhelming IR features at training start.
+            # Gradually learns the right contribution magnitude.
+            self.lidar_gate_scale = nn.Parameter(torch.ones(1) * 0.1)
 
         # Cross-scan modules
         self.cross_scan = CrossScan()
@@ -235,10 +241,11 @@ class SS2D(nn.Module):
             # Flatten and replicate for 4 directions
             gate_scan = self.cross_scan(gate)  # (B, 4, D_inner, L)
 
-            # Modulate: x_scan = x_scan * (1 + gate_scan)
-            # This enhances IR features where LiDAR is confident (gate ≈ 1)
-            # and keeps original IR where LiDAR is absent (gate ≈ 0)
-            x_scan = x_scan * (1.0 + gate_scan)
+            # [Phase 2] Modulate with learnable scale initialized to 0.1:
+            #   x_scan = x_scan * (1 + scale * gate_scan)
+            # scale starts small so LiDAR barely nudges IR at epoch 0,
+            # then grows to whatever magnitude the optimizer finds optimal.
+            x_scan = x_scan * (1.0 + self.lidar_gate_scale * gate_scan)
 
         # 5. Apply SSM (Selective Scan)
         y_scan = self._selective_scan(x_scan)  # (B, 4, D_inner, L)

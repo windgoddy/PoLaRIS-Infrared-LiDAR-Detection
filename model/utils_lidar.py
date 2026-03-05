@@ -73,8 +73,11 @@ def bin_to_depth_image(lidar_points, img_size):
     if len(lidar_points) == 0:
         return Image.fromarray(depth_map, mode='F')
 
-    cols   = np.round(lidar_points[:, 0]).astype(np.int32)
-    rows   = np.round(lidar_points[:, 1]).astype(np.int32)
+    # Suppress any residual NaN-cast warning: invalid coords will be caught by
+    # the bounds check below (NaN → INT_MIN → fails cols>=0 / rows>=0).
+    with np.errstate(invalid='ignore'):
+        cols   = np.round(lidar_points[:, 0]).astype(np.int32)
+        rows   = np.round(lidar_points[:, 1]).astype(np.int32)
     depths = lidar_points[:, 2].astype(np.float32)
 
     # Step 3: Keep in-bounds, positive-depth points

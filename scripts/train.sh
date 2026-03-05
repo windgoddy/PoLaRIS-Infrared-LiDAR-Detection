@@ -484,7 +484,19 @@ case $MODE in
                         echo "⚠️  无法解析 Save Dir，将从头开始"
                     fi
                     echo "⚠️  尝试更小的 batch size..."
-                    sleep 2
+                    # 等待 GPU 内存真正释放，避免 cuDNN 初始化失败
+                    echo "⏳ 等待 GPU $GPU 内存释放 (最多90秒)..."
+                    sleep 5
+                    for _drain_i in {1..17}; do
+                        _gpu_mem=$(nvidia-smi --query-gpu=memory.used \
+                            --format=csv,noheader,nounits -i "$GPU" 2>/dev/null | tr -d ' ')
+                        if [[ -n "$_gpu_mem" && "$_gpu_mem" -lt 500 ]]; then
+                            echo "✓ GPU $GPU 内存已释放 (${_gpu_mem}MB)，准备重试"
+                            break
+                        fi
+                        echo "  GPU $GPU 内存仍占用 ${_gpu_mem}MB，继续等待..."
+                        sleep 5
+                    done
                 else
                     echo "❌ 训练异常退出 (退出码: $TRAIN_EXIT_CODE)"
                     echo "查看完整日志: $LOG_FILE"
