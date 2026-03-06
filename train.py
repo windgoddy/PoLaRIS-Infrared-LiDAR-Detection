@@ -16,6 +16,7 @@ from model.load_param_data import  load_dataset, load_param
 # model
 from model.model_DNANet import  Res_CBAM_block
 from model.model_DNANet import  DNANet
+from model.model_DNANet_SNR import DNANet_SNR
 
 class Trainer(object):
     def __init__(self, args):
@@ -50,6 +51,8 @@ class Trainer(object):
         # Choose and load model (this paper is finished by one GPU)
         if args.model   == 'DNANet':
             model       = DNANet(num_classes=1,input_channels=args.in_channels, block=Res_CBAM_block, num_blocks=num_blocks, nb_filter=nb_filter, deep_supervision=args.deep_supervision)
+        elif args.model == 'DNANet_SNR':
+            model       = DNANet_SNR(num_classes=1, input_channels=args.in_channels, block=Res_CBAM_block, num_blocks=num_blocks, nb_filter=nb_filter, deep_supervision=args.deep_supervision)
 
         model           = model.cuda()
         model.apply(weights_init_xavier)

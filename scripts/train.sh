@@ -75,7 +75,7 @@ RESUME=""     # checkpoint 路径，空字符串表示从头开始
 SAVE_DIR=""   # 指定实验目录（resume时应与原目录一致）
 
 # 解析第一个参数作为模式（如果提供）
-if [[ $# -gt 0 && $1 =~ ^(baseline1|baseline2|cat2|dnanet_lidar|16bit-ir|16bit|mamba_unetpp|nudt_sirst)$ ]]; then
+if [[ $# -gt 0 && $1 =~ ^(baseline1|baseline2|cat2|dnanet_lidar|16bit-ir|16bit|mamba_unetpp|nudt_sirst|dnanet_snr)$ ]]; then
     MODE="$1"
     shift
 fi
@@ -150,7 +150,7 @@ export CUDA_VISIBLE_DEVICES=$GPU
 # 自动设置阈值（如果用户未指定）
 if [[ -z "$THRESHOLD" ]]; then
     case $MODE in
-        baseline1|baseline2)
+        baseline1|baseline2|dnanet_snr)
             THRESHOLD="0.5"  # Hard Labels 使用 0.5
             ;;
         cat2)
@@ -411,8 +411,8 @@ case $MODE in
                 --peak_threshold $THRESHOLD \
                 --workers 4 \
                 --use_lidar True \
-                --use_deep_supervision True \
-                --use_augmentation False \
+                --use_deep_supervision False \
+                --use_augmentation True \
                 ${RESUME:+--resume "$RESUME"} \
                 ${SAVE_DIR:+--save_dir "$SAVE_DIR"} > "$LOG_FILE" 2>&1 &
 
@@ -536,8 +536,34 @@ case $MODE in
         fi
         ;;
 
+    dnanet_snr)
+        echo "DNANet-SNR: DNANet + Physical SNR Prior (即插即用物理提示)"
+        echo "  骨干     : DNANet (Res_CBAM, resnet_18, channel_size=three)"
+        echo "  SNR注入  : gate0(256x256) + gate1(128x128) + gate2(64x64)"
+        echo "  新增参数 : ~5500 (相比 DNANet 可忽略不计)"
+        echo "  目标     : 超越 DNANet baseline1 的 73% IoU"
+        python train.py \
+            --experiment_name DNANet_SNR_PhysicalPrior \
+            --model DNANet_SNR \
+            --dataset $DATASET \
+            --image_folder images-8bit \
+            --train_batch_size $BATCH_SIZE \
+            --test_batch_size $BATCH_SIZE \
+            --epochs $EPOCHS \
+            --optimizer Adagrad \
+            --lr 0.05 \
+            --deep_supervision True \
+            --backbone resnet_18 \
+            --channel_size three \
+            --seed 42 \
+            --thres $THRESHOLD \
+            --suffix .png \
+            --split_method $SPLIT_METHOD \
+            --workers 4
+        ;;
+
     nudt_sirst)
-        echo "🔬 PGA-Mamba on NUDT-SIRST (公开基准，无LiDAR，SNR先验模式)"
+        echo "PGA-Mamba on NUDT-SIRST (公开基准，无LiDAR，SNR先验模式)"
         echo "  dataset : NUDT-SIRST (1327张, 256x256 RGB PNG)"
         echo "  prior   : PhysicalSNRPrior (use_lidar=True, lidar=None → SNR mode)"
         echo "  loader  : TrainSetLoader (8-bit, use_polaris_loader=False)"
@@ -583,7 +609,7 @@ case $MODE in
                 --gradient_accumulation_steps 1 \
                 --epochs $EPOCHS \
                 --optimizer AdamW \
-                --lr 0.0004 \
+                --lr 0.0001 \
                 --weight_decay 0.05 \
                 --scheduler CosineAnnealingLR \
                 --min_lr 1e-6 \
@@ -595,7 +621,7 @@ case $MODE in
                 --workers 4 \
                 --use_lidar True \
                 --use_deep_supervision False \
-                --use_augmentation False \
+                --use_augmentation True \
                 ${RESUME:+--resume "$RESUME"} \
                 ${SAVE_DIR:+--save_dir "$SAVE_DIR"} > "$LOG_FILE" 2>&1 &
 
@@ -671,7 +697,7 @@ case $MODE in
 
     *)
         echo "❌ 未知模式: $MODE"
-        echo "支持的模式: baseline1, cat2, dnanet_lidar, 16bit-ir, 16bit, mamba_unetpp, nudt_sirst"
+        echo "支持的模式: baseline1, cat2, dnanet_lidar, 16bit-ir, 16bit, mamba_unetpp, nudt_sirst, dnanet_snr"
         echo ""
         echo "实验设计："
         echo "  baseline1    - DNANet + 8-bit（单模态baseline）"
@@ -681,6 +707,7 @@ case $MODE in
         echo "  16bit        - MS_CAFNet + 16-bit + LiDAR（改进模型完整版）"
         echo "  mamba_unetpp - Mamba-UNet++混合架构（新：结合Mamba与UNet++）"
         echo "  nudt_sirst   - PGA-Mamba on NUDT-SIRST（公开基准，SNR先验）"
+        echo "  dnanet_snr   - DNANet + Physical SNR Prior（即插即用物理提示，论文核心对比）"
         exit 1
         ;;
 esac
