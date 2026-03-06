@@ -180,9 +180,10 @@ def parse_args():
 
     # Loss function (2026-02-03: Extended with advanced loss options)
     parser.add_argument('--loss_type', type=str, default='improved_bce_dice',
-                        choices=['improved_bce_dice', 'projection', 'hybrid', 'focal', 'combined', 'gaussian_focal'],
+                        choices=['improved_bce_dice', 'projection', 'hybrid', 'focal', 'combined', 'gaussian_focal', 'soft_iou'],
                         help='Loss function type: improved_bce_dice (baseline), projection (weak-supervision), '
-                             'hybrid (recommended for Box GT), gaussian_focal (BAGS strategy: Box→Gaussian realtime)')
+                             'hybrid (recommended for Box GT), gaussian_focal (BAGS strategy: Box→Gaussian realtime), '
+                             'soft_iou (standard for sparse small targets, DNANet/ACM compatible)')
     parser.add_argument('--focal_alpha', type=float, default=0.25,
                         help='Focal loss alpha parameter (positive sample weight)')
     parser.add_argument('--focal_gamma', type=float, default=2.5,

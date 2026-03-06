@@ -187,6 +187,32 @@ class DiceLoss(nn.Module):
         return 1.0 - dice
 
 
+class SoftIoULoss(nn.Module):
+    """
+    Soft IoU Loss for sparse small target detection.
+
+    Key difference from DiceLoss:
+    - smooth=1e-6 (not 1.0): avoids the gradient plateau where
+      Dice loss ≈ constant 1.0 regardless of prediction when
+      targets occupy < 0.1% of pixels (e.g. NUDT-SIRST 3-15px targets).
+    - This is the standard loss used by DNANet, ACM, ALCNet for IRST.
+    """
+    def __init__(self, smooth=1e-6):
+        super(SoftIoULoss, self).__init__()
+        self.smooth = smooth
+
+    def forward(self, pred, target):
+        target = target.float()
+        pred = pred.view(-1)
+        target = target.view(-1)
+
+        intersection = (pred * target).sum()
+        union = (pred + target).sum() - intersection
+
+        iou = (intersection + self.smooth) / (union + self.smooth)
+        return 1.0 - iou
+
+
 class ConfidenceCalibrationLoss(nn.Module):
     """
     Explicit Confidence Calibration Loss.

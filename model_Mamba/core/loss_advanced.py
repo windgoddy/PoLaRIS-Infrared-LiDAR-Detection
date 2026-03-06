@@ -19,14 +19,14 @@ import torch.nn.functional as F
 
 # Handle both package import and direct execution
 try:
-    from .loss_improved import FocalBCELoss, DiceLoss
+    from .loss_improved import FocalBCELoss, DiceLoss, SoftIoULoss
     from ..dataset.gaussian_utils import convert_box_mask_to_gaussian
 except ImportError:
     import sys
     import os
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
-    from loss_improved import FocalBCELoss, DiceLoss
+    from loss_improved import FocalBCELoss, DiceLoss, SoftIoULoss
     from dataset.gaussian_utils import convert_box_mask_to_gaussian
 
 
@@ -488,9 +488,14 @@ class LossFactory:
                 min_sigma=kwargs.get('gaussian_min_sigma', 2.0),
             )
 
+        elif loss_type == 'soft_iou':
+            # 标准 SoftIoU Loss — 专为稀疏小目标设计 (DNANet/ACM/ALCNet 标准)
+            # smooth=1e-6 确保梯度在极稀疏目标场景下仍然有效
+            return SoftIoULoss(smooth=1e-6)
+
         else:
             raise ValueError(f"Unknown loss_type: {loss_type}. "
-                           f"Supported: 'improved_bce_dice', 'projection', 'hybrid', 'gaussian_focal'")
+                           f"Supported: 'improved_bce_dice', 'projection', 'hybrid', 'gaussian_focal', 'soft_iou'")
     
     @staticmethod
     def get_loss_name(loss_type, **kwargs):
@@ -524,6 +529,9 @@ class LossFactory:
             proj_w = kwargs.get('projection_weight', 2.0)
             sigma = kwargs.get('gaussian_sigma_scale', 6.0)
             return f"GaussianFocal_a{alpha}_b{beta}_p{proj_w}_s{sigma}"
+
+        elif loss_type == 'soft_iou':
+            return "SoftIoU"
 
         return "UnknownLoss"
 
