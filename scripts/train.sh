@@ -75,7 +75,7 @@ RESUME=""     # checkpoint 路径，空字符串表示从头开始
 SAVE_DIR=""   # 指定实验目录（resume时应与原目录一致）
 
 # 解析第一个参数作为模式（如果提供）
-if [[ $# -gt 0 && $1 =~ ^(baseline1|baseline2|cat2|dnanet_lidar|16bit-ir|16bit|mamba_unetpp|nudt_sirst|dnanet_snr)$ ]]; then
+if [[ $# -gt 0 && $1 =~ ^(baseline1|baseline2|cat2|dnanet_lidar|16bit-ir|16bit|mamba_unetpp|nudt_sirst|nudt_sirst_snr|dnanet_snr)$ ]]; then
     MODE="$1"
     shift
 fi
@@ -695,9 +695,140 @@ case $MODE in
         fi
         ;;
 
+    nudt_sirst_snr)
+        echo "DNANet-SNR on NUDT-SIRST (公开基准，通过model_Mamba/train.py运行)"
+        echo "  model   : DNANet_SNR (DNANet + PhysicalSNRPrior gates)"
+        echo "  dataset : NUDT-SIRST"
+
+        ROOT_ABS="$(pwd)"
+        if [[ -n "$RESUME" && "$RESUME" != /* ]]; then
+            RESUME="$ROOT_ABS/$RESUME"
+        fi
+        if [[ -n "$SAVE_DIR" && "$SAVE_DIR" != /* ]]; then
+            SAVE_DIR="$ROOT_ABS/$SAVE_DIR"
+        fi
+
+        cd model_Mamba
+
+        BATCH_SIZES=($BATCH_SIZE)
+        for fallback in 4 2 1; do
+            if [ $fallback -lt $BATCH_SIZE ]; then
+                BATCH_SIZES+=($fallback)
+            fi
+        done
+        SUCCESS=false
+        LAST_LOG_FILE=""
+
+        for TRY_BATCH in "${BATCH_SIZES[@]}"; do
+            echo ""
+            echo "🔄 尝试 Batch Size = $TRY_BATCH"
+            LOG_FILE="/tmp/nudt_sirst_snr_train_$$_bs${TRY_BATCH}.log"
+            LAST_LOG_FILE="$LOG_FILE"
+
+            python train.py \
+                --experiment_name DNANet_SNR_NUDT_SIRST \
+                --model dnanet_snr \
+                --root ../dataset/ \
+                --dataset NUDT-SIRST \
+                --split_method 50_50 \
+                --in_channels 3 \
+                --image_folder images \
+                --suffix .png \
+                --base_size 256 \
+                --crop_size 256 \
+                --train_batch_size $TRY_BATCH \
+                --test_batch_size $TRY_BATCH \
+                --gradient_accumulation_steps 1 \
+                --epochs $EPOCHS \
+                --optimizer Adagrad \
+                --lr 0.05 \
+                --scheduler CosineAnnealingLR \
+                --min_lr 1e-5 \
+                --seed 42 \
+                --use_polaris_loader False \
+                --normalize_16bit False \
+                --loss_type soft_iou \
+                --peak_threshold 0.5 \
+                --workers 4 \
+                --use_lidar False \
+                --use_deep_supervision False \
+                --use_augmentation True \
+                ${RESUME:+--resume "$RESUME"} \
+                ${SAVE_DIR:+--save_dir "$SAVE_DIR"} > "$LOG_FILE" 2>&1 &
+
+            TRAIN_PID=$!
+            echo "📝 训练进程 PID: $TRAIN_PID"
+            echo "📁 日志文件: $LOG_FILE"
+
+            EPOCH_STARTED=false
+            for i in {1..60}; do
+                sleep 1
+                if ! ps -p $TRAIN_PID > /dev/null 2>&1; then
+                    if grep -qE "OutOfMemoryError|CUDA out of memory" "$LOG_FILE"; then
+                        echo "❌ OOM"
+                        break
+                    else
+                        echo "❌ 训练失败"
+                        tail -10 "$LOG_FILE" | grep -E "Error|Exception" || echo "查看日志: $LOG_FILE"
+                        break
+                    fi
+                fi
+                if [ "$EPOCH_STARTED" = false ] && grep -qE "Epoch.*0|epoch.*0|Epoch 0:" "$LOG_FILE"; then
+                    EPOCH_STARTED=true
+                    echo "✓ 训练已启动，Batch Size = $TRY_BATCH 可行"
+                    SUCCESS=true
+                    break
+                fi
+            done
+
+            if [ "$SUCCESS" = true ]; then
+                echo ""
+                echo "=========================================="
+                echo "开始显示训练日志 (Ctrl+C 退出查看但不停止训练)"
+                echo "=========================================="
+                tail -f "$LOG_FILE" &
+                TAIL_PID=$!
+                wait $TRAIN_PID
+                TRAIN_EXIT_CODE=$?
+                kill $TAIL_PID 2>/dev/null || true
+                echo ""
+                echo "=========================================="
+                if [ $TRAIN_EXIT_CODE -eq 0 ]; then
+                    echo "✅ 训练成功完成 (Batch Size = $TRY_BATCH)"
+                    break
+                elif grep -qE "OutOfMemoryError|CUDA out of memory" "$LOG_FILE"; then
+                    echo "❌ 训练中途 OOM，尝试更小 batch..."
+                    SUCCESS=false
+                    sleep 5
+                else
+                    echo "❌ 训练异常退出 (退出码: $TRAIN_EXIT_CODE)"
+                    echo "查看日志: $LOG_FILE"
+                    break
+                fi
+            else
+                kill $TRAIN_PID 2>/dev/null || true
+                wait $TRAIN_PID 2>/dev/null || true
+                if [ "$TRY_BATCH" != "${BATCH_SIZES[-1]}" ]; then
+                    echo "⚠️  Batch Size $TRY_BATCH 不可行，尝试更小..."
+                    sleep 2
+                else
+                    echo "❌ 即使 Batch Size = 1 仍然失败"
+                    break
+                fi
+            fi
+        done
+
+        cd ..
+
+        if [ "$SUCCESS" = false ]; then
+            echo "❌ 训练失败，查看日志: $LAST_LOG_FILE"
+            exit 1
+        fi
+        ;;
+
     *)
         echo "❌ 未知模式: $MODE"
-        echo "支持的模式: baseline1, cat2, dnanet_lidar, 16bit-ir, 16bit, mamba_unetpp, nudt_sirst, dnanet_snr"
+        echo "支持的模式: baseline1, cat2, dnanet_lidar, 16bit-ir, 16bit, mamba_unetpp, nudt_sirst, nudt_sirst_snr, dnanet_snr"
         echo ""
         echo "实验设计："
         echo "  baseline1    - DNANet + 8-bit（单模态baseline）"

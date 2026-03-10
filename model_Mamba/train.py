@@ -58,6 +58,9 @@ from model_Mamba.core.polaris_mamba_progressive import (
 )
 # [NEW] Mamba-UNet++ Hybrid Model (2026-03-02)
 from model.model_Mamba_UNetPP import mamba_unetplusplus
+from model.model_DNANet import Res_CBAM_block
+from model.model_DNANet_SNR import DNANet_SNR
+from model.load_param_data import load_param
 from model_Mamba.core.loss import GaussianFocalLoss, CombinedLoss, AverageMeter, BCEDiceLoss
 from model_Mamba.core.loss_improved import ImprovedBCEDiceLoss, ConfidenceCalibrationLoss
 from model_Mamba.core.loss_advanced import LossFactory  # 2026-02-03: Multi-loss support
@@ -101,8 +104,8 @@ def parse_args():
                         choices=['mamba_tiny', 'mamba_small', 'mamba_base',
                                 'mamba_tiny_multiscale', 'mamba_small_multiscale',
                                 'mamba_tiny_progressive', 'mamba_small_progressive',
-                                'mamba_unetpp'],
-                        help='Model variant (use *_multiscale for multi-scale, *_progressive for U-Net style decoder, mamba_unetpp for Mamba-UNet++ hybrid)')
+                                'mamba_unetpp', 'dnanet_snr'],
+                        help='Model variant (use *_multiscale for multi-scale, *_progressive for U-Net style decoder, mamba_unetpp for Mamba-UNet++ hybrid, dnanet_snr for DNANet+PhysicalSNR)')
     parser.add_argument('--use_lidar', type=str, default='True',
                         help='Whether to use LiDAR gating (True/False)')
     parser.add_argument('--use_deep_supervision', type=str, default='False',
@@ -592,6 +595,19 @@ class Trainer:
             )
             print(f"✓ Using Mamba-UNet++ Hybrid (ir_channels={ir_channels}, "
                   f"deep_supervision={use_deep_supervision}, use_lidar={use_lidar})")
+        elif args.model == 'dnanet_snr':
+            nb_filter = [16, 32, 64, 128, 256]
+            num_blocks_dna = [2, 2, 2, 2]
+            self.net = DNANet_SNR(
+                num_classes=1,
+                input_channels=args.in_channels,
+                block=Res_CBAM_block,
+                num_blocks=num_blocks_dna,
+                nb_filter=nb_filter,
+                deep_supervision=use_deep_supervision,
+            )
+            print(f"✓ Using DNANet_SNR (in_channels={args.in_channels}, "
+                  f"deep_supervision={use_deep_supervision})")
         else:
             raise ValueError(f"Unknown model: {args.model}")
 
