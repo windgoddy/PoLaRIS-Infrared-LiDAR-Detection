@@ -33,6 +33,8 @@ def parse_args():
                         help='crop image size')
     parser.add_argument('--image_folder', type=str, default='images',
                         help='name of the image folder (default: images, use images-8bit for 8-bit images)')
+    parser.add_argument('--mask_folder', type=str, default='masks',
+                        help='name of the mask folder (default: masks, use masks_bsnr_t5 for B-SNR masks)')
 
     #  hyper params for training
     parser.add_argument('--epochs', type=int, default=1500, metavar='N',

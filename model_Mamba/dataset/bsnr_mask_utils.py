@@ -277,8 +277,8 @@ def generate_bsnr_mask_batch_offline(
         else:
             empty += 1
 
-        # 可视化对比
-        if visualize and vis_output_dir and (i < 50 or i % 100 == 0):
+        # 可视化对比（只对有目标的图像生成）
+        if visualize and vis_output_dir and len(labels) > 0 and success <= 50:
             _save_visualization(
                 image, mask, labels, (H, W),
                 os.path.join(vis_output_dir, img_id + '_vis.png'),
@@ -400,7 +400,11 @@ if __name__ == "__main__":
 
     # 获取图像 ID 列表
     if args.split_file:
-        split_path = os.path.join(args.dataset_dir, args.split_file)
+        # 支持绝对路径和相对于 dataset_dir 的路径
+        if os.path.isabs(args.split_file) or os.path.exists(args.split_file):
+            split_path = args.split_file
+        else:
+            split_path = os.path.join(args.dataset_dir, args.split_file)
         with open(split_path, 'r') as f:
             img_ids = [line.strip() for line in f if line.strip()]
         print(f"Loaded {len(img_ids)} image IDs from {split_path}")

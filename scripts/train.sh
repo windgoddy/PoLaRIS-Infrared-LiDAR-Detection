@@ -73,6 +73,7 @@ BATCH_SIZE=8
 IN_CHANNELS=2  # 输入通道数：1=纯红外(SNR Gate, Exp B), 2=IR+深度图(LiDAR Gate, Exp C)
 RESUME=""     # checkpoint 路径，空字符串表示从头开始
 SAVE_DIR=""   # 指定实验目录（resume时应与原目录一致）
+MASK_FOLDER="masks"  # 掩码目录名（默认 masks，可改为 masks_bsnr_t5 等）
 
 # 解析第一个参数作为模式（如果提供）
 if [[ $# -gt 0 && $1 =~ ^(baseline1|baseline2|cat2|dnanet_lidar|16bit-ir|16bit|mamba_unetpp|nudt_sirst|nudt_sirst_snr|dnanet_snr)$ ]]; then
@@ -121,6 +122,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --in-channels)
             IN_CHANNELS="$2"
+            shift 2
+            ;;
+        --mask-folder)
+            MASK_FOLDER="$2"
             shift 2
             ;;
         *)
@@ -547,6 +552,7 @@ case $MODE in
             --model DNANet_SNR \
             --dataset $DATASET \
             --image_folder images-8bit \
+            --mask_folder $MASK_FOLDER \
             --train_batch_size $BATCH_SIZE \
             --test_batch_size $BATCH_SIZE \
             --epochs $EPOCHS \
