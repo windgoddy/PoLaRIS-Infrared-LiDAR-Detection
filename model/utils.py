@@ -378,8 +378,11 @@ def save_model(mean_IOU, best_iou, save_dir, save_prefix, train_loss, test_loss,
             except Exception as e:
                 print(f'❌ 删除失败 {old_model}: {e}')
 
-        # 保存最佳模型（包含 epoch 和 IoU 信息）
-        best_model_filename = f'best_model_epoch{epoch:04d}_mIoU{mean_IOU:.4f}.pth.tar'
+        # 保存最佳模型（包含 epoch、Seg IoU、Box IoU 信息）
+        if box_iou is not None:
+            best_model_filename = f'best_model_epoch{epoch:04d}_mIoU{mean_IOU:.4f}_BoxIoU{box_iou:.4f}.pth.tar'
+        else:
+            best_model_filename = f'best_model_epoch{epoch:04d}_mIoU{mean_IOU:.4f}.pth.tar'
         save_dict = {
             'epoch': epoch,
             'state_dict': net,
@@ -404,6 +407,53 @@ def save_model(mean_IOU, best_iou, save_dir, save_prefix, train_loss, test_loss,
         save_ckpt(save_dict, save_path='result/' + save_dir, filename='latest_best_model.pth.tar')
 
     return best_iou
+
+
+def save_model_box_iou(mean_box_IOU, best_box_iou, save_dir, save_prefix, train_loss, test_loss, recall, precision, epoch, net, seg_iou=None):
+    """
+    保存 Mask-to-Box IoU 最佳模型（与 save_model 独立追踪）
+
+    Returns:
+        best_box_iou: 更新后的最佳 Box IoU
+    """
+    if mean_box_IOU > best_box_iou:
+        result_path = 'result/' + save_dir
+        os.makedirs(result_path, exist_ok=True)
+
+        # 删除旧的 Box IoU 最佳模型
+        old_best_models = glob.glob(os.path.join(result_path, 'best_model_box_epoch*_BoxIoU*.pth.tar'))
+        for old_model in old_best_models:
+            try:
+                os.remove(old_model)
+                print(f'✅ 删除旧 Box IoU 模型: {os.path.basename(old_model)}')
+            except Exception as e:
+                print(f'❌ 删除失败 {old_model}: {e}')
+
+        best_box_iou = mean_box_IOU
+        if seg_iou is not None:
+            best_model_filename = f'best_model_box_epoch{epoch:04d}_BoxIoU{mean_box_IOU:.4f}_mIoU{seg_iou:.4f}.pth.tar'
+        else:
+            best_model_filename = f'best_model_box_epoch{epoch:04d}_BoxIoU{mean_box_IOU:.4f}.pth.tar'
+        save_dict = {
+            'epoch': epoch,
+            'state_dict': net,
+            'loss': test_loss,
+            'box_IOU': mean_box_IOU,
+            'recall': recall,
+            'precision': precision,
+        }
+        if seg_iou is not None:
+            save_dict['mean_IOU'] = seg_iou
+
+        save_ckpt(save_dict, save_path='result/' + save_dir, filename=best_model_filename)
+
+        if seg_iou is not None:
+            print(f'🎉 保存新的最佳 Box IoU 模型: {best_model_filename} (Epoch {epoch}, BoxIoU {mean_box_IOU:.4f}, mIoU {seg_iou:.4f})')
+        else:
+            print(f'🎉 保存新的最佳 Box IoU 模型: {best_model_filename} (Epoch {epoch}, BoxIoU {mean_box_IOU:.4f})')
+
+    return best_box_iou
+
 
 def save_last_epoch(save_dir, train_loss, test_loss, mean_IOU, recall, precision, epoch, net, box_iou=None):
     """保存最后一个 epoch 的模型

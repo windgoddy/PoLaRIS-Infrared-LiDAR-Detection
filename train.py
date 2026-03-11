@@ -71,7 +71,7 @@ class Trainer(object):
 
         # Evaluation metrics
         self.best_iou       = 0
-        self.best_box_iou   = 0  # 2026-02-03: Track best Mask-to-Box IoU
+        self.best_box_iou   = 0  # Track best Mask-to-Box IoU (independent from best Seg IoU)
         self.best_recall    = [0,0,0,0,0,0,0,0,0,0,0]
         self.best_precision = [0,0,0,0,0,0,0,0,0,0,0]
 
@@ -158,15 +158,15 @@ class Trainer(object):
         self.last_epoch = epoch
         self.last_mean_IOU = mean_IOU
         self.last_box_IOU = mean_box_IOU  # 2026-02-03: Store Box IoU
-        # save high-performance model and update best_iou
-        old_best_iou = self.best_iou
+        # 保存 Seg IoU 最佳模型
         self.best_iou = save_model(mean_IOU, self.best_iou, self.save_dir, self.save_prefix,
                                     self.train_loss, test_loss, recall, precision, epoch, self.model.state_dict(),
-                                    mean_box_IOU)  # 2026-02-03: Pass Box IoU to save_model
+                                    mean_box_IOU)
 
-        # 2026-02-03: Track best Box IoU when best segmentation IoU is updated
-        if mean_IOU > old_best_iou:
-            self.best_box_iou = mean_box_IOU
+        # 保存 Mask-to-Box IoU 最佳模型（独立追踪）
+        self.best_box_iou = save_model_box_iou(mean_box_IOU, self.best_box_iou, self.save_dir, self.save_prefix,
+                                                self.train_loss, test_loss, recall, precision, epoch,
+                                                self.model.state_dict(), seg_iou=mean_IOU)
 
 def main(args):
     trainer = Trainer(args)
