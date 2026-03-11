@@ -274,7 +274,7 @@ def main():
                         help='YOLO box 标注目录（由 nudt_mask_to_yolo_box.py 生成）')
     parser.add_argument('--image_folder', type=str, default='images')
     parser.add_argument('--suffix', type=str, default='.png')
-    parser.add_argument('--split', type=str, default='50_50/train.txt',
+    parser.add_argument('--split', type=str, default=None,
                         help='Split 文件路径（相对于 dataset_dir 或绝对路径）')
     parser.add_argument('--generate', nargs='+', default=['gaussian', 'bsnr'],
                         choices=['gaussian', 'bsnr'],
