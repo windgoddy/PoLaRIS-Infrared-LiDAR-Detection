@@ -119,7 +119,7 @@ def generate_bsnr_masks(
     expand_ratio=1.5,
     temperature=3.0,
     fg_threshold=0.5,
-    soft_label=True,
+    soft_label=False,
 ):
     """
     从 YOLO box + 原始图像生成 B-SNR 净化掩码（C 组，本文方法）。
@@ -296,6 +296,8 @@ def main():
                         help='sigmoid 温度系数，越大分离越尖锐')
     parser.add_argument('--fg_threshold', type=float, default=0.5,
                         help='B-SNR 前景阈值，低于此值置零')
+    parser.add_argument('--soft_label', action='store_true', default=False,
+                        help='启用软标签（连续值 0~1）；默认关闭，输出二值掩码（0 或 255）')
 
     args = parser.parse_args()
     dataset_dir = args.dataset_dir
@@ -348,6 +350,7 @@ def main():
             expand_ratio=args.expand_ratio,
             temperature=args.temperature,
             fg_threshold=args.fg_threshold,
+            soft_label=args.soft_label,
         )
 
     # 可视化对比
