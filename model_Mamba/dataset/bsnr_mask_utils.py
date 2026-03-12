@@ -14,9 +14,14 @@ B-SNR (Box-Constrained SNR) Pseudo-Mask Generation
     计算背景的 μ 和 σ。膨胀后包含足够的纯背景像素，保证统计量稳定。
   - 作用域 (Target Box): SNR 权重只在原始 Box 内部生效，框外强制为 0。
 
-公式:
+公式 (B-SNR):
   W_physics(i) = sigmoid(τ · (I(i) - μ_ctx) / (σ_ctx + ε))
   Y_target = W_physics  (在 Box 内), 0 (在 Box 外)
+
+公式 (B-SNR + Spatial Gaussian, D 组):
+  W_spatial(i) = exp(-(Δx²/(2σ_x²) + Δy²/(2σ_y²)))  ← 以 box 中心为原点的 2D 高斯
+  P(i) = W_physics(i) × W_spatial(i)
+  σ = gauss_sigma_ratio × (box_half_size)  默认 gauss_sigma_ratio=1.0
 
 Author: PoLaRIS Team
 Date: 2026-03-10
@@ -34,6 +39,8 @@ def compute_bsnr_weight(
     expand_ratio: float = 1.5,
     temperature: float = 3.0,
     epsilon: float = 1e-4,
+    spatial_gaussian: bool = False,
+    gauss_sigma_ratio: float = 1.5,
 ) -> np.ndarray:
     """
     计算单个 Box 内的 B-SNR 物理权重图。
@@ -46,9 +53,14 @@ def compute_bsnr_weight(
         temperature: sigmoid 温度系数 τ，控制前景/背景分离的锐度
                      τ 越大，分离越尖锐；τ 越小，过渡越平滑
         epsilon: 防止除零的小常数
+        spatial_gaussian: True 时启用物理锚定高斯乘积（D 组方法）
+                          高斯圆心 = B-SNR 的 argmax（物理热点），而非 box 几何中心
+        gauss_sigma_ratio: σ = gauss_sigma_ratio × max(box_h, box_w) / 2
+                           默认 1.5，较宽的高斯，避免 box 边缘真实目标被压制
 
     Returns:
         weight: (box_h, box_w) float32，值域 [0, 1]，物理 SNR 权重
+                若 spatial_gaussian=True，则为 B-SNR × 物理锚定高斯的乘积
     """
     H, W = image_gray.shape
     x1, y1, x2, y2 = box
@@ -97,6 +109,24 @@ def compute_bsnr_weight(
         # 框内像素几乎均匀（极端情况），返回全 0.5
         weight = np.full_like(weight, 0.5)
 
+    # === Step 4 (D 组): 物理锚定高斯乘积 ===
+    if spatial_gaussian:
+        # 以 B-SNR 最大值像素（物理热点）为高斯圆心，而非几何中心
+        # 这解决了 Bounding Box "偏心" 问题：目标未必在框的几何中心
+        peak_flat = snr.argmax()
+        peak_y = peak_flat // box_w
+        peak_x = peak_flat % box_w
+
+        # σ 取较大值（基于 box 的最长边），避免边缘真实目标像素被过度压制
+        sigma_px = max(gauss_sigma_ratio * max(box_h, box_w) / 2.0, 1.0)
+
+        yy, xx = np.mgrid[0:box_h, 0:box_w]
+        gauss = np.exp(
+            -((yy - peak_y) ** 2 + (xx - peak_x) ** 2) / (2 * sigma_px ** 2)
+        ).astype(np.float32)
+
+        weight = weight * gauss
+
     return weight.astype(np.float32)
 
 
@@ -109,6 +139,8 @@ def generate_bsnr_mask(
     fg_threshold: float = 0.5,
     soft_label: bool = True,
     max_value: float = 1.0,
+    spatial_gaussian: bool = False,
+    gauss_sigma_ratio: float = 1.5,
 ) -> np.ndarray:
     """
     从 YOLO 标签 + 原始图像生成 B-SNR 物理净化伪掩码。
@@ -126,6 +158,8 @@ def generate_bsnr_mask(
         soft_label: True 返回连续值掩码 [0, max_value]
                     False 返回二值掩码 {0, max_value}
         max_value: 前景最大值（默认 1.0，可设为 0.8 配合 soft label 训练）
+        spatial_gaussian: True 启用物理锚定高斯（D 组方法），默认 False
+        gauss_sigma_ratio: 高斯 σ = gauss_sigma_ratio × max(box_h,box_w)/2
 
     Returns:
         mask: (H, W) float32 伪掩码
@@ -171,11 +205,13 @@ def generate_bsnr_mask(
         if x2 <= x1 or y2 <= y1:
             continue
 
-        # 计算 B-SNR 物理权重
+        # 计算 B-SNR 物理权重（D 组时附加物理锚定高斯）
         weight = compute_bsnr_weight(
             gray, (x1, y1, x2, y2),
             expand_ratio=expand_ratio,
             temperature=temperature,
+            spatial_gaussian=spatial_gaussian,
+            gauss_sigma_ratio=gauss_sigma_ratio,
         )
 
         # 应用阈值

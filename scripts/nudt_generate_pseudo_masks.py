@@ -8,22 +8,26 @@ NUDT-SIRST 模拟弱监督 Pilot 实验 — 伪掩码生成
                   这是弱监督的朴素基线（什么都不做，直接把框内全标为前景）
   C 组（B-SNR） ：用 labels_box/ YOLO box + 图像纹理 → B-SNR 净化掩码 → masks_bsnr/
                   本文方法：物理 SNR 门控去除框内背景像素
+  D 组（B-SNR+高斯）：B-SNR × 物理锚定高斯场 → masks_bsnr_gauss/
+                  升维方法：以 SNR argmax（物理热点）为圆心的高斯乘积
+                  解决孤立噪点问题 + 偏心框问题
 
 论文核心论证：
   C >> B → B-SNR 从相同的 box 标注中提取出了显著更优的监督信号
-  C ≈ A  → 用 box + B-SNR 几乎可以恢复 GT 像素级监督性能
+  D >= C → 物理锚定高斯消除孤立噪点，进一步提升掩码质量
+  D ≈ A  → 弱监督接近 GT 像素级监督上界
 
 用法：
-    # 同时生成 B 组和 C 组（全量）
+    # 同时生成 B/C/D 三组（全量）
     python scripts/nudt_generate_pseudo_masks.py \
         --dataset_dir dataset/NUDT-SIRST \
-        --generate box_fill bsnr \
+        --generate box_fill bsnr bsnr_gauss \
         --visualize
 
-    # 只生成某一组
+    # 只生成 D 组
     python scripts/nudt_generate_pseudo_masks.py \
         --dataset_dir dataset/NUDT-SIRST \
-        --generate bsnr
+        --generate bsnr_gauss
 
 依赖：
     model_Mamba/dataset/bsnr_mask_utils.py  (generate_bsnr_mask, _load_yolo_labels)
@@ -180,7 +184,81 @@ def generate_bsnr_masks(
 
 
 # ======================================================
-# 可视化对比（四列：原图+Box | A:GT | B:矩形框 | C:B-SNR）
+# D 组：B-SNR × 物理锚定高斯（升维方法）
+# ======================================================
+
+def generate_bsnr_gauss_masks(
+    dataset_dir,
+    img_ids,
+    label_folder='labels_box',
+    image_folder='images',
+    output_folder='masks_bsnr_gauss',
+    suffix='.png',
+    expand_ratio=1.5,
+    temperature=3.0,
+    fg_threshold=0.5,
+    soft_label=False,
+    gauss_sigma_ratio=1.5,
+):
+    """
+    从 YOLO box + 原始图像生成物理锚定高斯净化掩码（D 组）。
+
+    核心：在 B-SNR 基础上乘以以 SNR argmax（物理热点）为圆心的高斯场，
+    既消除孤立噪点，又通过物理峰值锚定解决 Bounding Box 偏心问题。
+    """
+    labels_dir = os.path.join(dataset_dir, label_folder)
+    images_dir = os.path.join(dataset_dir, image_folder)
+    output_dir = os.path.join(dataset_dir, output_folder)
+    os.makedirs(output_dir, exist_ok=True)
+
+    has_target = 0
+    no_label = 0
+    empty_mask = 0
+
+    print(f"\n[D组] 生成 B-SNR+物理锚定高斯掩码: {output_dir}")
+    print(f"  expand_ratio={expand_ratio}, temperature={temperature}, "
+          f"fg_threshold={fg_threshold}, gauss_sigma_ratio={gauss_sigma_ratio}")
+
+    for img_id in tqdm(img_ids, desc='B-SNR+Gauss'):
+        img_path = os.path.join(images_dir, img_id + suffix)
+        image = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+        if image is None:
+            continue
+        H, W = image.shape
+
+        label_path = os.path.join(labels_dir, img_id + '.txt')
+        labels = _load_yolo_labels(label_path)
+
+        mask = generate_bsnr_mask(
+            labels, (H, W), image,
+            expand_ratio=expand_ratio,
+            temperature=temperature,
+            fg_threshold=fg_threshold,
+            soft_label=soft_label,
+            max_value=1.0,
+            spatial_gaussian=True,
+            gauss_sigma_ratio=gauss_sigma_ratio,
+        )
+
+        mask_uint8 = (mask * 255).clip(0, 255).astype(np.uint8)
+        cv2.imwrite(os.path.join(output_dir, img_id + suffix), mask_uint8)
+
+        if len(labels) > 0:
+            has_target += 1
+            if mask.max() == 0:
+                empty_mask += 1
+        else:
+            no_label += 1
+
+    print(f"  完成: 有目标={has_target}, 无目标={no_label}")
+    if has_target > 0:
+        print(f"  空掩码: {empty_mask}/{has_target} "
+              f"({100*empty_mask/has_target:.1f}%)")
+    return output_dir
+
+
+# ======================================================
+# 可视化对比（五列：原图+Box | A:GT | B:矩形框 | C:B-SNR | D:B-SNR+高斯）
 # ======================================================
 
 def visualize_comparison(
@@ -193,23 +271,25 @@ def visualize_comparison(
     suffix='.png',
 ):
     """
-    生成四列对比图：原图(+box) | A:GT掩码 | B:矩形框填充 | C:B-SNR净化
+    生成五列对比图：原图(+box) | A:GT掩码 | B:矩形框填充 | C:B-SNR净化 | D:B-SNR+高斯
     """
     if output_dir is None:
         output_dir = os.path.join(dataset_dir, 'pilot_vis')
     os.makedirs(output_dir, exist_ok=True)
 
-    labels_dir = os.path.join(dataset_dir, label_folder)
-    images_dir = os.path.join(dataset_dir, image_folder)
-    gt_dir       = os.path.join(dataset_dir, 'masks')
-    box_fill_dir = os.path.join(dataset_dir, 'masks_box_fill')
-    bsnr_dir     = os.path.join(dataset_dir, 'masks_bsnr')
+    labels_dir    = os.path.join(dataset_dir, label_folder)
+    images_dir    = os.path.join(dataset_dir, image_folder)
+    gt_dir        = os.path.join(dataset_dir, 'masks')
+    box_fill_dir  = os.path.join(dataset_dir, 'masks_box_fill')
+    bsnr_dir      = os.path.join(dataset_dir, 'masks_bsnr')
+    bsnr_gauss_dir= os.path.join(dataset_dir, 'masks_bsnr_gauss')
 
     panel_configs = [
-        (None,        'Image+Box'),
-        (gt_dir,      'A: GT Mask'),
-        (box_fill_dir,'B: Box Fill'),
-        (bsnr_dir,    'C: B-SNR'),
+        (None,           'Image+Box'),
+        (gt_dir,         'A: GT Mask'),
+        (box_fill_dir,   'B: Box Fill'),
+        (bsnr_dir,       'C: B-SNR'),
+        (bsnr_gauss_dir, 'D: B-SNR+Gauss'),
     ]
 
     count = 0
@@ -283,13 +363,13 @@ def main():
                         help='Split 文件路径（相对于 dataset_dir 或绝对路径）；'
                              '不传则处理 label_folder 下所有图像')
     parser.add_argument('--generate', nargs='+', default=['box_fill', 'bsnr'],
-                        choices=['box_fill', 'bsnr'],
-                        help='要生成的掩码类型: box_fill=B组, bsnr=C组')
+                        choices=['box_fill', 'bsnr', 'bsnr_gauss'],
+                        help='要生成的掩码类型: box_fill=B组, bsnr=C组, bsnr_gauss=D组')
     parser.add_argument('--visualize', action='store_true',
-                        help='生成四列对比可视化（Image+Box | A:GT | B:BoxFill | C:B-SNR）')
+                        help='生成五列对比可视化（Image+Box | A:GT | B:BoxFill | C:B-SNR | D:B-SNR+Gauss）')
     parser.add_argument('--vis_samples', type=int, default=30,
                         help='可视化样本数量')
-    # B-SNR 超参数（C 组）
+    # B-SNR 超参数（C/D 组共用）
     parser.add_argument('--expand_ratio', type=float, default=1.5,
                         help='Context Box 膨胀倍率')
     parser.add_argument('--temperature', type=float, default=3.0,
@@ -298,6 +378,10 @@ def main():
                         help='B-SNR 前景阈值，低于此值置零')
     parser.add_argument('--soft_label', action='store_true', default=False,
                         help='启用软标签（连续值 0~1）；默认关闭，输出二值掩码（0 或 255）')
+    # D 组专用超参数
+    parser.add_argument('--gauss_sigma_ratio', type=float, default=1.5,
+                        help='D组: 高斯 σ = gauss_sigma_ratio × max(box_h,box_w)/2'
+                             '（默认 1.5，越大越平缓，边缘目标保留越多）')
 
     args = parser.parse_args()
     dataset_dir = args.dataset_dir
@@ -353,6 +437,22 @@ def main():
             soft_label=args.soft_label,
         )
 
+    # D 组：B-SNR × 物理锚定高斯
+    if 'bsnr_gauss' in args.generate:
+        generate_bsnr_gauss_masks(
+            dataset_dir=dataset_dir,
+            img_ids=img_ids,
+            label_folder=args.label_folder,
+            image_folder=args.image_folder,
+            output_folder='masks_bsnr_gauss',
+            suffix=args.suffix,
+            expand_ratio=args.expand_ratio,
+            temperature=args.temperature,
+            fg_threshold=args.fg_threshold,
+            soft_label=args.soft_label,
+            gauss_sigma_ratio=args.gauss_sigma_ratio,
+        )
+
     # 可视化对比
     if args.visualize:
         print("\n生成可视化对比图...")
@@ -366,9 +466,10 @@ def main():
         )
 
     print("\n全部完成！")
-    print(f"  A 组训练用: --mask_folder masks         （GT 上界）")
-    print(f"  B 组训练用: --mask_folder masks_box_fill （矩形框朴素基线）")
-    print(f"  C 组训练用: --mask_folder masks_bsnr     （B-SNR 净化，本文方法）")
+    print(f"  A 组训练用: --mask_folder masks              （GT 上界）")
+    print(f"  B 组训练用: --mask_folder masks_box_fill     （矩形框朴素基线）")
+    print(f"  C 组训练用: --mask_folder masks_bsnr         （B-SNR 净化，本文方法）")
+    print(f"  D 组训练用: --mask_folder masks_bsnr_gauss   （B-SNR × 物理锚定高斯，升维方法）")
 
 
 if __name__ == '__main__':
