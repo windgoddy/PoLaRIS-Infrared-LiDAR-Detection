@@ -430,6 +430,18 @@ def save_model_box_iou(mean_box_IOU, best_box_iou, save_dir, save_prefix, train_
                 print(f'❌ 删除失败 {old_model}: {e}')
 
         best_box_iou = mean_box_IOU
+
+        # 写 log 文件（与 Seg IoU log 独立，前缀 _best_BoxIoU_）
+        now = datetime.now()
+        dt_string = now.strftime("%d/%m/%Y %H:%M:%S")
+        save_box_iou_dir = 'result/' + save_dir + '/' + save_prefix + '_best_BoxIoU_IoU.log'
+        save_box_other_dir = 'result/' + save_dir + '/' + save_prefix + '_best_BoxIoU_other_metric.log'
+        save_model_and_result(dt_string, epoch, train_loss, test_loss,
+                              seg_iou if seg_iou is not None else 0.0,
+                              recall, precision,
+                              save_box_iou_dir, save_box_other_dir,
+                              box_iou=mean_box_IOU)
+
         if seg_iou is not None:
             best_model_filename = f'best_model_box_epoch{epoch:04d}_BoxIoU{mean_box_IOU:.4f}_mIoU{seg_iou:.4f}.pth.tar'
         else:
