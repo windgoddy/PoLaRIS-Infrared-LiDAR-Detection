@@ -19,9 +19,10 @@ B-SNR (Box-Constrained SNR) Pseudo-Mask Generation
   Y_target = W_physics  (在 Box 内), 0 (在 Box 外)
 
 公式 (B-SNR + Spatial Gaussian, D 组):
-  W_spatial(i) = exp(-(Δx²/(2σ_x²) + Δy²/(2σ_y²)))  ← 以 box 中心为原点的 2D 高斯
-  P(i) = W_physics(i) × W_spatial(i)
-  σ = gauss_sigma_ratio × (box_half_size)  默认 gauss_sigma_ratio=1.0
+  P(i) = W_physics(i) × exp(-d_i² / (2σ²))
+  圆心 p* = SNR argmax（物理热点，非几何中心）
+  σ = gauss_sigma_ratio × sqrt( Σ SNR⁺(i)·d_i² / Σ SNR⁺(i) )  ← SNR 加权空间标准差
+  σ 自适应于目标热辐射范围，与 box 尺寸无关
 
 Author: PoLaRIS Team
 Date: 2026-03-10
@@ -55,8 +56,11 @@ def compute_bsnr_weight(
         epsilon: 防止除零的小常数
         spatial_gaussian: True 时启用物理锚定高斯乘积（D 组方法）
                           高斯圆心 = B-SNR 的 argmax（物理热点），而非 box 几何中心
-        gauss_sigma_ratio: σ = gauss_sigma_ratio × max(box_h, box_w) / 2
-                           默认 1.5，较宽的高斯，避免 box 边缘真实目标被压制
+        gauss_sigma_ratio: σ = gauss_sigma_ratio × SNR加权空间标准差
+                           SNR加权标准差 = sqrt(Σ SNR⁺(i)·d_i² / Σ SNR⁺(i))
+                           gauss_sigma_ratio=1.0 → σ 精确匹配目标热辐射扩散范围
+                           gauss_sigma_ratio=1.5 → 保守，允许目标边缘有残余响应
+                           默认 1.5；σ 下界 1.0 px（防极端退化）
 
     Returns:
         weight: (box_h, box_w) float32，值域 [0, 1]，物理 SNR 权重
@@ -117,14 +121,22 @@ def compute_bsnr_weight(
         peak_y = peak_flat // box_w
         peak_x = peak_flat % box_w
 
-        # σ 取较大值（基于 box 的最长边），避免边缘真实目标像素被过度压制
-        sigma_px = max(gauss_sigma_ratio * max(box_h, box_w) / 2.0, 1.0)
-
         yy, xx = np.mgrid[0:box_h, 0:box_w]
-        gauss = np.exp(
-            -((yy - peak_y) ** 2 + (xx - peak_x) ** 2) / (2 * sigma_px ** 2)
-        ).astype(np.float32)
+        dist_sq = ((yy - peak_y) ** 2 + (xx - peak_x) ** 2).astype(np.float32)
 
+        # 自适应 σ：用 SNR 加权空间标准差估计目标热辐射扩散范围
+        # σ 与 box 尺寸无关，只取决于目标的实际亮度分布
+        snr_pos = np.maximum(snr, 0.0)  # 只用正 SNR（前景贡献）
+        snr_sum = snr_pos.sum()
+        if snr_sum > 1e-6:
+            # SNR 加权均方距离 → 等效于目标热辐射的空间标准差
+            snr_weighted_var = (snr_pos * dist_sq).sum() / snr_sum
+            sigma_px = max(gauss_sigma_ratio * np.sqrt(snr_weighted_var), 1.0)
+        else:
+            # 退化情况（box 内无正 SNR），用最小 σ=1.0
+            sigma_px = 1.0
+
+        gauss = np.exp(-dist_sq / (2 * sigma_px ** 2)).astype(np.float32)
         weight = weight * gauss
 
     return weight.astype(np.float32)
