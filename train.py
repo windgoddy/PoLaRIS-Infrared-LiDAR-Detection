@@ -1,5 +1,6 @@
 # torch and visulization
 from tqdm             import tqdm
+import torch
 import torch.optim    as optim
 from torch.optim      import lr_scheduler
 from torchvision      import transforms
@@ -145,8 +146,8 @@ class Trainer(object):
                 box_iou_sum += batch_box_iou
                 box_iou_count += 1
 
-                # P0: Pd/Fa 指标（红外领域标准），pred*255 匹配 PD_FA 的 0-255 阈值扫描
-                self.PD_FA.update(pred * 255, labels)
+                # P0: Pd/Fa 指标（红外领域标准），sigmoid(pred)*255 映射到 0-255 阈值扫描
+                self.PD_FA.update(torch.sigmoid(pred) * 255, labels)
 
                 tbar.set_description('Epoch %d, test loss %.4f, mean_IoU: %.4f, Box_IoU: %.4f' %
                                     (epoch, losses.avg, mean_IOU, batch_box_iou))

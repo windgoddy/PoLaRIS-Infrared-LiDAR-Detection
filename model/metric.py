@@ -260,8 +260,8 @@ def batch_pix_accuracy(output, target, depth_map=None, use_adaptive_threshold=Tr
                                                    threshold_with_lidar=threshold,
                                                    threshold_without_lidar=threshold * 0.7)
     else:
-        # 传统固定阈值
-        predict = (output > threshold).float()
+        # DNANet 输出 raw logits，需先过 sigmoid 再与概率阈值比较
+        predict = (torch.sigmoid(output) > threshold).float()
 
     pixel_labeled = (target > 0).float().sum()
     pixel_correct = (((predict == target).float())*((target > 0)).float()).sum()
@@ -290,8 +290,8 @@ def batch_intersection_union(output, target, nclass, depth_map=None, use_adaptiv
                                                    threshold_with_lidar=threshold,
                                                    threshold_without_lidar=threshold * 0.7)
     else:
-        # 传统固定阈值
-        predict = (output > threshold).float()
+        # DNANet 输出 raw logits，需先过 sigmoid 再与概率阈值比较
+        predict = (torch.sigmoid(output) > threshold).float()
 
     if len(target.shape) == 3:
         target = np.expand_dims(target.float(), axis=1)
@@ -344,7 +344,7 @@ def calculate_mask_to_box_iou(pred_mask, gt_mask, threshold=0.5):
     """
     # Convert to numpy if needed
     if isinstance(pred_mask, torch.Tensor):
-        pred_mask = (pred_mask > threshold).float()
+        pred_mask = (torch.sigmoid(pred_mask) > threshold).float()
         pred_np = pred_mask.detach().cpu().numpy()
     else:
         pred_np = (pred_mask > threshold).astype(np.float32)
