@@ -169,8 +169,9 @@ class PD_FA():
 
 
     def reset(self):
-        self.FA  = np.zeros([self.bins+1])
-        self.PD  = np.zeros([self.bins+1])
+        self.FA     = np.zeros([self.bins+1])
+        self.PD     = np.zeros([self.bins+1])
+        self.target = np.zeros([self.bins+1])
 
 class mIoU():
 
