@@ -21,8 +21,9 @@ B-SNR (Box-Constrained SNR) Pseudo-Mask Generation
 公式 (B-SNR + Spatial Gaussian, D 组):
   P(i) = W_physics(i) × exp(-d_i² / (2σ²))
   圆心 p* = SNR argmax（物理热点，非几何中心）
-  σ = gauss_sigma_ratio × sqrt( Σ SNR⁺(i)·d_i² / Σ SNR⁺(i) )  ← SNR 加权空间标准差
-  σ 自适应于目标热辐射范围，与 box 尺寸无关
+  FWHM_mask = { i : SNR(i) ≥ SNR(p*) × 0.5 }  ← 主峰半高宽区域（排除次要亮点）
+  σ = gauss_sigma_ratio × sqrt( Σ_{FWHM} SNR⁺(i)·d_i² / Σ_{FWHM} SNR⁺(i) )
+  σ 只由主目标热辐射扩散决定，与 box 尺寸和背景杂波无关
 
 Author: PoLaRIS Team
 Date: 2026-03-10
@@ -56,9 +57,9 @@ def compute_bsnr_weight(
         epsilon: 防止除零的小常数
         spatial_gaussian: True 时启用物理锚定高斯乘积（D 组方法）
                           高斯圆心 = B-SNR 的 argmax（物理热点），而非 box 几何中心
-        gauss_sigma_ratio: σ = gauss_sigma_ratio × SNR加权空间标准差
-                           SNR加权标准差 = sqrt(Σ SNR⁺(i)·d_i² / Σ SNR⁺(i))
-                           gauss_sigma_ratio=1.0 → σ 精确匹配目标热辐射扩散范围
+        gauss_sigma_ratio: σ = gauss_sigma_ratio × FWHM区域SNR加权标准差
+                           FWHM区域 = SNR(i) ≥ SNR_peak × 0.5 的像素集合
+                           gauss_sigma_ratio=1.0 → σ 精确匹配主目标热辐射扩散范围
                            gauss_sigma_ratio=1.5 → 保守，允许目标边缘有残余响应
                            默认 1.5；σ 下界 1.0 px（防极端退化）
 
@@ -124,16 +125,19 @@ def compute_bsnr_weight(
         yy, xx = np.mgrid[0:box_h, 0:box_w]
         dist_sq = ((yy - peak_y) ** 2 + (xx - peak_x) ** 2).astype(np.float32)
 
-        # 自适应 σ：用 SNR 加权空间标准差估计目标热辐射扩散范围
-        # σ 与 box 尺寸无关，只取决于目标的实际亮度分布
-        snr_pos = np.maximum(snr, 0.0)  # 只用正 SNR（前景贡献）
-        snr_sum = snr_pos.sum()
+        # 自适应 σ：只用主峰 FWHM 区域（SNR ≥ 峰值 × 0.5）计算加权方差
+        # 目的：排除次要亮点/背景杂波对 σ 的污染，使高斯紧贴主目标
+        peak_snr_val = float(snr[peak_y, peak_x])
+        half_max = peak_snr_val * 0.5
+        # FWHM mask：仅保留主峰半高宽内的像素权重
+        snr_fwhm = np.where(snr >= half_max, np.maximum(snr, 0.0), 0.0).astype(np.float32)
+        snr_sum = snr_fwhm.sum()
         if snr_sum > 1e-6:
-            # SNR 加权均方距离 → 等效于目标热辐射的空间标准差
-            snr_weighted_var = (snr_pos * dist_sq).sum() / snr_sum
+            # FWHM 区域内的 SNR 加权均方距离 → 主目标热辐射扩散 σ
+            snr_weighted_var = (snr_fwhm * dist_sq).sum() / snr_sum
             sigma_px = max(gauss_sigma_ratio * np.sqrt(snr_weighted_var), 1.0)
         else:
-            # 退化情况（box 内无正 SNR），用最小 σ=1.0
+            # 退化情况（box 内 SNR 极端均匀），用最小 σ=1.0
             sigma_px = 1.0
 
         gauss = np.exp(-dist_sq / (2 * sigma_px ** 2)).astype(np.float32)
