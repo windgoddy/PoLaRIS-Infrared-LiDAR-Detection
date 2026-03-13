@@ -15,12 +15,15 @@
 set -uo pipefail
 
 # ── 训练超参数 ──────────────────────────────────
-EPOCHS=400
+EPOCHS=1500
 LR=0.05
-BS=4
+BS=8
 
 # ── GPU 优先级（OOM 后按此顺序尝试）─────────────
-GPUS=(5 0 1 2 3 4 6 7)
+GPUS=(0 1 2 3 4 5 6 7)
+
+# ── 启动前至少需要的空闲显存 (MB) ───────────────
+MIN_FREE_MB=6000
 
 # ── 日志 / 断点目录 ─────────────────────────────
 LOG_DIR="logs/p1"
@@ -53,14 +56,23 @@ run_experiment() {
 
     local attempt=0
     while true; do
+        local any_tried=false
         for GPU in "${GPUS[@]}"; do
+            # ── 检查空闲显存 ──────────────────────────
+            local FREE_MB
+            FREE_MB=$(nvidia-smi --query-gpu=memory.free \
+                        --format=csv,noheader,nounits -i "${GPU}" 2>/dev/null | tr -d ' ')
+            if ! [[ "$FREE_MB" =~ ^[0-9]+$ ]] || (( FREE_MB < MIN_FREE_MB )); then
+                echo "  ~ GPU${GPU} 显存不足 (${FREE_MB}MB < ${MIN_FREE_MB}MB)，跳过"
+                continue
+            fi
+
             attempt=$((attempt + 1))
+            any_tried=true
             local LOG_FILE="${LOG_DIR}/${EXP_NAME}_gpu${GPU}_try${attempt}.log"
 
-            echo "  → [try ${attempt}] GPU=${GPU}  log=${LOG_FILE}"
+            echo "  → [try ${attempt}] GPU=${GPU} (空闲${FREE_MB}MB)  log=${LOG_FILE}"
 
-            # 运行训练，同时写日志 + 终端可见
-            # pipefail 确保 python 退出码能被 $? 捕获
             set +e
             CUDA_VISIBLE_DEVICES=${GPU} python train.py \
                 --model DNANet \
@@ -71,7 +83,6 @@ run_experiment() {
                 --epochs ${EPOCHS} \
                 --lr ${LR} \
                 --train_batch_size ${BS} \
-                --gpus "${GPU}" \
                 --experiment_name "${EXP_NAME}" \
                 2>&1 | tee "${LOG_FILE}"
             local EXIT_CODE=${PIPESTATUS[0]}
@@ -92,9 +103,18 @@ run_experiment() {
             sleep 15
         done
 
-        # 所有 GPU 都失败了
-        echo "  !! 全部 GPU 均失败，等待 120s 后重新轮询..."
-        sleep 120
+        # 没有任何 GPU 显存足够 → 等待后重新轮询
+        if [ "$any_tried" = false ]; then
+            local STATUS
+            STATUS=$(nvidia-smi --query-gpu=index,memory.free \
+                        --format=csv,noheader,nounits 2>/dev/null \
+                        | awk -F', ' '{printf "GPU%s:%sMB ", $1, $2}')
+            echo "  !! 所有 GPU 显存不足，等待 60s... [${STATUS}]"
+            sleep 60
+        else
+            echo "  !! 全部候选 GPU 均失败，等待 120s 后重新轮询..."
+            sleep 120
+        fi
     done
 }
 
