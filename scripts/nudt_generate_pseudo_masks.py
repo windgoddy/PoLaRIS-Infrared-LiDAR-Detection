@@ -334,10 +334,21 @@ def visualize_comparison(
                 continue
             titles.append(title)
 
-        row = np.hstack(panels)
+        # 统一高度为 400px（兼容 NUAA-SIRST 等变尺寸数据集）
+        TARGET_H = 400
+        resized = []
+        rw_list = []
+        for p in panels:
+            ph, pw = p.shape[:2]
+            scale = TARGET_H / ph
+            rw = max(1, int(pw * scale))
+            resized.append(cv2.resize(p, (rw, TARGET_H)))
+            rw_list.append(rw)
+        row = np.hstack(resized)
 
         for j, txt in enumerate(titles):
-            cv2.putText(row, txt, (j * W + 5, 20),
+            x_off = sum(rw_list[:j])
+            cv2.putText(row, txt, (x_off + 5, 20),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
         cv2.imwrite(os.path.join(output_dir, img_id + '_compare.png'), row)
