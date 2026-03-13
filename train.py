@@ -75,6 +75,11 @@ class Trainer(object):
         self.best_recall    = [0,0,0,0,0,0,0,0,0,0,0]
         self.best_precision = [0,0,0,0,0,0,0,0,0,0,0]
 
+        # Pd/Fa metrics (P0: 红外领域标准评估指标)
+        # bins=10: 阈值从0到255，步长25.5；pred*255后iBin=5对应阈值≈0.5
+        self.PD_FA    = PD_FA(1, bins=10, img_size=args.base_size)
+        self.test_len = len(val_img_ids)
+
         # Last epoch metrics
         self.last_epoch = 0
         self.last_mean_IOU = 0
@@ -110,6 +115,7 @@ class Trainer(object):
         tbar = tqdm(self.test_data)
         self.model.eval()
         self.mIoU.reset()
+        self.PD_FA.reset()
         losses = AverageMeter()
         box_iou_sum = 0.0  # 2026-02-03: Accumulate Mask-to-Box IoU
         box_iou_count = 0
@@ -139,6 +145,9 @@ class Trainer(object):
                 box_iou_sum += batch_box_iou
                 box_iou_count += 1
 
+                # P0: Pd/Fa 指标（红外领域标准），pred*255 匹配 PD_FA 的 0-255 阈值扫描
+                self.PD_FA.update(pred * 255, labels)
+
                 tbar.set_description('Epoch %d, test loss %.4f, mean_IoU: %.4f, Box_IoU: %.4f' %
                                     (epoch, losses.avg, mean_IOU, batch_box_iou))
             test_loss=losses.avg
@@ -146,13 +155,28 @@ class Trainer(object):
         # 2026-02-03: Calculate average Mask-to-Box IoU
         mean_box_IOU = box_iou_sum / max(box_iou_count, 1)
 
-        # Print test results with both metrics
+        # P0: 计算 Pd/Fa（bins=10: iBin=3→thresh≈0.3, iBin=5→thresh≈0.5）
+        FA, PD = self.PD_FA.get(self.test_len)
+        pd_at_t3 = float(PD[3]) if not np.isnan(PD[3]) else 0.0  # threshold≈0.3
+        fa_at_t3 = float(FA[3])
+        pd_at_t5 = float(PD[5]) if not np.isnan(PD[5]) else 0.0  # threshold≈0.5
+        fa_at_t5 = float(FA[5])
+        # 最佳 Pd（在所有阈值中取最高检测率）
+        valid_pd = np.where(np.isnan(PD), 0, PD)
+        best_pd_idx = int(np.argmax(valid_pd))
+        best_pd = float(valid_pd[best_pd_idx])
+        fa_at_best = float(FA[best_pd_idx])
+
+        # Print test results with all metrics
         print(f"\n[Epoch {epoch}] Test Results:")
         print(f"  Loss              : {test_loss:.4f}")
         print(f"  Segmentation IoU  : {mean_IOU:.4f}")
         print(f"  Mask-to-Box IoU   : {mean_box_IOU:.4f}")
         print(f"  Precision         : {precision[5]:.4f}")
         print(f"  Recall            : {recall[5]:.4f}")
+        print(f"  Pd (thresh≈0.3)  : {pd_at_t3:.4f}   Fa: {fa_at_t3:.2e}")
+        print(f"  Pd (thresh≈0.5)  : {pd_at_t5:.4f}   Fa: {fa_at_t5:.2e}")
+        print(f"  Best Pd           : {best_pd:.4f}   Fa: {fa_at_best:.2e}")
 
         # Store last epoch metrics
         self.last_epoch = epoch
