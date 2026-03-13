@@ -142,6 +142,12 @@ def run_p0_inspection(
     peak_accurate  = 0
     peak_mislocate = []  # [(img_id, box_idx, gt_pixels, peak描述)]
 
+    # 对比度分层分析：每个有效 box 的统计记录
+    # snr_peak: 目标对比度指标（原始 SNR 峰值）
+    # bsnr_gt_frac: B-SNR 权重落在 GT 区域内的比例
+    # pag_gt_frac:  PAG 权重落在 GT 区域内的比例
+    contrast_records = []
+
     for img_id in tqdm(hard_ids, desc='P0巡检'):
         img_path = os.path.join(img_dir, img_id + '.png')
         lbl_path = os.path.join(lbl_dir, img_id + '.png')
@@ -228,6 +234,23 @@ def run_p0_inspection(
             )
             pag_mask[y1:y2, x1:x2] = np.maximum(pag_mask[y1:y2, x1:x2], w_d)
 
+            # ─── 对比度分层：记录权重集中度指标 ───
+            # 只对 GT 区域非空的 box 计算（排除 gt_pixels=0 的标注问题样本）
+            gt_bool = (gt_crop > 0)
+            if gt_bool.sum() > 0:
+                total_w_c = float(w_c.sum()) + 1e-8
+                total_w_d = float(w_d.sum()) + 1e-8
+                bsnr_gt_frac = float(w_c[gt_bool].sum()) / total_w_c
+                pag_gt_frac  = float(w_d[gt_bool].sum()) / total_w_d
+                contrast_records.append({
+                    'snr_peak':     float(snr.max()),  # 目标对比度（越大=目标越亮）
+                    'bsnr_gt_frac': bsnr_gt_frac,
+                    'pag_gt_frac':  pag_gt_frac,
+                    'pag_gain':     pag_gt_frac - bsnr_gt_frac,  # PAG 相对 B-SNR 的提升
+                    'is_accurate':  is_acc,
+                    'img_id':       img_id,
+                })
+
             # ─── 标注可视化 ───
             color = (0, 255, 0) if is_acc else (0, 0, 255)   # 绿=准确, 红=偏移
             cv2.rectangle(box_vis, (x1, y1), (x2, y2), color, 1)
@@ -292,6 +315,57 @@ def run_p0_inspection(
         print(f"{'─'*62}")
     else:
         print("未找到有效 Box，请检查数据集路径和标签格式")
+
+    # ======================================================
+    # 对比度分层分析：验证"低对比度时 PAG 更有价值"假设
+    # ======================================================
+    if len(contrast_records) >= 4:
+        print(f"\n{'='*62}")
+        print(f"对比度分层分析（仅含 GT 区域非空的 box，共 {len(contrast_records)} 个）")
+        print(f"{'='*62}")
+        print(f"指标：GT权重集中度 = 落在GT区域内的权重 / 总权重（越高越好）")
+        print(f"{'─'*62}")
+
+        # 按 snr_peak 排序后分为 4 组（低→高对比度）
+        records_sorted = sorted(contrast_records, key=lambda r: r['snr_peak'])
+        n = len(records_sorted)
+        q_size = n // 4
+        quartile_labels = ['Q1(低对比度)', 'Q2', 'Q3', 'Q4(高对比度)']
+
+        all_snr_peaks   = [r['snr_peak']     for r in records_sorted]
+        all_bsnr_fracs  = [r['bsnr_gt_frac'] for r in records_sorted]
+        all_pag_fracs   = [r['pag_gt_frac']  for r in records_sorted]
+        all_pag_gains   = [r['pag_gain']      for r in records_sorted]
+
+        print(f"{'分组':<14} {'样本数':>5}  {'SNR峰值':>8}  {'B-SNR集中度':>11}  {'PAG集中度':>9}  {'PAG增益':>8}")
+        print(f"{'─'*62}")
+
+        for qi in range(4):
+            s = qi * q_size
+            e = (qi + 1) * q_size if qi < 3 else n
+            grp = records_sorted[s:e]
+            snr_mean   = sum(r['snr_peak']     for r in grp) / len(grp)
+            bsnr_mean  = sum(r['bsnr_gt_frac'] for r in grp) / len(grp)
+            pag_mean   = sum(r['pag_gt_frac']  for r in grp) / len(grp)
+            gain_mean  = sum(r['pag_gain']      for r in grp) / len(grp)
+            print(f"  {quartile_labels[qi]:<12} {len(grp):>5}  {snr_mean:>8.2f}  "
+                  f"{bsnr_mean:>11.3f}  {pag_mean:>9.3f}  {gain_mean:>+8.3f}")
+
+        print(f"{'─'*62}")
+        # 全局均值
+        bsnr_all = sum(all_bsnr_fracs) / n
+        pag_all  = sum(all_pag_fracs)  / n
+        gain_all = sum(all_pag_gains)  / n
+        print(f"  {'全局均值':<12} {n:>5}  {'':>8}  {bsnr_all:>11.3f}  {pag_all:>9.3f}  {gain_all:>+8.3f}")
+        print(f"\n解读：")
+        print(f"  PAG增益 > 0 → PAG 在该组比 B-SNR 更集中，有效")
+        print(f"  PAG增益 < 0 → PAG 在该组不如 B-SNR，Gaussian 偏离目标")
+        if all_pag_gains[0] > all_pag_gains[-1]:
+            print(f"\n[结论] 假设成立 ✓  低对比度时 PAG 增益更大")
+        elif abs(all_pag_gains[0] - all_pag_gains[-1]) < 0.02:
+            print(f"\n[结论] 差异不显著 —  PAG 增益与对比度相关性弱")
+        else:
+            print(f"\n[结论] 假设不成立 ✗  高对比度时 PAG 反而增益更大（需要进一步分析）")
 
     return peak_accurate, total_boxes, peak_mislocate
 
