@@ -107,55 +107,51 @@ class PD_FA():
         self.PD = np.zeros(self.bins + 1)
         self.target= np.zeros(self.bins + 1)
     def update(self, preds, labels):
+        preds_np  = np.array(preds.cpu()).astype('float32')
+        labels_np = np.array(labels.cpu()).astype('int64')
+
+        # Flatten batch/channel dims → (N, H, W)
+        h, w = preds_np.shape[-2], preds_np.shape[-1]
+        preds_np  = preds_np.reshape(-1, h, w)
+        labels_np = labels_np.reshape(-1, h, w)
+        self._last_area = h * w
 
         for iBin in range(self.bins+1):
             score_thresh = iBin * (255/self.bins)
-            predits = np.array((preds > score_thresh).cpu()).astype('int64')
-            labelss = np.array((labels).cpu()).astype('int64')  # P
 
-            # Infer spatial size dynamically (fallback to img_size if provided)
-            if predits.ndim >= 2:
-                h, w = predits.shape[-2], predits.shape[-1]
-            elif self.img_size is not None:
-                h = w = self.img_size
-            else:
-                raise ValueError("PD_FA: cannot infer image size from preds")
+            for predits, labelss in zip(preds_np, labels_np):
+                predits = (predits > score_thresh).astype('int64')
 
-            predits = np.reshape(predits, (h, w))
-            labelss = np.reshape(labelss, (h, w))
-            self._last_area = h * w
+                image = measure.label(predits, connectivity=2)
+                coord_image = measure.regionprops(image)
+                label = measure.label(labelss, connectivity=2)
+                coord_label = measure.regionprops(label)
 
-            image = measure.label(predits, connectivity=2)
-            coord_image = measure.regionprops(image)
-            label = measure.label(labelss , connectivity=2)
-            coord_label = measure.regionprops(label)
+                self.target[iBin] += len(coord_label)
+                self.image_area_total = []
+                self.image_area_match = []
+                self.distance_match   = []
+                self.dismatch         = []
 
-            self.target[iBin]    += len(coord_label)
-            self.image_area_total = []
-            self.image_area_match = []
-            self.distance_match   = []
-            self.dismatch         = []
+                for K in range(len(coord_image)):
+                    area_image = np.array(coord_image[K].area)
+                    self.image_area_total.append(area_image)
 
-            for K in range(len(coord_image)):
-                area_image = np.array(coord_image[K].area)
-                self.image_area_total.append(area_image)
+                for i in range(len(coord_label)):
+                    centroid_label = np.array(list(coord_label[i].centroid))
+                    for m in range(len(coord_image)):
+                        centroid_image = np.array(list(coord_image[m].centroid))
+                        distance = np.linalg.norm(centroid_image - centroid_label)
+                        area_image = np.array(coord_image[m].area)
+                        if distance < 3:
+                            self.distance_match.append(distance)
+                            self.image_area_match.append(area_image)
+                            del coord_image[m]
+                            break
 
-            for i in range(len(coord_label)):
-                centroid_label = np.array(list(coord_label[i].centroid))
-                for m in range(len(coord_image)):
-                    centroid_image = np.array(list(coord_image[m].centroid))
-                    distance = np.linalg.norm(centroid_image - centroid_label)
-                    area_image = np.array(coord_image[m].area)
-                    if distance < 3:
-                        self.distance_match.append(distance)
-                        self.image_area_match.append(area_image)
-
-                        del coord_image[m]
-                        break
-
-            self.dismatch = [x for x in self.image_area_total if x not in self.image_area_match]
-            self.FA[iBin]+=np.sum(self.dismatch)
-            self.PD[iBin]+=len(self.distance_match)
+                self.dismatch = [x for x in self.image_area_total if x not in self.image_area_match]
+                self.FA[iBin] += np.sum(self.dismatch)
+                self.PD[iBin] += len(self.distance_match)
 
     def get(self,img_num):
 
