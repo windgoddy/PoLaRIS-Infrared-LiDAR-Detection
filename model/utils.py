@@ -316,16 +316,18 @@ def save_train_log(args, save_dir):
             f.write('\n')
     return
 
-def save_model_and_result(dt_string, epoch,train_loss, test_loss, best_iou, recall, precision, save_mIoU_dir, save_other_metric_dir, box_iou=None):
+def save_model_and_result(dt_string, epoch,train_loss, test_loss, best_iou, recall, precision, save_mIoU_dir, save_other_metric_dir, box_iou=None, best_pd=None, fa_at_best=None):
     # Ensure directory exists before writing
     os.makedirs(os.path.dirname(save_mIoU_dir), exist_ok=True)
 
     with open(save_mIoU_dir, 'a') as f:
-        # 2026-02-03: Include Box IoU in log
+        line = '{} - {:04d}:\t - train_loss: {:04f}:\t - test_loss: {:04f}:\t mIoU {:.4f}'.format(
+            dt_string, epoch, train_loss, test_loss, best_iou)
         if box_iou is not None:
-            f.write('{} - {:04d}:\t - train_loss: {:04f}:\t - test_loss: {:04f}:\t mIoU {:.4f}\t Box_IoU {:.4f}\n' .format(dt_string, epoch,train_loss, test_loss, best_iou, box_iou))
-        else:
-            f.write('{} - {:04d}:\t - train_loss: {:04f}:\t - test_loss: {:04f}:\t mIoU {:.4f}\n' .format(dt_string, epoch,train_loss, test_loss, best_iou))
+            line += '\t Box_IoU {:.4f}'.format(box_iou)
+        if best_pd is not None and fa_at_best is not None:
+            line += '\t Pd {:.4f}\t Fa {:.2e}'.format(best_pd, fa_at_best)
+        f.write(line + '\n')
     with open(save_other_metric_dir, 'a') as f:
         f.write(dt_string)
         f.write('-')
@@ -345,12 +347,14 @@ def save_model_and_result(dt_string, epoch,train_loss, test_loss, best_iou, reca
             f.write('   ')
         f.write('\n')
 
-def save_model(mean_IOU, best_iou, save_dir, save_prefix, train_loss, test_loss, recall, precision, epoch, net, box_iou=None):
+def save_model(mean_IOU, best_iou, save_dir, save_prefix, train_loss, test_loss, recall, precision, epoch, net, box_iou=None, best_pd=None, fa_at_best=None):
     """
     保存最佳模型
 
     Args:
         box_iou: 2026-02-03: Mask-to-Box IoU (optional)
+        best_pd: 最佳检测率 Pd (optional)
+        fa_at_best: 对应虚警率 Fa (optional)
 
     Returns:
         best_iou: 更新后的最佳 mIoU（如果当前 mIoU 更好则返回新值，否则返回原值）
@@ -366,7 +370,8 @@ def save_model(mean_IOU, best_iou, save_dir, save_prefix, train_loss, test_loss,
         dt_string = now.strftime("%d/%m/%Y %H:%M:%S")
         best_iou = mean_IOU
         save_model_and_result(dt_string, epoch, train_loss, test_loss, best_iou,
-                              recall, precision, save_mIoU_dir, save_other_metric_dir, box_iou)
+                              recall, precision, save_mIoU_dir, save_other_metric_dir, box_iou,
+                              best_pd=best_pd, fa_at_best=fa_at_best)
 
         # 删除旧的最佳模型文件（只保留最新的最佳模型）
         result_path = 'result/' + save_dir
@@ -409,7 +414,7 @@ def save_model(mean_IOU, best_iou, save_dir, save_prefix, train_loss, test_loss,
     return best_iou
 
 
-def save_model_box_iou(mean_box_IOU, best_box_iou, save_dir, save_prefix, train_loss, test_loss, recall, precision, epoch, net, seg_iou=None):
+def save_model_box_iou(mean_box_IOU, best_box_iou, save_dir, save_prefix, train_loss, test_loss, recall, precision, epoch, net, seg_iou=None, best_pd=None, fa_at_best=None):
     """
     保存 Mask-to-Box IoU 最佳模型（与 save_model 独立追踪）
 
@@ -440,7 +445,8 @@ def save_model_box_iou(mean_box_IOU, best_box_iou, save_dir, save_prefix, train_
                               seg_iou if seg_iou is not None else 0.0,
                               recall, precision,
                               save_box_iou_dir, save_box_other_dir,
-                              box_iou=mean_box_IOU)
+                              box_iou=mean_box_IOU,
+                              best_pd=best_pd, fa_at_best=fa_at_best)
 
         if seg_iou is not None:
             best_model_filename = f'best_model_box_epoch{epoch:04d}_BoxIoU{mean_box_IOU:.4f}_mIoU{seg_iou:.4f}.pth.tar'

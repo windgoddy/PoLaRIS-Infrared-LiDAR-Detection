@@ -186,12 +186,13 @@ class Trainer(object):
         # 保存 Seg IoU 最佳模型
         self.best_iou = save_model(mean_IOU, self.best_iou, self.save_dir, self.save_prefix,
                                     self.train_loss, test_loss, recall, precision, epoch, self.model.state_dict(),
-                                    mean_box_IOU)
+                                    mean_box_IOU, best_pd=best_pd, fa_at_best=fa_at_best)
 
         # 保存 Mask-to-Box IoU 最佳模型（独立追踪）
         self.best_box_iou = save_model_box_iou(mean_box_IOU, self.best_box_iou, self.save_dir, self.save_prefix,
                                                 self.train_loss, test_loss, recall, precision, epoch,
-                                                self.model.state_dict(), seg_iou=mean_IOU)
+                                                self.model.state_dict(), seg_iou=mean_IOU,
+                                                best_pd=best_pd, fa_at_best=fa_at_best)
 
 def main(args):
     trainer = Trainer(args)

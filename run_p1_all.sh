@@ -31,13 +31,14 @@ DONE_DIR="logs/p1/done"
 mkdir -p "$LOG_DIR" "$DONE_DIR"
 
 # ================================================
-# run_experiment <dataset> <mask_folder> <image_folder> <exp_name>
+# run_experiment <dataset> <mask_folder> <image_folder> <exp_name> [split_method]
 # ================================================
 run_experiment() {
     local DATASET=$1
     local MASK_FOLDER=$2
     local IMAGE_FOLDER=$3
     local EXP_NAME=$4
+    local SPLIT_METHOD=${5:-50_50}   # 默认 50_50，Pohang 传 50_50_2k
 
     local DONE_FILE="$DONE_DIR/${EXP_NAME}.done"
 
@@ -78,6 +79,7 @@ run_experiment() {
                 --model DNANet \
                 --deep_supervision True \
                 --dataset "${DATASET}" \
+                --split_method "${SPLIT_METHOD}" \
                 --mask_folder "${MASK_FOLDER}" \
                 --image_folder "${IMAGE_FOLDER}" \
                 --epochs ${EPOCHS} \
@@ -143,5 +145,11 @@ run_experiment IRSTD-1k masks_box_fill   IRSTD1k_Img  P1_B_box_irstd
 run_experiment IRSTD-1k masks_bsnr       IRSTD1k_Img  P1_C_bsnr_irstd
 run_experiment IRSTD-1k masks_bsnr_gauss IRSTD1k_Img  P1_D_pag_irstd
 
+# ── Pohang-Canal-3k ─────────────────────────────
+run_experiment Pohang-Canal-3k masks            images-8bit  P1_A_gt_pohang   50_50_2k
+run_experiment Pohang-Canal-3k masks_box_fill   images-8bit  P1_B_box_pohang  50_50_2k
+run_experiment Pohang-Canal-3k masks_bsnr       images-8bit  P1_C_bsnr_pohang 50_50_2k
+run_experiment Pohang-Canal-3k masks_bsnr_gauss images-8bit  P1_D_pag_pohang  50_50_2k
+
 echo ""
-echo "✓  全部 12 组训练完成 — $(date)"
+echo "✓  全部 16 组训练完成 — $(date)"
