@@ -3,11 +3,10 @@ import os
 from torch.nn.modules import module
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn import BatchNorm2d
 from model.fusion import AsymBiChaFuse
 
-# from mxnet import nd
-from torchvision import transforms
 from  torchvision.models.resnet import BasicBlock
 
 class _FCNHead(nn.Module):
@@ -169,22 +168,22 @@ class ASKCResNetFPN(nn.Module):
         if self.layer_num == 4:
             c4 = self.layer4(out) # torch.Size([8,64, 32, 32])
             if self.tinyFlag:
-                c4 = transforms.Resize([hei//4, wid//4])(c4)  # down 4
+                c4 = F.interpolate(c4, size=(hei//4, wid//4), mode='bilinear', align_corners=False)
             else:
-                c4 =  transforms.Resize([hei//16, wid//16])(c4)  # down 16 torch.Size([8, 64, 64, 64])
-            out = self.fuse34(c4, out) #torch.Size([8, 64, 128, 128])`
+                c4 = F.interpolate(c4, size=(hei//16, wid//16), mode='bilinear', align_corners=False)
+            out = self.fuse34(c4, out)
 
         if self.tinyFlag:
-            out =  transforms.Resize([hei//2, wid//2])(out)  # down 16 torch.Size([8, 64, 64, 64])
+            out = F.interpolate(out, size=(hei//2, wid//2), mode='bilinear', align_corners=False)
         else:
-            out =  transforms.Resize([hei//16, wid//16])(out)    # down 8, 128 torch.Size([8, 64, 64, 64])
+            out = F.interpolate(out, size=(hei//16, wid//16), mode='bilinear', align_corners=False)
 
         out = self.deconv2(out) # torch.Size([8, 32, 128, 128])
         out = self.fuse23(out, c2) # torch.Size([8, 32, 128, 128])
         if self.tinyFlag:
-            out =  transforms.Resize([hei, wid])(out)  # down 1
+            out = F.interpolate(out, size=(hei, wid), mode='bilinear', align_corners=False)
         else:
-            out =  transforms.Resize( [hei//8, wid//8])(out)  # (4,16,120,120)
+            out = F.interpolate(out, size=(hei//8, wid//8), mode='bilinear', align_corners=False)
 
         out = self.deconv1(out)  # torch.Size([8, 16, 256, 256])
         out = self.fuse12(out, c1) # torch.Size([8, 16, 256, 256])
@@ -196,7 +195,7 @@ class ASKCResNetFPN(nn.Module):
         if self.tinyFlag:
             out = pred
         else:
-            out = transforms.Resize( [hei, wid])(pred)  # down 4
+            out = F.interpolate(pred, size=(hei, wid), mode='bilinear', align_corners=False)
 
         ######### reverse order ##########
         # up_c2 = F.contrib.BilinearResize2D(c2, height=hei//4, width=wid//4)  # down 4
