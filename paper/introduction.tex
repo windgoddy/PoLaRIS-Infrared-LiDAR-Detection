@@ -1,0 +1,102 @@
+% ===========================================================================
+%  HaloNet — IEEE TIP Draft
+%  Introduction + Related Work
+% ===========================================================================
+
+\section{Introduction}\label{sec:intro}
+
+Infrared small target detection (IRSTD) plays an indispensable role in maritime surveillance, early-warning systems, and remote sensing~\cite{dnanet,uiunet,alcnet}.
+Unlike generic object detection, infrared small targets typically occupy fewer than $9\times9$ pixels, lack discernible texture or shape cues, and are deeply embedded in spatially correlated background clutter~\cite{irstd_survey}.
+Despite the remarkable progress brought by deep learning~\cite{dnanet,uiunet,sctransnet}, fully supervised methods remain fundamentally bottlenecked by the cost of acquiring pixel-level mask annotations.
+Precisely delineating a $3\times3$ target against a noisy infrared background demands domain expertise and meticulous per-pixel labeling---a process that scales poorly to the large-scale datasets required for robust generalization.
+
+To mitigate this annotation burden, recent works have explored \emph{weakly supervised} paradigms for IRSTD.
+Notably, LESPS~\cite{lesps} introduces single-point supervision with a label evolution mechanism that iteratively refines pseudo-masks during training, while PAL~\cite{pal} further incorporates an active learning loop to progressively select the most informative annotation points.
+Although these methods significantly reduce annotation effort, they share two fundamental limitations that hinder their deployment in operational scenarios.
+First, \emph{single-point annotation in dense clutter is inherently fragile}: accurately clicking the geometric centroid of a dim, sub-$5$-pixel target embedded in heavy sea-surface or cloud clutter is both time-consuming and prone to human jittering error, as illustrated in Fig.~\ref{fig:annotation_comparison}.
+Second, the iterative label evolution and active learning loops employed by LESPS and PAL introduce substantial computational overhead and training complexity, undermining the simplicity desirable for real-world deployment.
+
+In contrast, \emph{bounding box} annotations represent the most natural and readily available form of weak supervision in practice.
+Upstream early-warning systems---ranging from radar cueing to lightweight YOLO-based detectors~\cite{yolo}---routinely produce coarse bounding boxes as their primary output.
+Requiring these operational pipelines to additionally supply pixel-level masks or geometrically precise center points is neither realistic nor cost-effective.
+However, leveraging box annotations for IRSTD poses a unique and severe challenge: for a typical small target occupying fewer than $0.5\%$ of the box area, over $99\%$ of the enclosed pixels belong to background clutter.
+Naively treating all box-interior pixels as foreground leads to catastrophic representation collapse, where the network learns to predict the entire box region rather than the compact target.
+
+% --- Core Contribution Paragraph ---
+
+In this paper, we propose \textbf{HaloNet}\footnote{The name alludes to the faint ``halo'' of physical signal surrounding an infrared point source.}, a \emph{physics-anchored pseudo-label generation} framework that converts coarse bounding boxes into high-fidelity pixel-level soft masks, \emph{without any learnable parameters, iterative refinement, or network architecture modification}.
+Our key insight is that the radiometric properties of infrared imagery provide a principled statistical basis for distinguishing target pixels from background within a bounding box.
+Concretely, we make two contributions at the pseudo-label generation level:
+
+\begin{enumerate}
+    \item \textbf{Background-SNR Posterior Mask (B-SNR).}
+    Under a local Gaussian background assumption, we show that the per-pixel posterior probability of belonging to the target class admits a closed-form sigmoid expression:
+    $W(i) = \sigma\bigl(\tau \cdot ({I(i) - \mu_\mathrm{ctx}})/{\sigma_\mathrm{ctx}}\bigr)$,
+    where $\mu_\mathrm{ctx}$ and $\sigma_\mathrm{ctx}$ are the local background statistics estimated from the box context, and $\tau$ controls the decision sharpness.
+    This formulation bridges classical signal-to-noise ratio (SNR) analysis with Bayesian posterior estimation, providing a statistically grounded binary soft mask.
+
+    \item \textbf{Physics-Anchored Gaussian Refinement (PAG).}
+    To further suppress residual clutter within the B-SNR mask, we exploit the physical point-spread characteristic of infrared targets.
+    Using the full-width-at-half-maximum (FWHM) of the B-SNR response as an anchor, we perform an SNR-weighted spatial covariance estimation to derive an anisotropic Gaussian spatial prior.
+    The resulting PAG mask smoothly concentrates supervision on the target's energy peak while gracefully attenuating toward the periphery, yielding a soft label that better reflects the underlying point-spread function.
+\end{enumerate}
+
+Beyond the pseudo-label generation itself, we provide a \textbf{theoretical analysis of the variance corruption phenomenon} that occurs when targets are extremely small relative to the bounding box.
+Specifically, we derive a closed-form expression showing that the estimated background variance is inflated by a term proportional to $\alpha(1-\alpha)\Delta\mu^2$, where $\alpha$ denotes the target-to-box area ratio and $\Delta\mu$ the target-background intensity contrast.
+This result rigorously explains why physics-based pseudo-labels degrade under extreme scale conditions (e.g., sub-$3\times3$ targets in NUDT-SIRST), establishing a principled failure boundary rather than concealing the limitation.
+
+We summarize the main contributions of this work as follows:
+
+\begin{itemize}
+    \item We present \textbf{HaloNet}, the first box-supervised framework for infrared small target detection.
+    By leveraging the radiometric statistics of infrared imagery, HaloNet generates high-quality pixel-level pseudo-masks from coarse bounding boxes in a single forward pass, with zero learnable parameters and no iterative refinement.
+
+    \item We provide a \textbf{rigorous statistical foundation} for the proposed pseudo-label generation pipeline.
+    The B-SNR mask is derived as a Bayesian posterior under a Gaussian background shift model, and the PAG refinement is formulated as an SNR-weighted spatial covariance estimation.
+    Furthermore, we derive a \textbf{variance corruption bound} that quantitatively characterizes the theoretical degradation regime of physics-based methods under extreme target-to-box ratios.
+
+    \item We conduct \textbf{extensive model-agnostic experiments} across three standard IRSTD benchmarks (NUAA-SIRST, NUDT-SIRST, IRSTD-1K) and three architecturally diverse backbones (DNANet, ACM, ALCNet).
+    HaloNet consistently outperforms prior box-based baselines, achieves competitive or superior performance relative to single-point methods, and demonstrates strong robustness to bounding box perturbations.
+\end{itemize}
+
+
+% ===========================================================================
+\section{Related Work}\label{sec:related}
+% ===========================================================================
+
+\subsection{Deep Learning for Infrared Small Target Detection}\label{sec:related_dl}
+
+The past five years have witnessed rapid architectural innovation in fully supervised IRSTD.
+DNANet~\cite{dnanet} introduced dense nested connections within a U-Net++ encoder--decoder topology, coupled with a channel--spatial attention mechanism (Res-CBAM), establishing state-of-the-art segmentation performance on NUDT-SIRST.
+UIU-Net~\cite{uiunet} proposed a nested ``U-Net in U-Net'' structure to capture both macro-level contextual semantics and micro-level local details for small targets.
+ACM~\cite{acm} designed an asymmetric contextual modulation module to fuse multi-scale features for improved target-background discrimination, while ALCNet~\cite{alcnet} further incorporated local contrast attention into a Feature Pyramid Network decoder.
+More recently, SCTransNet~\cite{sctransnet} and ILNet~\cite{ilnet} have explored Transformer-based and low-level feature enhancement strategies, respectively.
+
+Despite their strong performance, these methods share a common and fundamental limitation: they are critically dependent on high-quality pixel-level mask annotations.
+As the community scales toward larger and more diverse datasets, the annotation bottleneck becomes the dominant obstacle, motivating the exploration of weaker forms of supervision.
+
+\subsection{Weakly Supervised Infrared Small Target Detection}\label{sec:related_ws}
+
+Weakly supervised IRSTD has emerged as a promising direction to reduce annotation costs.
+LESPS~\cite{lesps} pioneered single-point supervision for IRSTD, proposing a mapping degeneration framework in which pseudo-masks are iteratively evolved during network training via a label update mechanism driven by the network's own predictions.
+PAL~\cite{pal} extended this paradigm by introducing a progressive active learning framework that strategically selects the most informative annotation points, achieving strong performance with minimal human intervention.
+
+While these methods represent significant advances, they exhibit two structural limitations.
+\emph{First}, both methods rely on multi-round iterative procedures---LESPS performs label evolution at every training epoch, and PAL requires multiple active learning cycles with human-in-the-loop annotation.
+These iterative mechanisms increase training complexity and introduce sensitivity to the convergence behavior of the self-training loop.
+\emph{Second}, the single-point annotation paradigm itself is fragile in operational settings: for extremely dim targets (SCR $<$ 2) in heavy clutter, reliably identifying and clicking the target centroid demands significant expertise and concentration, and the resulting labels are susceptible to spatial jittering that can mislead label evolution.
+
+In contrast, our work departs from the single-point paradigm entirely, proposing instead to exploit bounding box annotations---a supervision signal that is naturally produced by upstream detection systems and requires no sub-pixel human precision.
+
+\subsection{Box-Supervised Semantic Segmentation}\label{sec:related_box}
+
+Box-supervised segmentation has been extensively studied in the natural image domain.
+Early approaches such as BoxSup~\cite{boxsup} and SDI~\cite{sdi} used bounding boxes to generate coarse pseudo-masks via GrabCut~\cite{grabcut} or MCG~\cite{mcg} proposals, followed by iterative retraining.
+More recent methods leverage class activation maps (CAMs)~\cite{cam} or affinity-based propagation~\cite{affinitynet} to refine box-level supervision into pixel-level pseudo-labels.
+BoxInst~\cite{boxinst} and Box2Mask~\cite{box2mask} further advanced this line by incorporating projection-based losses and pairwise affinity constraints.
+
+However, these methods are designed for natural images where targets exhibit rich texture, distinctive color, and clear semantic boundaries---cues that are entirely absent in infrared small target imagery.
+An infrared point target is a near-isotropic energy blob spanning a few pixels, surrounded by spatially correlated clutter with similar intensity distributions.
+Standard CAM-based or affinity-based approaches, which rely on semantic feature contrast to distinguish foreground from background, fail catastrophically in this regime because the network features of a sub-$5$-pixel target are indistinguishable from background noise at typical feature map resolutions.
+
+This fundamental mismatch motivates our \emph{physics-driven} approach: rather than relying on learned semantic features to parse the box interior, we exploit the known radiometric properties of infrared point sources---specifically, the local signal-to-noise ratio and the physical point-spread function---to derive pseudo-masks that are grounded in the imaging physics rather than network-dependent heuristics.
