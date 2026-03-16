@@ -126,7 +126,7 @@ class Trainer(object):
                 transforms.ToTensor(),
                 transforms.Normalize([.485, .456, .406], [.229, .224, .225])])
         
-        testset         = TestSetLoader (dataset_dir,img_id=val_img_ids,base_size=args.base_size, crop_size=args.crop_size, transform=input_transform,suffix=args.suffix, in_channels=args.in_channels)
+        testset         = TestSetLoader (dataset_dir,img_id=val_img_ids,base_size=args.base_size, crop_size=args.crop_size, transform=input_transform,suffix=args.suffix, in_channels=args.in_channels, image_folder=args.image_folder)
         self.test_data  = DataLoader(dataset=testset,  batch_size=args.test_batch_size, num_workers=args.workers,drop_last=False)
 
         # Choose and load model (this paper is finished by one GPU)

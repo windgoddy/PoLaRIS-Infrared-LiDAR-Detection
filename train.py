@@ -18,6 +18,8 @@ from model.load_param_data import  load_dataset, load_param
 from model.model_DNANet import  Res_CBAM_block
 from model.model_DNANet import  DNANet
 from model.model_DNANet_SNR import DNANet_SNR
+from model.model_ACM import ASKCResUNet
+from model.model_ALCNet import ASKCResNetFPN
 
 class Trainer(object):
     def __init__(self, args):
@@ -55,6 +57,10 @@ class Trainer(object):
             model       = DNANet(num_classes=1,input_channels=args.in_channels, block=Res_CBAM_block, num_blocks=num_blocks, nb_filter=nb_filter, deep_supervision=args.deep_supervision)
         elif args.model == 'DNANet_SNR':
             model       = DNANet_SNR(num_classes=1, input_channels=args.in_channels, block=Res_CBAM_block, num_blocks=num_blocks, nb_filter=nb_filter, deep_supervision=args.deep_supervision)
+        elif args.model == 'ACM':
+            model       = ASKCResUNet(in_channels=args.in_channels, layers=[3,3,3], channels=[8,16,32,64], fuse_mode='AsymBi', tiny=False, classes=1)
+        elif args.model == 'ALCNet':
+            model       = ASKCResNetFPN(in_channels=args.in_channels, layers=[4,4,4], channels=[8,16,32,64], fuse_mode='AsymBi', act_dilation=16, classes=1)
 
         model           = model.cuda()
         model.apply(weights_init_xavier)
