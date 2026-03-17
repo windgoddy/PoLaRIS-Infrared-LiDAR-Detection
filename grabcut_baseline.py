@@ -185,6 +185,9 @@ def evaluate_dataset(dataset_name, root='.'):
             continue
 
         H, W = img.shape
+        # 如果 mask 尺寸与图像不一致，resize mask 到图像尺寸
+        if gt.shape != img.shape:
+            gt = cv2.resize(gt, (W, H), interpolation=cv2.INTER_NEAREST)
         gt_bin = (gt > 0).astype(np.uint8)
 
         boxes = load_yolo_boxes(label_path, H, W)
