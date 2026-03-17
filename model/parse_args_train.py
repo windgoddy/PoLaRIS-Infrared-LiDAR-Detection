@@ -69,6 +69,14 @@ def parse_args():
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed for reproducibility (default: 42)')
 
+    # loss function
+    parser.add_argument('--loss_type', type=str, default='soft_iou',
+                        choices=['soft_iou', 'projection', 'hybrid'],
+                        help='soft_iou: default SoftIoU; projection: BoxInst-style row/col projection; '
+                             'hybrid: projection + FocalBCE + Dice')
+    parser.add_argument('--projection_weight', type=float, default=1.0,
+                        help='Weight for projection loss component (used when loss_type=hybrid)')
+
     # PoLaRIS LiDAR DataLoader options
     parser.add_argument('--use_lidar_dataloader', type=str, default='False',
                         help='Use PoLaRIS LiDAR DataLoader (supports 16-bit, LiDAR, soft labels)')

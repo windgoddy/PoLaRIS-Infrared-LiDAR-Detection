@@ -13,6 +13,7 @@ from model.metric import *
 from model.metric import calculate_mask_to_box_iou  # 2026-02-03: Added Mask-to-Box IoU
 from model.loss import *
 from model.load_param_data import  load_dataset, load_param
+from model_Mamba.core.loss_advanced import LossFactory  # 2026-03-17: projection/hybrid loss support
 
 # model
 from model.model_DNANet import  Res_CBAM_block
@@ -75,6 +76,15 @@ class Trainer(object):
         if args.scheduler   == 'CosineAnnealingLR':
             self.scheduler  = lr_scheduler.CosineAnnealingLR( self.optimizer, T_max=args.epochs, eta_min=args.min_lr)
 
+        # Loss function (2026-03-17)
+        self.loss_type = getattr(args, 'loss_type', 'soft_iou')
+        if self.loss_type != 'soft_iou':
+            self.criterion = LossFactory.create(
+                self.loss_type,
+                projection_weight=getattr(args, 'projection_weight', 1.0),
+            )
+            print(f"[Loss] Using {self.loss_type} loss")
+
         # Evaluation metrics
         self.best_iou       = 0
         self.best_box_iou   = 0  # Track best Mask-to-Box IoU (independent from best Seg IoU)
@@ -104,11 +114,17 @@ class Trainer(object):
                 preds= self.model(data)
                 loss = 0
                 for pred in preds:
-                    loss += SoftIoULoss(pred, labels)
+                    if self.loss_type == 'soft_iou':
+                        loss += SoftIoULoss(pred, labels)
+                    else:
+                        loss += self.criterion(torch.sigmoid(pred), labels)
                 loss /= len(preds)
             else:
                pred = self.model(data)
-               loss = SoftIoULoss(pred, labels)
+               if self.loss_type == 'soft_iou':
+                   loss = SoftIoULoss(pred, labels)
+               else:
+                   loss = self.criterion(torch.sigmoid(pred), labels)
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
@@ -135,12 +151,18 @@ class Trainer(object):
                     preds = self.model(data)
                     loss = 0
                     for pred in preds:
-                        loss += SoftIoULoss(pred, labels)
+                        if self.loss_type == 'soft_iou':
+                            loss += SoftIoULoss(pred, labels)
+                        else:
+                            loss += self.criterion(torch.sigmoid(pred), labels)
                     loss /= len(preds)
-                    pred =preds[-1]
+                    pred = preds[-1]
                 else:
                     pred = self.model(data)
-                    loss = SoftIoULoss(pred, labels)
+                    if self.loss_type == 'soft_iou':
+                        loss = SoftIoULoss(pred, labels)
+                    else:
+                        loss = self.criterion(torch.sigmoid(pred), labels)
                 losses.update(loss.item(), pred.size(0))
                 self.ROC .update(pred, labels)
                 self.mIoU.update(pred, labels)
