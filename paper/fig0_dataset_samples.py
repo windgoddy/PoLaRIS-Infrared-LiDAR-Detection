@@ -25,6 +25,9 @@ import numpy as np
 import cv2
 import matplotlib
 matplotlib.use('Agg')
+matplotlib.rcParams['pdf.fonttype'] = 42
+matplotlib.rcParams['ps.fonttype']  = 42
+matplotlib.rcParams['font.family']  = 'DejaVu Sans'
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
@@ -213,7 +216,7 @@ def main(args):
     fig.patch.set_facecolor('black')
 
     col_titles = ['IR Image', 'YOLO Box', 'GT Mask', 'HALO (PAG)']
-    row_labels = ['NUAA-SIRST\n(medium target)', 'NUDT-SIRST\n(tiny target <9px²)', 'IRSTD-1k\n(complex BG)']
+    row_labels = ['NUAA-SIRST\n(medium target)', 'NUDT-SIRST\n(tiny <9px^2)', 'IRSTD-1k\n(complex BG)']
 
     for row_idx, (ds_name, row_label) in enumerate(zip(
             ['NUAA-SIRST', 'NUDT-SIRST', 'IRSTD-1k'], row_labels)):

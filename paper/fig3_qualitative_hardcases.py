@@ -41,6 +41,9 @@ import numpy as np
 import cv2
 import matplotlib
 matplotlib.use('Agg')
+matplotlib.rcParams['pdf.fonttype'] = 42
+matplotlib.rcParams['ps.fonttype']  = 42
+matplotlib.rcParams['font.family']  = 'DejaVu Sans'
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
@@ -91,7 +94,8 @@ PRED_DIRS = {
 # 格式：(dataset_name, sample_name, row_description)
 # row_description 用于 ylabel（可用中英文）
 HARD_CASES = [
-    # ('NUDT-SIRST', '000001', 'Tiny target\n(NUDT <9px²)'),
+    # ★ row_desc 只用英文，中文在服务器上会乱码
+    # ('NUDT-SIRST', '000001', 'Tiny target\n(NUDT <9px^2)'),
     # ('NUAA-SIRST', 'Misc_200', 'Strong horizon\n(NUAA)'),
     # ('IRSTD-1k',   '000300', 'Cloud clutter\n(IRSTD)'),
 ]

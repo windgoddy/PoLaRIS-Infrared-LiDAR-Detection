@@ -22,6 +22,10 @@ import numpy as np
 import cv2
 import matplotlib
 matplotlib.use('Agg')
+matplotlib.rcParams['pdf.fonttype'] = 42   # 嵌入 TrueType，防止 PDF 乱码
+matplotlib.rcParams['ps.fonttype']  = 42
+matplotlib.rcParams['mathtext.fontset'] = 'stix'  # 无需系统 TeX
+matplotlib.rcParams['font.family'] = 'DejaVu Sans'
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
@@ -216,10 +220,11 @@ def main(args):
             color=CROSSHAIR_COLOR, linewidth=1.5)
     ax.plot(peak_px, peak_py, 'o', color=CROSSHAIR_COLOR,
             markersize=4, markerfacecolor='none', markeredgewidth=1.5)
-    # 标注文字（在矢量软件中可替换为更精美的 LaTeX 标注）
+    # p* 标注（纯文本，无 LaTeX，防乱码）
     ax.text(peak_px + CROSSHAIR_SIZE + 1, peak_py - CROSSHAIR_SIZE,
-            r'$p^*$', color=CROSSHAIR_COLOR, fontsize=9, va='top')
-    style_ax(ax, r'B-SNR  $W(i)$  +  Argmax $p^*$')
+            'p*', color=CROSSHAIR_COLOR, fontsize=9, va='top',
+            fontfamily='DejaVu Sans')
+    style_ax(ax, 'B-SNR  W(i)  +  Argmax p*')
 
     # Col 2: PAG 高斯软标签 + 同一 p* 准星
     ax = axes[2]
@@ -233,7 +238,7 @@ def main(args):
             color=CROSSHAIR_COLOR, linewidth=1.5)
     ax.plot(peak_px, peak_py, 'o', color=CROSSHAIR_COLOR,
             markersize=4, markerfacecolor='none', markeredgewidth=1.5)
-    style_ax(ax, r'PAG Soft Label  $P(i)$')
+    style_ax(ax, 'PAG Soft Label  P(i)')
 
     plt.tight_layout(pad=0.5)
     plt.subplots_adjust(wspace=0.04)
