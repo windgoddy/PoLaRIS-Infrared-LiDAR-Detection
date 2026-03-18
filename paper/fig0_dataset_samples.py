@@ -295,6 +295,13 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--root', default=ROOT, help='Project root directory')
-    parser.add_argument('--out', default=os.path.join(ROOT, 'paper', 'figures', 'fig0_samples.pdf'))
+    parser.add_argument('--out', default=os.path.join(ROOT, 'paper', 'figures', 'fig0_samples.png'))
+    parser.add_argument('--nuaa',  default='', help='NUAA-SIRST sample name (e.g. Misc_33)')
+    parser.add_argument('--nudt',  default='', help='NUDT-SIRST sample name (e.g. 000032)')
+    parser.add_argument('--irstd', default='', help='IRSTD-1k sample name (e.g. XDU343)')
     args = parser.parse_args()
+    # Override SAMPLE_NAMES from CLI
+    if args.nuaa:  SAMPLE_NAMES['NUAA-SIRST'] = args.nuaa
+    if args.nudt:  SAMPLE_NAMES['NUDT-SIRST'] = args.nudt
+    if args.irstd: SAMPLE_NAMES['IRSTD-1k']   = args.irstd
     main(args)

@@ -212,6 +212,11 @@ def main(args):
     ax.imshow(img_patch, cmap='gray', interpolation='nearest', vmin=0, vmax=255)
     ax.imshow(bsnr_patch, cmap='inferno', alpha=0.80,
               interpolation='nearest', vmin=0, vmax=1)
+    # 画框标注"标签只在 box 内"
+    rect = patches.Rectangle((bx_patch, by_patch), bw_patch, bh_patch,
+                              linewidth=1.2, edgecolor='red',
+                              facecolor='none', linestyle='--')
+    ax.add_patch(rect)
     # 十字准星
     ax.plot([peak_px - CROSSHAIR_SIZE, peak_px + CROSSHAIR_SIZE],
             [peak_py, peak_py], color=CROSSHAIR_COLOR, linewidth=1.5)
@@ -231,6 +236,10 @@ def main(args):
     ax.imshow(img_patch, cmap='gray', interpolation='nearest', vmin=0, vmax=255)
     ax.imshow(pag_patch, cmap='inferno', alpha=0.80,
               interpolation='nearest', vmin=0, vmax=1)
+    rect = patches.Rectangle((bx_patch, by_patch), bw_patch, bh_patch,
+                              linewidth=1.2, edgecolor='red',
+                              facecolor='none', linestyle='--')
+    ax.add_patch(rect)
     ax.plot([peak_px - CROSSHAIR_SIZE, peak_px + CROSSHAIR_SIZE],
             [peak_py, peak_py], color=CROSSHAIR_COLOR, linewidth=1.5)
     ax.plot([peak_px, peak_px],
@@ -250,13 +259,64 @@ def main(args):
     plt.close()
 
 
+def batch_main(args):
+    """批量生成所有 test split 样本，输出到 --batch_dir 目录，方便挑图。"""
+    compute_bsnr_weight = load_bsnr_utils(args.root)
+    cfg = DATASET_CONFIGS[args.dataset]
+
+    split_file = os.path.join(args.root, cfg['split'])
+    with open(split_file, 'r') as f:
+        all_names = [l.strip() for l in f if l.strip()]
+
+    # 只保留有 label 且 label 非空的样本
+    valid_names = []
+    for name in all_names:
+        lp = os.path.join(args.root, cfg['label_dir'], name + '.txt')
+        if os.path.exists(lp) and os.path.getsize(lp) > 0:
+            valid_names.append(name)
+
+    if args.batch_n > 0:
+        import random
+        random.seed(42)
+        valid_names = random.sample(valid_names, min(args.batch_n, len(valid_names)))
+        valid_names.sort()
+
+    out_dir = args.batch_dir or os.path.join(args.root, 'paper', 'figures', f'fig2_batch_{args.dataset}')
+    os.makedirs(out_dir, exist_ok=True)
+    print(f"Generating {len(valid_names)} images → {out_dir}")
+
+    for i, name in enumerate(valid_names):
+        out_path = os.path.join(out_dir, f'{name}.png')
+        args.sample = name
+        args.out = out_path
+        try:
+            main(args)
+        except Exception as e:
+            print(f"  [SKIP] {name}: {e}")
+        if (i + 1) % 20 == 0:
+            print(f"  {i+1}/{len(valid_names)} done")
+
+    print(f"\nAll done. Browse: {out_dir}")
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--root', default=ROOT)
     parser.add_argument('--dataset', default='NUAA-SIRST',
                         choices=['NUAA-SIRST', 'NUDT-SIRST', 'IRSTD-1k'])
     parser.add_argument('--sample', default='',
-                        help='Sample name (without ext). Leave empty for auto-select.')
-    parser.add_argument('--out', default=os.path.join(ROOT, 'paper', 'figures', 'fig2_mechanism.pdf'))
+                        help='Single sample name. Leave empty for auto-select.')
+    parser.add_argument('--out', default=os.path.join(ROOT, 'paper', 'figures', 'fig2_mechanism.png'))
+    # 批量模式
+    parser.add_argument('--batch', action='store_true',
+                        help='Batch mode: generate all test samples.')
+    parser.add_argument('--batch_n', type=int, default=0,
+                        help='Randomly sample N images (0 = all).')
+    parser.add_argument('--batch_dir', default='',
+                        help='Output directory for batch mode.')
     args = parser.parse_args()
-    main(args)
+
+    if args.batch:
+        batch_main(args)
+    else:
+        main(args)
