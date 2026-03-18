@@ -190,11 +190,10 @@ class Trainer(object):
         fa_at_t3 = float(FA[3])
         pd_at_t5 = float(PD[5]) if not np.isnan(PD[5]) else 0.0  # threshold≈0.5
         fa_at_t5 = float(FA[5])
-        # 最佳 Pd（在所有阈值中取最高检测率）
-        valid_pd = np.where(np.isnan(PD), 0, PD)
-        best_pd_idx = int(np.argmax(valid_pd))
-        best_pd = float(valid_pd[best_pd_idx])
-        fa_at_best = float(FA[best_pd_idx])
+        # 固定使用 threshold≈0.5 作为 Pd/Fa 报告口径（iBin=5）
+        # 原 best_pd_idx=argmax 策略会选到 iBin=0（threshold=0），导致 Fa≈1 的假象
+        best_pd = pd_at_t5
+        fa_at_best = fa_at_t5
 
         # Print test results with all metrics
         print(f"\n[Epoch {epoch}] Test Results:")
