@@ -55,7 +55,7 @@ def parse_args():
     parser.add_argument('--in_channels',  type=int, default=3)
     parser.add_argument('--base_size',    type=int, default=256)
     parser.add_argument('--crop_size',    type=int, default=256)
-    parser.add_argument('--workers',      type=int, default=4)
+    parser.add_argument('--workers',      type=int, default=0)
     parser.add_argument('--channel_size', default='three',
                         help='DNANet only: one/two/three/four')
     parser.add_argument('--backbone',     default='resnet_18',
@@ -83,6 +83,8 @@ def build_model(args):
         return ASKCResNetFPN(in_channels=args.in_channels, layers=[4, 4, 4],
                              channels=[8, 16, 32, 64], fuse_mode='AsymBi',
                              act_dilation=16, classes=1)
+    else:
+        raise ValueError(f"Unknown model: {args.model}")
 
 
 def main():
@@ -111,13 +113,17 @@ def main():
                         drop_last=False)
 
     # ── 模型 ──
-    model = build_model(args).cuda()
+    torch.cuda.empty_cache()
+    model = build_model(args)
     model.apply(weights_init_xavier)
 
-    ckpt = torch.load(args.model_dir, map_location='cuda')
+    ckpt = torch.load(args.model_dir, map_location='cpu')
     model.load_state_dict(ckpt['state_dict'])
+    model = model.cuda()
     model.eval()
+    torch.cuda.empty_cache()
     print(f"Loaded: {args.model_dir}")
+    print(f"GPU memory: {torch.cuda.memory_allocated()/1e9:.2f} GB allocated")
     print(f"Saving {len(val_img_ids)} predictions → {args.out_dir}")
 
     # ── 推理 ──
