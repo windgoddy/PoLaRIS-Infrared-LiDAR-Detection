@@ -20,17 +20,39 @@ Figure: Variance Contamination Theory — TIP-Style 1×3 Empirical Validation
     右 Y 轴: α 值
 
 用法:
-    # 单样本实证（服务器上运行）
-    python paper/fig_variance_contamination.py \\
-        --nudt 000259 --nuaa Misc_87 \\
-        --out paper/figures/fig_variance_theory.pdf
 
-    # 批量统计（输出 CSV 供论文引用）
-    python paper/fig_variance_contamination.py \\
-        --batch --dataset NUDT-SIRST --n 50 --out_dir paper/figures/variance_batch
+  ── 【推荐】服务器：用真实数据生成 panel_a/b/c 三张独立图 ──────────────────
+    python paper/fig_variance_contamination.py \
+        --nudt 000259 --nuaa Misc_87 \
+        --out paper/figures/fig_variance_theory.png \
+        --split
+    # 同时在 paper/figures/variance_contamination/ 下生成
+    #   stats_NUDT_000259.csv  和  stats_NUAA_Misc_87.csv
 
-    # 本地演示（使用合成数据，无需数据集）
-    python paper/fig_variance_contamination.py --demo
+  ── 服务器：用真实数据生成合并版（单张 1×3）────────────────────────────────
+    python paper/fig_variance_contamination.py \
+        --nudt 000259 --nuaa Misc_87 \
+        --out paper/figures/fig_variance_theory.png
+
+  ── 服务器：先生成 CSV，本地再绘图（适合图像不在本地的情况）─────────────────
+    # Step 1 在服务器：生成 CSV（会自动保存到 --out_dir）
+    python paper/fig_variance_contamination.py \
+        --nudt 000259 --nuaa Misc_87 \
+        --out paper/figures/fig_variance_theory.png
+    # Step 2 把 CSV 拷到本地后，本地绘图（Panel A/B 需要图像，Panel C 仅需 CSV）
+    python paper/fig_variance_contamination.py \
+        --csv_nudt paper/figures/variance_contamination/stats_NUDT_000259.csv \
+        --csv_nuaa paper/figures/variance_contamination/stats_NUAA_Misc_87.csv \
+        --out paper/figures/fig_variance_theory.png \
+        --split
+
+  ── 服务器：批量统计（输出平均污染曲线，供论文引用）────────────────────────
+    python paper/fig_variance_contamination.py \
+        --batch --dataset NUDT-SIRST --n 50 \
+        --out_dir paper/figures/variance_batch
+
+  ── 本地演示（合成数据，无需数据集，验证脚本逻辑）──────────────────────────
+    python paper/fig_variance_contamination.py --demo --split
 """
 
 import os
@@ -227,38 +249,43 @@ def _kde_line(pixels, x_range):
 def draw_panel_a(ax, img_gray, mask, box, ds_label):
     """
     Panel A: 极小目标 / 紧 expand_ratio=1.1 → 严重污染
-    展示 Context Ring PDF 大幅右移/展宽 vs True BG
-    图内注释 α(1-α)Δμ²
+    参考基准 = R=3.0 的 ctx ring（局部无污染代理 σ²₀）
+    对比     = R=1.1 的 ctx ring（受目标泄漏污染）
+    → 对比曲线移位/展宽，直观展示污染效果
     """
-    ratio = 1.1
-    true_bg, ctx_ring, _, stats = extract_regions(img_gray, mask, box, expand_ratio=ratio)
+    ratio_small = 1.1
+    ratio_ref   = 3.0   # 足够大，目标影响可忽略，作为局部 σ²₀ 代理
 
-    mu0   = stats['mu_true']
-    std0  = stats['std_true']
-    lo = max(0,   mu0 - 5.5 * std0)
-    hi = min(255, mu0 + 5.5 * max(std0, stats['std_ctx']))
+    _, ctx_small, _, stats_small = extract_regions(img_gray, mask, box, expand_ratio=ratio_small)
+    _, ctx_ref,   _, stats_ref   = extract_regions(img_gray, mask, box, expand_ratio=ratio_ref)
+
+    mu_ref  = stats_ref['mu_ctx']
+    std_ref = stats_ref['std_ctx']
+    lo = max(0,   mu_ref - 5.0 * std_ref)
+    hi = min(255, mu_ref + 5.0 * max(std_ref, stats_small['std_ctx']))
     x_range = np.linspace(lo, hi, 600)
 
-    y_bg  = _kde_line(true_bg,  x_range)
-    y_ctx = _kde_line(ctx_ring, x_range)
+    y_ref   = _kde_line(ctx_ref,   x_range)
+    y_small = _kde_line(ctx_small, x_range)
 
-    if y_bg is not None:
-        ax.plot(x_range, y_bg, color='#1565C0', lw=2.5, ls='--',
-                label=fr'True BG  ($\sigma_0={std0:.1f}$)', zorder=5)
+    if y_ref is not None:
+        ax.plot(x_range, y_ref, color='#1565C0', lw=2.5, ls='--',
+                label=fr'Local BG (R={ratio_ref})  $\sigma_0={std_ref:.1f}$', zorder=5)
 
-    if y_ctx is not None:
-        ax.plot(x_range, y_ctx, color='#C62828', lw=2.5,
-                label=fr'Ctx Ring (r={ratio})  $\sigma={stats["std_ctx"]:.1f}$', zorder=4)
-        ax.fill_between(x_range, y_ctx, alpha=0.18, color='#C62828')
+    if y_small is not None:
+        ax.plot(x_range, y_small, color='#C62828', lw=2.5,
+                label=fr'Ctx Ring (R={ratio_small})  $\sigma={stats_small["std_ctx"]:.1f}$',
+                zorder=4)
+        ax.fill_between(x_range, y_small, alpha=0.18, color='#C62828')
 
-    # 标注污染项（LaTeX-style text）
-    term_val = stats['contamination_term']
-    alpha_v  = stats['alpha']
-    dmu_v    = stats['delta_mu']
-    var0     = stats['var_true']
-    var_ctx  = stats['var_ctx']
+    # 污染项标注
+    ct = stats_small['contamination_term']
+    ax.text(0.97, 0.95,
+            r'$\alpha(1-\alpha)\Delta\mu^2$' + f' = {ct:.1f}',
+            fontsize=8, color='#C62828', ha='right', va='top',
+            transform=ax.transAxes)
 
-    ax.set_title(f'(a) Severe Contamination\n{ds_label}  $R={ratio}$',
+    ax.set_title(f'(a) Severe Contamination\n{ds_label}  $R={ratio_small}$',
                  fontsize=10.5, fontweight='bold', pad=6)
     ax.set_xlabel('Pixel Intensity', fontsize=10)
     ax.set_ylabel('Probability Density', fontsize=10)
@@ -271,35 +298,40 @@ def draw_panel_a(ax, img_gray, mask, box, ds_label):
 def draw_panel_b(ax, img_gray, mask, box, ds_label):
     """
     Panel B: 中等目标 / 默认 expand_ratio=1.5 → 安全平台
-    Context Ring PDF 贴合 True BG
+    同样使用 R=3.0 作为局部背景基准，展示 R=1.5 时曲线高度贴合
     """
-    ratio = 1.5
-    true_bg, ctx_ring, _, stats = extract_regions(img_gray, mask, box, expand_ratio=ratio)
+    ratio_design = 1.5
+    ratio_ref    = 3.0
 
-    mu0   = stats['mu_true']
-    std0  = stats['std_true']
-    lo = max(0,   mu0 - 5.0 * std0)
-    hi = min(255, mu0 + 5.0 * std0)
+    _, ctx_design, _, stats_design = extract_regions(img_gray, mask, box, expand_ratio=ratio_design)
+    _, ctx_ref,    _, stats_ref    = extract_regions(img_gray, mask, box, expand_ratio=ratio_ref)
+
+    mu_ref  = stats_ref['mu_ctx']
+    std_ref = stats_ref['std_ctx']
+    lo = max(0,   mu_ref - 5.0 * std_ref)
+    hi = min(255, mu_ref + 5.0 * std_ref)
     x_range = np.linspace(lo, hi, 600)
 
-    y_bg  = _kde_line(true_bg,  x_range)
-    y_ctx = _kde_line(ctx_ring, x_range)
+    y_ref    = _kde_line(ctx_ref,    x_range)
+    y_design = _kde_line(ctx_design, x_range)
 
-    if y_bg is not None:
-        ax.plot(x_range, y_bg, color='#1565C0', lw=2.5, ls='--',
-                label=fr'True BG  ($\sigma_0={std0:.1f}$)', zorder=5)
+    if y_ref is not None:
+        ax.plot(x_range, y_ref, color='#1565C0', lw=2.5, ls='--',
+                label=fr'Local BG (R={ratio_ref})  $\sigma_0={std_ref:.1f}$', zorder=5)
 
-    if y_ctx is not None:
-        ax.plot(x_range, y_ctx, color='#2E7D32', lw=2.5,
-                label=fr'Ctx Ring (r={ratio})  $\sigma={stats["std_ctx"]:.1f}$', zorder=4)
-        ax.fill_between(x_range, y_ctx, alpha=0.18, color='#2E7D32')
+    if y_design is not None:
+        ax.plot(x_range, y_design, color='#2E7D32', lw=2.5,
+                label=fr'Ctx Ring (R={ratio_design})  $\sigma={stats_design["std_ctx"]:.1f}$',
+                zorder=4)
+        ax.fill_between(x_range, y_design, alpha=0.18, color='#2E7D32')
 
-    # KL 距离估计（均值/方差差）
-    term_val = stats['contamination_term']
-    var0     = stats['var_true']
-    var_ctx  = stats['var_ctx']
+    ct = stats_design['contamination_term']
+    ax.text(0.97, 0.95,
+            r'$\alpha(1-\alpha)\Delta\mu^2$' + f' = {ct:.1f}',
+            fontsize=8, color='#2E7D32', ha='right', va='top',
+            transform=ax.transAxes)
 
-    ax.set_title(f'(b) Safe Platform (Design Choice)\n{ds_label}  $R={ratio}$',
+    ax.set_title(f'(b) Safe Platform (Design Choice)\n{ds_label}  $R={ratio_design}$',
                  fontsize=10.5, fontweight='bold', pad=6)
     ax.set_xlabel('Pixel Intensity', fontsize=10)
     ax.set_ylabel('Probability Density', fontsize=10)
@@ -380,13 +412,26 @@ def load_sample(ds_name, sample_name, root):
 
 
 def compute_contamination_curve(img_gray, mask, box):
-    """返回 [(expand_ratio, var_ctx/var0)] 列表"""
+    """
+    返回 [(expand_ratio, var_ctx/var_ref)] 列表
+    参考基准 var_ref = R=3.0 时的 ctx ring 方差（局部无污染代理）
+    比全图背景方差更直接反映"目标泄漏"对估计的影响
+    """
+    # 先算参考基准（R=3.0）
+    _, _, _, stats_ref = extract_regions(img_gray, mask, box, expand_ratio=3.0)
+    var_ref = stats_ref['var_ctx']
+    if var_ref < 1 or np.isnan(var_ref):
+        # fallback: 用全图背景方差
+        var_ref = stats_ref['var_true']
+    if var_ref < 1 or np.isnan(var_ref):
+        return []
+
     result = []
     for ratio in EXPAND_RATIOS:
         _, ctx_ring, _, stats = extract_regions(img_gray, mask, box, expand_ratio=ratio)
-        if len(ctx_ring) < 5 or np.isnan(stats['var_true']) or stats['var_true'] < 1:
+        if len(ctx_ring) < 5:
             continue
-        result.append((ratio, stats['var_ctx'] / stats['var_true']))
+        result.append((ratio, stats['var_ctx'] / var_ref))
     return result
 
 
