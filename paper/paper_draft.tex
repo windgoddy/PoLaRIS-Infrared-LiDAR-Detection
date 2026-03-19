@@ -1,0 +1,472 @@
+% ===========================================================================
+%  HALO — IEEE TIP Draft
+%  Introduction + Related Work + Methodology
+%  Last updated: 2026-03-17 (Sec.2.3 expanded)
+% ===========================================================================
+
+% ===========================================================================
+\section{Introduction}\label{sec:intro}
+% ===========================================================================
+
+Infrared small target detection (IRSTD) plays an indispensable role in maritime
+surveillance, early-warning systems, and remote sensing~\cite{dnanet,uiunet,alcnet}.
+Unlike generic object detection, infrared small targets typically occupy fewer than
+$9\times9$ pixels, lack discernible texture or shape cues, and are deeply embedded
+in spatially correlated background clutter~\cite{irstd_survey}.
+Despite the remarkable progress brought by deep learning~\cite{dnanet,uiunet,sctransnet},
+fully supervised methods remain fundamentally bottlenecked by the cost of acquiring
+pixel-level mask annotations.
+Precisely delineating a $3\times3$ target against a noisy infrared background demands
+domain expertise and meticulous per-pixel labeling---a process that scales poorly to
+the large-scale datasets required for robust generalization.
+
+To mitigate this annotation burden, recent works have explored \emph{weakly supervised}
+paradigms for IRSTD.
+Notably, LESPS~\cite{lesps} introduces single-point supervision with a label evolution
+mechanism that iteratively refines pseudo-masks during training, while PAL~\cite{pal}
+further incorporates an active learning loop to progressively select the most informative
+annotation points.
+Although these methods significantly reduce annotation effort, they share two fundamental
+limitations that hinder deployment in operational scenarios.
+\emph{First}, single-point annotation in dense clutter is inherently fragile: accurately
+clicking the geometric centroid of a dim, sub-$5$-pixel target embedded in heavy
+sea-surface or cloud clutter is both time-consuming and prone to human jitter, as
+illustrated in Fig.~\ref{fig:annotation_comparison}.
+\emph{Second}, the iterative label evolution and active learning loops employed by LESPS
+and PAL introduce substantial computational overhead and training complexity, undermining
+the simplicity required for real-world deployment.
+
+In contrast, \emph{bounding box} annotations represent the most natural and readily
+available form of weak supervision in practice.
+Upstream early-warning systems---ranging from radar cueing to lightweight YOLO-based
+detectors~\cite{yolo}---routinely produce coarse bounding boxes as their primary output.
+Requiring these operational pipelines to additionally supply pixel-level masks or
+geometrically precise center points is neither realistic nor cost-effective.
+However, leveraging box annotations for IRSTD poses a unique and severe challenge:
+for a typical small target occupying fewer than $0.5\%$ of the box area, over $99\%$
+of the enclosed pixels belong to background clutter.
+Naively treating all box-interior pixels as foreground---so-called \emph{Box Fill}---leads
+to catastrophic \emph{representation collapse}, where the network learns to predict the
+entire box region rather than the compact target, yielding performance \emph{below}
+single-point supervised baselines.
+This observation is empirically confirmed in our experiments: Box Fill (55.17\%,
+57.39\%, 50.90\% mIoU on NUAA/NUDT/IRSTD) and GrabCut (57.31\%, 42.10\%, 50.43\%)
+both fall short of LESPS (61.13\%, 58.37\%, 49.05\%), demonstrating that the bounding
+box itself carries no inherent information advantage---the challenge lies precisely
+in extracting the target signal from within it.
+
+In this paper, we propose \textbf{HALO} (\textbf{H}eat-\textbf{A}nchored \textbf{L}abel
+\textbf{O}ptimization from Loose Boxes)%
+\footnote{The name also alludes to the faint optical ``halo'' surrounding an infrared
+point source, a direct physical manifestation of the PSF exploited by our method.},
+a physics-anchored pseudo-label generation framework that converts coarse bounding boxes
+into high-fidelity pixel-level soft masks \emph{without any learnable parameters,
+iterative refinement, or network architecture modification}.
+Our key insight is that the radiometric properties of infrared imagery provide a
+principled statistical basis for distinguishing target pixels from background within
+a bounding box.
+Concretely, we contribute two components at the pseudo-label generation level:
+
+\begin{enumerate}
+    \item \textbf{Background-SNR Posterior Mask (B-SNR).}
+    Under a local Gaussian background assumption, we prove that the per-pixel posterior
+    probability of belonging to the target class admits a closed-form sigmoid expression:
+    \begin{equation}
+        W(i) = \sigma\!\left(\tau \cdot \frac{I(i) - \mu_\mathrm{ctx}}{\sigma_\mathrm{ctx}}\right),
+        \label{eq:bsnr}
+    \end{equation}
+    where $\mu_\mathrm{ctx}$ and $\sigma_\mathrm{ctx}$ are local background statistics
+    estimated from an expanded context box surrounding the annotation, and $\tau$ controls
+    decision sharpness.
+    This formulation bridges classical SNR analysis with Bayesian posterior estimation,
+    providing a statistically grounded soft mask in a single forward pass.
+
+    \item \textbf{Physics-Anchored Gaussian Refinement (PAG).}
+    To further suppress residual clutter in the B-SNR mask, we exploit the physical
+    point-spread characteristic of infrared targets.
+    Instead of placing the Gaussian anchor at the \emph{geometric center} of the box
+    (which is biased by annotation error), we locate the \emph{physical hotspot}
+    $\mathbf{p}^* = \arg\max_i W(i)$---the pixel of maximal radiometric response.
+    Using the full-width-at-half-maximum (FWHM) region of the B-SNR response as a
+    clutter-free anchor, we perform SNR-weighted spatial covariance estimation to derive
+    an anisotropic Gaussian prior.
+    The resulting PAG mask concentrates supervision on the target's energy peak while
+    gracefully attenuating toward the periphery, yielding a soft label consistent with
+    the underlying point-spread function (PSF).
+\end{enumerate}
+
+Beyond pseudo-label generation, we provide a \textbf{theoretical analysis of the
+variance corruption phenomenon} that arises when targets are extremely small relative
+to the bounding box.
+We derive a closed-form bound showing that the estimated background variance is inflated
+by $\alpha(1-\alpha)\Delta\mu^2$, where $\alpha$ is the target-to-box area ratio and
+$\Delta\mu$ the target--background intensity contrast.
+This result rigorously explains why physics-based pseudo-labels degrade under extreme
+scale conditions (sub-$3\times3$ targets in NUDT-SIRST), establishing a principled
+failure boundary rather than concealing the limitation.
+
+The main contributions of this work are summarized as follows:
+
+\begin{itemize}
+    \item We present \textbf{HALO}, the first box-supervised framework for infrared
+    small target detection.
+    HALO generates high-quality pixel-level pseudo-masks from coarse bounding boxes
+    in a single forward pass with zero learnable parameters and no iterative refinement,
+    making it a purely physics-driven, plug-and-play module compatible with any IRSTD
+    backbone.
+
+    \item We provide a \textbf{rigorous statistical foundation} for the proposed
+    pseudo-label pipeline.
+    B-SNR is derived as a Bayesian posterior under a Gaussian background shift model;
+    PAG is formulated as SNR-weighted spatial covariance estimation anchored at the
+    physical hotspot.
+    We further derive a \textbf{variance corruption bound} that quantitatively
+    characterizes the degradation regime under extreme target-to-box ratios.
+
+    \item We conduct \textbf{extensive model-agnostic experiments} across three standard
+    IRSTD benchmarks (NUAA-SIRST, NUDT-SIRST, IRSTD-1K) and three architecturally
+    diverse backbones (DNANet, ACM, ALCNet).
+    HALO consistently outperforms prior box-supervised baselines (Box Fill and GrabCut),
+    surpasses single-point supervised LESPS by up to $+11.7\%$ mIoU, and achieves
+    performance comparable to or exceeding PAL---all while requiring strictly coarser
+    supervision and zero extra annotation effort beyond what upstream detection
+    systems already produce.
+\end{itemize}
+
+
+% ===========================================================================
+\section{Related Work}\label{sec:related}
+% ===========================================================================
+
+\subsection{Deep Learning for Infrared Small Target Detection}
+\label{sec:related_dl}
+
+The past five years have witnessed rapid architectural innovation in fully supervised
+IRSTD.
+DNANet~\cite{dnanet} introduced dense nested connections within a U-Net++ topology
+coupled with channel--spatial attention (Res-CBAM), establishing strong segmentation
+performance on NUDT-SIRST.
+UIU-Net~\cite{uiunet} proposed a nested ``U-Net in U-Net'' structure to capture both
+macro-level context and micro-level target details.
+ACM~\cite{acm} designed an asymmetric contextual modulation module for multi-scale
+feature fusion, while ALCNet~\cite{alcnet} incorporated local contrast attention into
+an FPN decoder.
+More recently, SCTransNet~\cite{sctransnet} and ILNet~\cite{ilnet} have explored
+Transformer-based and low-level feature enhancement strategies, respectively.
+Despite strong performance, all these methods critically depend on pixel-level mask
+annotations, motivating the exploration of weaker supervision signals.
+
+\subsection{Weakly Supervised Infrared Small Target Detection}
+\label{sec:related_ws}
+
+Weakly supervised IRSTD has emerged as a promising direction to reduce annotation costs.
+LESPS~\cite{lesps} pioneered single-point supervision, proposing a mapping degeneration
+framework in which pseudo-masks are iteratively evolved during training via the network's
+own predictions.
+PAL~\cite{pal} extended this paradigm with a progressive active learning framework that
+strategically selects informative annotation points.
+
+While these methods represent significant advances, they share structural limitations.
+Both rely on multi-round iterative procedures that increase training complexity, and both
+depend on the single-point annotation paradigm, which is fragile for extremely dim targets
+(SCR $<$ 2) in heavy clutter, where clicking the target centroid demands high expertise
+and is susceptible to spatial jitter.
+Our work departs from this paradigm entirely, leveraging bounding box annotations---a
+supervision signal naturally produced by upstream detection systems that requires no
+sub-pixel human precision.
+
+\subsection{Box-Supervised Semantic Segmentation}
+\label{sec:related_box}
+
+\paragraph{Natural image methods.}
+Box-supervised segmentation has been extensively studied for natural images.
+Early work by BoxSup~\cite{boxsup} and SDI~\cite{sdi} used bounding boxes to generate
+coarse pseudo-masks via GrabCut~\cite{grabcut}, followed by iterative network retraining.
+BBTP~\cite{bbtp} reformulated box supervision as a multiple-instance learning problem,
+treating box-interior pixels as a ``bag'' with at least one foreground member.
+DiscoBox~\cite{discobox} and BoxLevelSet~\cite{boxlevelset} introduced teacher--student
+consistency regularization and level-set energy minimization, respectively, to sharpen
+box-derived pseudo-boundaries.
+BoxInst~\cite{boxinst} incorporated projection-based consistency losses within an instance
+segmentation head, while Box2Mask~\cite{box2mask} proposed pairwise pixel-affinity
+constraints to propagate foreground labels from box interiors.
+More recent work (SIM~\cite{sim}, BoxSnake~\cite{boxsnake}) further exploits structural
+image features and deformable snake contours to achieve near-mask accuracy from box
+annotations alone on standard benchmarks.
+A common thread across all these methods is the reliance on \emph{semantic discriminability}
+or \emph{color affinity}: GrabCut requires color-based foreground--background separation;
+CAM-based methods assume spatially extended class-specific activations; affinity
+propagation assumes locally consistent appearance within object boundaries.
+
+\paragraph{Cross-domain extension.}
+In medical image segmentation, Kervadec~\emph{et al.}~\cite{kervadec2020weakly} derived
+a differentiable loss formulation that constrains foreground size to match a box-supplied
+target area estimate, avoiding the appearance assumptions of GrabCut.
+Subsequent medical works (GSR-Net~\cite{gsrnet}, and~\cite{boxseg_miccai2022}) noted
+explicitly that GrabCut \emph{fails on grayscale and low-contrast modalities} such as
+ultrasound and MRI, motivating constraint-based or Transformer-based alternatives.
+In remote sensing, \cite{boxseg_isprs2020} and SAM-based approaches~\cite{sam_rs2024}
+leverage strong pre-trained features and region proposals derived from multi-spectral
+cues---none of which are available in single-band thermal IR imagery.
+The IR-specific method WeCoL~\cite{wecol} explores contrastive learning under weak
+supervision but still requires sufficient spatial extent (targets $\geq$$6\times 6$ px).
+
+\paragraph{Failure modes on infrared small targets.}
+Despite extensive progress across domains, \emph{all} of the above methods share a
+critical prerequisite that is systematically violated in IRSTD: the target must be
+distinguishable from its local background by appearance, semantics, or learned
+features.
+An infrared point target typically occupies fewer than $9\times9$ pixels---frequently
+as few as $1\times1$---and presents as a near-isotropic intensity blob with no texture,
+no color, and no semantic structure.
+Its surrounding background clutter has a statistically similar intensity distribution,
+making GrabCut's Gaussian mixture model degenerate, CAM responses indistinguishable
+from noise, and pairwise affinity constraints unreliable.
+This failure is not merely empirical: the MICCAI 2022 medical segmentation
+study~\cite{boxseg_miccai2022} identifies the same mechanism when GrabCut is applied to
+low-contrast grayscale modalities, confirming that the breakdown is \emph{modality-driven},
+not dataset-specific.
+The closest IR-native approaches, LESPS~\cite{lesps} and HMG~\cite{hmg}, circumvent
+this limitation by replacing appearance-based cues with network-iterative pseudo-mask
+feedback, at the cost of multi-round training dependencies.
+Our work takes an orthogonal route: rather than improving the discriminability of
+learned features, we exploit the known \emph{radiometric physics} of infrared point
+sources---local SNR and the optical point-spread function---to derive pseudo-masks
+offline, in a single pass, with zero learnable parameters.
+
+
+% ===========================================================================
+\section{Methodology}\label{sec:method}
+% ===========================================================================
+
+\subsection{Problem Formulation}
+\label{sec:method_prob}
+
+Let $\mathbf{I} \in \mathbb{R}^{H \times W}$ denote a grayscale infrared image.
+We assume access to a set of $K$ bounding box annotations
+$\mathcal{B} = \{(x_k^1, y_k^1, x_k^2, y_k^2)\}_{k=1}^K$ obtained from an upstream
+detection system (e.g., a YOLO detector or radar cueing).
+Each box is a loose enclosure of a single infrared small target; no pixel-level mask
+or target centroid is available.
+Our goal is to generate a pixel-level pseudo-label map
+$\hat{\mathbf{Y}} \in [0,1]^{H \times W}$ that can directly supervise any IRSTD
+segmentation network $f_\theta$, without introducing learnable parameters or iterative
+training loops.
+
+The generation pipeline, illustrated in Fig.~\ref{fig:pipeline}, proceeds in two
+physically motivated stages: (1) B-SNR posterior estimation, which provides
+a per-pixel foreground probability within each box, and (2) PAG refinement, which
+further suppresses residual clutter by anchoring a Gaussian prior at the physical
+radiometric hotspot.
+Both stages rely exclusively on the local statistics of the input image and require
+no data-driven optimization.
+
+\subsection{Stage 1: B-SNR Posterior Mask}
+\label{sec:method_bsnr}
+
+\paragraph{Statistical background model.}
+Infrared background clutter at local scales is well-approximated by a Gaussian
+distribution~\cite{irstd_survey}.
+For a target box $b = (x^1, y^1, x^2, y^2)$, we define an expanded \emph{context box}
+$b_\mathrm{ctx}$ by enlarging $b$ by a factor of $\rho_\mathrm{ctx} = 1.5$ in each
+spatial dimension.
+The context region $\Omega_\mathrm{ctx} = b_\mathrm{ctx} \setminus b$ (annular region
+surrounding the target box) provides background pixels free from target contamination.
+We estimate the local background statistics as:
+\begin{equation}
+    \mu_\mathrm{ctx} = \frac{1}{|\Omega_\mathrm{ctx}|} \sum_{i \in \Omega_\mathrm{ctx}} I(i),
+    \qquad
+    \sigma_\mathrm{ctx}^2 = \frac{1}{|\Omega_\mathrm{ctx}|} \sum_{i \in \Omega_\mathrm{ctx}}
+    \bigl(I(i) - \mu_\mathrm{ctx}\bigr)^2.
+    \label{eq:bg_stats}
+\end{equation}
+
+\paragraph{Bayesian posterior derivation.}
+Under a binary hypothesis test, pixel $i$ inside box $b$ belongs either to the
+background class ($y=0$, modeled as $I(i) \sim \mathcal{N}(\mu_\mathrm{ctx},
+\sigma_\mathrm{ctx}^2)$) or to the target class ($y=1$, modeled as
+$I(i) \sim \mathcal{N}(\mu_\mathrm{ctx} + \Delta\mu, \sigma_\mathrm{ctx}^2)$ with
+$\Delta\mu > 0$).
+Applying Bayes' theorem with equal priors, the posterior probability of foreground is:
+\begin{align}
+    P(y{=}1 \mid I(i)) &= \sigma\!\left(\frac{\log P(I(i)|y{=}1) - \log P(I(i)|y{=}0)}{1}\right) \notag \\
+    &= \sigma\!\left(\frac{2\Delta\mu}{\sigma_\mathrm{ctx}^2}\cdot I(i)
+       - \frac{\Delta\mu\,(2\mu_\mathrm{ctx}+\Delta\mu)}{\sigma_\mathrm{ctx}^2}\right).
+    \label{eq:posterior_full}
+\end{align}
+Since $\Delta\mu$ is unknown a priori, we treat the coefficient as a single
+temperature parameter $\tau > 0$ and center the response at the estimated background
+mean, yielding the \textbf{B-SNR weight}:
+\begin{equation}
+    \boxed{W(i) = \sigma\!\left(\tau \cdot \frac{I(i) - \mu_\mathrm{ctx}}
+    {\sigma_\mathrm{ctx} + \varepsilon}\right)}, \quad i \in b,
+    \label{eq:bsnr_final}
+\end{equation}
+where $\varepsilon = 10^{-4}$ prevents division by zero.
+Outside box $b$, $W(i) = 0$.
+The SNR ratio $(I(i)-\mu_\mathrm{ctx})/\sigma_\mathrm{ctx}$ is the classical
+signal-to-clutter ratio (SCR) used in traditional IRSTD detectors~\cite{irstd_survey};
+our formulation gives it a Bayesian probabilistic interpretation.
+After computing $W$, we apply per-box min-max normalization to map the response to
+$[0, 1]$, ensuring that the peak foreground probability is always 1 regardless of
+absolute intensity.
+
+\subsection{Stage 2: Physics-Anchored Gaussian Refinement (PAG)}
+\label{sec:method_pag}
+
+\paragraph{Motivation.}
+The B-SNR mask recovers high-response pixels within the box but may retain residual
+clutter responses away from the target peak, particularly when background statistics
+are locally non-stationary.
+To further focus supervision on the true target locus, we exploit the \emph{point-spread
+function} (PSF) of infrared optical systems: the energy distribution of a distant
+point source follows a Gaussian-like profile whose spread is determined by optical
+diffraction and atmospheric turbulence.
+
+\paragraph{Physical hotspot localization.}
+Rather than using the \emph{geometric center} of the bounding box as the Gaussian
+anchor---which is biased by annotation error and does not reflect the true target
+location---we define the \textbf{physical hotspot} as:
+\begin{equation}
+    \mathbf{p}^* = \arg\max_{i \in b}\, \mathrm{SNR}(i),
+    \qquad
+    \mathrm{SNR}(i) = \frac{I(i) - \mu_\mathrm{ctx}}{\sigma_\mathrm{ctx} + \varepsilon}.
+    \label{eq:hotspot}
+\end{equation}
+Because the SNR is maximized precisely at the pixel of highest radiometric response,
+$\mathbf{p}^*$ is insensitive to box boundary perturbations as long as the target
+is enclosed---a key source of HALO's robustness to annotation noise, as confirmed
+in our perturbation experiments (Sec.~\ref{sec:exp_robustness}).
+
+\paragraph{Adaptive Gaussian bandwidth estimation.}
+We estimate the spatial spread of the target response using only the dominant energy
+peak, excluding secondary clutter spikes.
+Define the FWHM region as:
+\begin{equation}
+    \Omega_\mathrm{FWHM} = \bigl\{i \in b : \mathrm{SNR}(i) \geq
+    {\textstyle\frac{1}{2}}\,\mathrm{SNR}(\mathbf{p}^*)\bigr\}.
+    \label{eq:fwhm}
+\end{equation}
+Within $\Omega_\mathrm{FWHM}$, we compute the SNR-weighted mean-square distance to
+the hotspot as an estimate of the target's spatial covariance:
+\begin{equation}
+    \hat{\sigma}^2 = \gamma^2 \cdot
+    \frac{\sum_{i \in \Omega_\mathrm{FWHM}} \mathrm{SNR}^+(i)\,\|\mathbf{r}_i\|^2}
+         {\sum_{i \in \Omega_\mathrm{FWHM}} \mathrm{SNR}^+(i)},
+    \label{eq:pag_sigma}
+\end{equation}
+where $\mathrm{SNR}^+(i) = \max(\mathrm{SNR}(i), 0)$,
+$\mathbf{r}_i = \mathbf{p}_i - \mathbf{p}^*$ is the displacement from the hotspot,
+and $\gamma = 1.5$ is a conservative scale factor ensuring the Gaussian envelope
+covers the target boundary.
+A lower bound of $\hat{\sigma} \geq 1.0$ pixel prevents degenerate collapse on
+sub-pixel targets.
+
+\paragraph{PAG soft label.}
+The final PAG pseudo-label map is computed as the product of the B-SNR weight and
+the physics-anchored Gaussian:
+\begin{equation}
+    \boxed{P(i) = W(i) \cdot \exp\!\left(-\frac{\|\mathbf{r}_i\|^2}{2\hat{\sigma}^2}\right)},
+    \quad i \in b,
+    \label{eq:pag_final}
+\end{equation}
+and $P(i) = 0$ outside $b$.
+The B-SNR factor $W(i)$ provides background suppression from local statistics, while
+the Gaussian factor concentrates the pseudo-label near the physical hotspot.
+Their product yields a soft label that simultaneously respects both the statistical
+SNR evidence and the optical PSF geometry.
+When multiple targets are present, PAG is applied per box and the per-pixel maximum
+is taken across all targets.
+
+\subsection{Variance Corruption Bound}
+\label{sec:method_theory}
+
+We now analyze theoretically when and why the B-SNR estimation degrades.
+Consider a box $b$ of area $S$ enclosing a compact target of area $s$, so that the
+target-to-box area ratio is $\alpha = s/S$.
+Let background pixels have intensity distribution $\mathcal{N}(\mu_0, \sigma_0^2)$ and
+target pixels have mean $\mu_\mathrm{tgt} = \mu_0 + \Delta\mu$ with $\Delta\mu > 0$.
+
+In practice, the context statistics $\mu_\mathrm{ctx}$ and $\sigma_\mathrm{ctx}^2$ are
+estimated over the expanded context box $b_\mathrm{ctx}$, which contains a small
+fraction $\alpha'$ of target pixels.
+By the law of total variance applied to the mixture distribution in $b_\mathrm{ctx}$:
+
+\begin{proposition}[Variance Corruption Bound]
+\label{prop:vcb}
+If the target-to-context-box area ratio is $\alpha' \approx \alpha / \rho_\mathrm{ctx}^2$,
+the estimated context variance satisfies:
+\begin{equation}
+    \hat{\sigma}_\mathrm{ctx}^2 \approx \sigma_0^2
+    + \underbrace{\alpha'(1 - \alpha')\Delta\mu^2}_{\text{corruption term}}.
+    \label{eq:vcb}
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+The mixture variance of a two-component population with proportions $(1-\alpha', \alpha')$
+and means $(\mu_0, \mu_0 + \Delta\mu)$ (variance $\sigma_0^2$ each) equals:
+$\hat{\sigma}^2 = (1-\alpha')\sigma_0^2 + \alpha'\sigma_0^2
++ (1-\alpha')\alpha'^2\Delta\mu^2 + \alpha'(1-\alpha')^2\Delta\mu^2
+= \sigma_0^2 + \alpha'(1-\alpha')\Delta\mu^2$.
+\hfill$\square$
+\end{proof}
+
+\paragraph{Implications.}
+The corruption term $\alpha'(1-\alpha')\Delta\mu^2$ is negligible when $\alpha' \to 0$
+(target much smaller than context box, $\hat{\sigma}_\mathrm{ctx} \approx \sigma_0$,
+B-SNR accurate) or $\alpha' \to 1$ (box tightly surrounds target, rarely occurs).
+The maximum corruption occurs at $\alpha' = 0.5$.
+For the NUDT-SIRST dataset, targets frequently occupy sub-$3\times3$ pixels with
+high contrast ($\Delta\mu \gg \sigma_0$): even though $\alpha' \ll 1$, the term
+$\alpha'\Delta\mu^2$ can dominate $\sigma_0^2$, causing $\hat{\sigma}_\mathrm{ctx}$
+to be severely inflated and driving the B-SNR response of the target toward $0.5$
+rather than $1$.
+This analytically explains the performance gap between NUDT-SIRST and NUAA-SIRST
+observed in our experiments---the limitation is not a design flaw but a theoretically
+characterized failure mode inherent to any SNR-based method operating near the
+physical detectability limit.
+
+\subsection{Integration with IRSTD Networks}
+\label{sec:method_train}
+
+HALO is strictly a \emph{pseudo-label generator}; it introduces no changes to network
+architecture, training loss, or inference procedure.
+Given a training image $\mathbf{I}$ with box annotations $\mathcal{B}$, we pre-compute
+the PAG pseudo-label map $\hat{\mathbf{Y}}$ offline before training begins.
+The resulting soft mask is stored alongside the image and fed to the segmentation network
+in place of the ground-truth mask.
+
+\paragraph{Training objective.}
+We adopt the Soft-IoU loss~\cite{softiou}, which operates directly on continuous
+predictions and soft labels without requiring binarization:
+\begin{equation}
+    \mathcal{L}_\mathrm{SoftIoU}(f_\theta(\mathbf{I}),\,\hat{\mathbf{Y}})
+    = 1 - \frac{\sum_i f_\theta(\mathbf{I})_i \cdot \hat{Y}_i}
+               {\sum_i \bigl(f_\theta(\mathbf{I})_i + \hat{Y}_i
+               - f_\theta(\mathbf{I})_i \cdot \hat{Y}_i\bigr)},
+    \label{eq:softiou}
+\end{equation}
+where $f_\theta(\mathbf{I})_i \in [0,1]$ is the sigmoid-activated network output
+at pixel $i$.
+The soft label $\hat{Y}_i \in [0,1]$ encodes both the foreground/background decision
+and the confidence gradient, allowing the network to learn a smooth activation
+concentrated at the physical hotspot rather than a hard binary mask.
+
+\paragraph{Offline pre-generation.}
+Since HALO requires no information from the network (it is computed solely from $\mathbf{I}$
+and $\mathcal{B}$), pseudo-labels can be pre-generated once and cached as PNG files
+before training.
+This eliminates the per-iteration overhead of iterative methods such as LESPS and
+introduces zero additional GPU memory cost at training time.
+The entire pseudo-label dataset for all three benchmarks can be generated in under
+two minutes on a standard CPU.
+
+\paragraph{Model-agnostic plug-in.}
+Because HALO only replaces the mask annotation file, it is trivially compatible with
+any IRSTD network that accepts pixel-level supervision.
+We validate this property across three architecturally diverse backbones (DNANet,
+ACM, ALCNet) in Sec.~\ref{sec:exp_agnostic}, observing consistent and significant
+gains over the Box Fill baseline, which confirms that the performance improvement
+originates from the physics-anchored pseudo-label quality rather than any
+backbone-specific property.

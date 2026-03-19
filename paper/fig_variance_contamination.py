@@ -571,6 +571,33 @@ def demo_mode(out_path):
     plt.close()
 
 
+def load_curve_from_csv(csv_path):
+    """从 stats_*.csv 加载污染曲线 [(expand_ratio, contamination_ratio)]"""
+    curve = []
+    if not csv_path or not os.path.exists(csv_path):
+        return curve
+    with open(csv_path) as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                curve.append((float(row['expand_ratio']), float(row['contamination_ratio'])))
+            except (KeyError, ValueError):
+                pass
+    return curve
+
+
+def save_single_panel(draw_fn, draw_args, out_path, figsize=(5.5, 5.0)):
+    """将单个 draw_panel_* 函数输出为独立 PNG"""
+    fig, ax = plt.subplots(1, 1, figsize=figsize)
+    fig.patch.set_facecolor('white')
+    plt.subplots_adjust(left=0.13, right=0.95, top=0.90, bottom=0.14)
+    draw_fn(ax, *draw_args)
+    os.makedirs(os.path.dirname(out_path) or '.', exist_ok=True)
+    plt.savefig(out_path, dpi=300, bbox_inches='tight', facecolor='white')
+    print(f"Saved → {out_path}")
+    plt.close()
+
+
 def main_single(args):
     """单样本 / 真实数据模式"""
     # ── 加载 NUDT 样本（Panel A：污染严重）────────────────────────
@@ -581,7 +608,8 @@ def main_single(args):
         curve_nudt = compute_contamination_curve(img_nudt, mask_nudt, box_nudt)
         save_csv(img_nudt, mask_nudt, box_nudt, args.out_dir, 'NUDT', args.nudt)
     else:
-        img_nudt, mask_nudt, box_nudt, label_nudt, curve_nudt = None, None, None, 'NUDT', []
+        img_nudt, mask_nudt, box_nudt, label_nudt = None, None, None, 'NUDT'
+        curve_nudt = load_curve_from_csv(args.csv_nudt)
 
     # ── 加载 NUAA 样本（Panel B：安全平台）──────────────────────
     if args.nuaa:
@@ -591,30 +619,47 @@ def main_single(args):
         curve_nuaa = compute_contamination_curve(img_nuaa, mask_nuaa, box_nuaa)
         save_csv(img_nuaa, mask_nuaa, box_nuaa, args.out_dir, 'NUAA', args.nuaa)
     else:
-        img_nuaa, mask_nuaa, box_nuaa, label_nuaa, curve_nuaa = None, None, None, 'NUAA', []
+        img_nuaa, mask_nuaa, box_nuaa, label_nuaa = None, None, None, 'NUAA'
+        curve_nuaa = load_curve_from_csv(args.csv_nuaa)
 
-    # ── 绘图 ──────────────────────────────────────────────────────
-    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
-    fig.patch.set_facecolor('white')
-    plt.subplots_adjust(wspace=0.32, left=0.06, right=0.97, top=0.88, bottom=0.13)
+    out_dir = os.path.dirname(args.out) or '.'
+    base    = os.path.splitext(os.path.basename(args.out))[0]
+    ext     = os.path.splitext(args.out)[1] or '.png'
 
-    if img_nudt is not None:
-        draw_panel_a(axes[0], img_nudt, mask_nudt, box_nudt, label_nudt)
-    if img_nuaa is not None:
-        draw_panel_b(axes[1], img_nuaa, mask_nuaa, box_nuaa, label_nuaa)
-    draw_panel_c(axes[2], curve_nudt, curve_nuaa)
+    if args.split:
+        # ── 独立输出三个 Panel ──────────────────────────────────
+        if img_nudt is not None:
+            save_single_panel(draw_panel_a,
+                              (img_nudt, mask_nudt, box_nudt, label_nudt),
+                              os.path.join(out_dir, f'{base}_panel_a{ext}'))
+        if img_nuaa is not None:
+            save_single_panel(draw_panel_b,
+                              (img_nuaa, mask_nuaa, box_nuaa, label_nuaa),
+                              os.path.join(out_dir, f'{base}_panel_b{ext}'))
+        save_single_panel(draw_panel_c,
+                          (curve_nudt, curve_nuaa),
+                          os.path.join(out_dir, f'{base}_panel_c{ext}'))
+    else:
+        # ── 合并输出（默认）──────────────────────────────────────
+        fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+        fig.patch.set_facecolor('white')
+        plt.subplots_adjust(wspace=0.32, left=0.06, right=0.97, top=0.88, bottom=0.13)
 
-    fig.suptitle(
-        'Variance Contamination Theory: '
-        r'$\hat{\sigma}^2_{\mathrm{ctx}} \approx \sigma^2_0 + \alpha(1-\alpha)\Delta\mu^2$',
-        fontsize=12, fontweight='bold', y=0.995,
-    )
+        if img_nudt is not None:
+            draw_panel_a(axes[0], img_nudt, mask_nudt, box_nudt, label_nudt)
+        if img_nuaa is not None:
+            draw_panel_b(axes[1], img_nuaa, mask_nuaa, box_nuaa, label_nuaa)
+        draw_panel_c(axes[2], curve_nudt, curve_nuaa)
 
-    out_path = args.out
-    os.makedirs(os.path.dirname(out_path) or '.', exist_ok=True)
-    plt.savefig(out_path, dpi=200, bbox_inches='tight', facecolor='white')
-    print(f"Saved → {out_path}")
-    plt.close()
+        fig.suptitle(
+            'Variance Contamination Theory: '
+            r'$\hat{\sigma}^2_{\mathrm{ctx}} \approx \sigma^2_0 + \alpha(1-\alpha)\Delta\mu^2$',
+            fontsize=12, fontweight='bold', y=0.995,
+        )
+        os.makedirs(out_dir, exist_ok=True)
+        plt.savefig(args.out, dpi=200, bbox_inches='tight', facecolor='white')
+        print(f"Saved → {args.out}")
+        plt.close()
 
 
 if __name__ == '__main__':
@@ -627,6 +672,13 @@ if __name__ == '__main__':
     parser.add_argument('--nuaa',  default='')
     parser.add_argument('--nudt',  default='')
     parser.add_argument('--irstd', default='')
+    # 从已有 CSV 直接加载 Panel C 污染曲线（无需数据集）
+    parser.add_argument('--csv_nudt', default='', metavar='PATH',
+                        help='stats_NUDT_*.csv path for Panel C curve')
+    parser.add_argument('--csv_nuaa', default='', metavar='PATH',
+                        help='stats_NUAA_*.csv path for Panel C curve')
+    parser.add_argument('--split', action='store_true',
+                        help='Output each panel as a separate PNG (for manual assembly)')
     parser.add_argument('--demo',  action='store_true',
                         help='Generate demo figure with synthetic data (no dataset needed)')
     parser.add_argument('--batch', action='store_true')

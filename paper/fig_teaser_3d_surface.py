@@ -236,87 +236,123 @@ def make_synthetic_ir(size=64, target_pos=None, target_sigma=1.8,
 # 主绘图入口
 # ────────────────────────────────────────────────────────────────
 
-def make_figure(img_patch, box_in_patch, out_path, sample_label):
-    """
-    img_patch: float32 [0,1], shape (H, W) — IR patch（已裁剪到目标区域附近）
-    box_in_patch: (x1, y1, x2, y2) YOLO box 在 patch 坐标系中的坐标
-    """
+def _prepare_surfaces(img_patch, box_in_patch):
+    """计算三种标签曲面及相关元数据，供 make_figure / make_figure_split 共用"""
     H, W = img_patch.shape
-    box = box_in_patch
-
-    # ── 生成三种标签 ──────────────────────────────────────────────
+    box  = box_in_patch
     box_fill = make_box_fill(H, W, box)
     bsnr     = make_bsnr(img_patch, box, expand_ratio=1.5, tau=1.2)
     halo, px_star, py_star, sigma = make_halo_pag(H, W, box, bsnr)
-
-    # normalize bsnr to [0,1] for visualization
-    if bsnr.max() > 0:
-        bsnr_vis = bsnr / bsnr.max()
-    else:
-        bsnr_vis = bsnr
-
-    # ── 几何中心（仅用于对比标注）──────────────────────────────
+    bsnr_vis = bsnr / bsnr.max() if bsnr.max() > 0 else bsnr
     x1, y1, x2, y2 = box
     geo_cx = (x1 + x2) // 2
     geo_cy = (y1 + y2) // 2
+    return (box_fill, bsnr_vis, halo,
+            px_star, py_star, sigma,
+            geo_cx, geo_cy, box)
 
-    # ── 布局: 2 行 × 3 列 ────────────────────────────────────────
-    # 行 0: 3D 曲面  行 1: 2D 热图
+
+COL_SPECS = [
+    ('Box Fill\n(Representation Collapse)',    '#E53935', 'plasma',  False),
+    ('B-SNR  $W(i)$\n(Physical Anchor)',       '#FB8C00', 'inferno', True),
+    ('HALO PAG  $P(i)$\n(Gaussian Refinement)','#7B1FA2', 'magma',   True),
+]
+# (title, color, cmap, show_anchor)
+
+
+def make_figure(img_patch, box_in_patch, out_path, sample_label, split=False):
+    """
+    img_patch: float32 [0,1], shape (H, W)
+    split=True  → 输出 6 个独立 PNG（3×3D + 3×2D），文件名以 out_path 为前缀
+    split=False → 输出合并图（默认）
+    """
+    (box_fill, bsnr_vis, halo,
+     px_star, py_star, sigma,
+     geo_cx, geo_cy, box) = _prepare_surfaces(img_patch, box_in_patch)
+
+    x1, y1, x2, y2 = box
+    surfaces  = [box_fill, bsnr_vis, halo]
+    highlight = [None, (px_star, py_star), (px_star, py_star)]
+
+    out_dir  = os.path.dirname(out_path) or '.'
+    base     = os.path.splitext(os.path.basename(out_path))[0]
+    ext      = os.path.splitext(out_path)[1] or '.png'
+    os.makedirs(out_dir, exist_ok=True)
+
+    col_names = ['boxfill', 'bsnr', 'halo']
+
+    if split:
+        # ── 独立输出 6 个文件 ────────────────────────────────────
+        for col, (title, col_color, cmap, show_anchor) in enumerate(COL_SPECS):
+            Z   = surfaces[col]
+            hlp = highlight[col]
+
+            # 3D 曲面
+            fig3d = plt.figure(figsize=(5, 5))
+            fig3d.patch.set_facecolor('#0A0A0A')
+            ax3d = fig3d.add_subplot(111, projection='3d')
+            ax3d.set_facecolor('#0A0A0A')
+            wire_color = '#444444' if col < 2 else '#6A1B9A'
+            draw_3d_surface(ax3d, Z, title='', cmap=cmap, elev=28, azim=-50,
+                            highlight_pos=hlp, zlabel='Label Confidence',
+                            alpha_surf=0.92, color_wireframe=wire_color)
+            ax3d.set_title(title, fontsize=11, fontweight='bold', pad=6, color=col_color)
+            p3d = os.path.join(out_dir, f'{base}_{col_names[col]}_3d{ext}')
+            plt.savefig(p3d, dpi=300, bbox_inches='tight',
+                        facecolor='#0A0A0A', edgecolor='none')
+            print(f"Saved → {p3d}")
+            plt.close()
+
+            # 2D 热图
+            fig2d, ax2d = plt.subplots(figsize=(4, 4))
+            fig2d.patch.set_facecolor('#0A0A0A')
+            ax2d.set_facecolor('#0A0A0A')
+            draw_2d_heatmap(ax2d, Z, title='', cmap=cmap,
+                            highlight_pos=hlp, box=box if col == 0 else None)
+            p2d = os.path.join(out_dir, f'{base}_{col_names[col]}_2d{ext}')
+            plt.savefig(p2d, dpi=300, bbox_inches='tight',
+                        facecolor='#0A0A0A', edgecolor='none')
+            print(f"Saved → {p2d}")
+            plt.close()
+        return
+
+    # ── 合并图（默认）────────────────────────────────────────────
     fig = plt.figure(figsize=(15, 9))
-    fig.patch.set_facecolor('#0A0A0A')  # 深色背景 — 强调"红外"视觉
-
+    fig.patch.set_facecolor('#0A0A0A')
     gs = fig.add_gridspec(2, 3, hspace=0.06, wspace=0.04,
                           left=0.03, right=0.97, top=0.91, bottom=0.04,
                           height_ratios=[1.65, 1.0])
 
-    # ── 列标题颜色 ───────────────────────────────────────────────
-    col_titles = [
-        ('Box Fill\n(Representation Collapse)', '#E53935', 'plasma'),
-        ('B-SNR  $W(i)$\n(Physical Anchor Detected)', '#FB8C00', 'inferno'),
-        ('HALO PAG  $P(i)$\n(Gaussian Refinement)', '#7B1FA2', 'magma'),
-    ]
-    surfaces = [box_fill, bsnr_vis, halo]
-    highlight = [None, (px_star, py_star), (px_star, py_star)]
+    for col, (title, col_color, cmap, _) in enumerate(COL_SPECS):
+        Z   = surfaces[col]
+        hlp = highlight[col]
 
-    for col, (title, col_color, cmap) in enumerate(col_titles):
-        Z = surfaces[col]
-
-        # 3D subplot
         ax3d = fig.add_subplot(gs[0, col], projection='3d')
         ax3d.set_facecolor('#0A0A0A')
         wire_color = '#444444' if col < 2 else '#6A1B9A'
         draw_3d_surface(ax3d, Z, title='', cmap=cmap, elev=28, azim=-50,
-                        highlight_pos=highlight[col],
-                        zlabel='Label Confidence',
+                        highlight_pos=hlp, zlabel='Label Confidence',
                         alpha_surf=0.92, color_wireframe=wire_color)
         ax3d.set_title(title, fontsize=11, fontweight='bold', pad=6, color=col_color)
 
-        # 2D subplot
         ax2d = fig.add_subplot(gs[1, col])
         ax2d.set_facecolor('#0A0A0A')
         draw_2d_heatmap(ax2d, Z, title='', cmap=cmap,
-                        highlight_pos=highlight[col], box=box if col == 0 else None)
+                        highlight_pos=hlp, box=box if col == 0 else None)
 
-    # ── 框内标注（几何中心 vs 物理热点偏移）────────────────────
     offset = np.sqrt((px_star - geo_cx)**2 + (py_star - geo_cy)**2)
     diag   = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
     offset_ratio = offset / max(diag, 1)
-
     info_txt = (f"Box: {x2-x1}×{y2-y1} px  |  "
                 f"Physical anchor offset: {offset:.1f} px "
                 f"({offset_ratio*100:.0f}% of diag)  |  "
                 f"HALO σ = {sigma:.2f} px")
     fig.text(0.5, 0.005, info_txt, ha='center', va='bottom',
              fontsize=8.5, color='#AAAAAA', style='italic')
-
-    # ── 全图标题 ─────────────────────────────────────────────────
     fig.suptitle(
-        f'HALO: From Coarse Box to Physics-Anchored Gaussian Soft Label  '
-        f'— {sample_label}',
+        f'HALO: From Coarse Box to Physics-Anchored Gaussian Soft Label — {sample_label}',
         fontsize=12.5, fontweight='bold', color='white', y=0.975,
     )
-
-    # ── 图例：几何中心(白圆) vs 物理热点(红星) ──────────────────
     from matplotlib.lines import Line2D
     legend_elems = [
         Line2D([0], [0], marker='*', color='w', markerfacecolor='red',
@@ -328,7 +364,6 @@ def make_figure(img_patch, box_in_patch, out_path, sample_label):
     fig.legend(handles=legend_elems, loc='upper right', fontsize=9,
                framealpha=0.25, edgecolor='#555', labelcolor='white',
                bbox_to_anchor=(0.97, 0.96))
-
     plt.savefig(out_path, dpi=200, bbox_inches='tight',
                 facecolor='#0A0A0A', edgecolor='none')
     print(f"Saved → {out_path}")
@@ -339,23 +374,17 @@ def make_figure(img_patch, box_in_patch, out_path, sample_label):
 # 合成演示
 # ────────────────────────────────────────────────────────────────
 
-def demo_mode(out_path):
-    """
-    完全合成数据 — 两个场景演示:
-    (1) 目标偏离几何中心（展示物理热点 ≠ 几何中心）
-    (2) 暗目标（展示 B-SNR 仍能定位，BoxFill 失效）
-    """
+def demo_mode(out_path, split=False):
+    """合成数据演示：目标偏离框几何中心"""
     size = 64
-
-    # 场景: 目标在框内偏右上角
     target_px, target_py = 38, 22
-    box = (size//2 - 10, size//2 - 10, size//2 + 10, size//2 + 10)  # 框几何中心=(32,32)
-    # 目标在 (38,22)，明显偏离框中心
-
+    box = (size//2 - 10, size//2 - 10, size//2 + 10, size//2 + 10)
     img = make_synthetic_ir(size=size, target_pos=(target_px, target_py),
                             target_sigma=2.0, target_peak=0.75,
                             bg_mu=0.38, bg_noise=0.09, seed=13)
-    make_figure(img, box, out_path, sample_label='Synthetic Demo (target offset from box center)')
+    make_figure(img, box, out_path,
+                sample_label='Synthetic Demo (target offset from box center)',
+                split=split)
 
 
 # ────────────────────────────────────────────────────────────────
@@ -408,6 +437,8 @@ if __name__ == '__main__':
         ROOT, 'paper', 'figures', 'fig_teaser_3d.png'))
     parser.add_argument('--demo', action='store_true',
                         help='Use synthetic data (no dataset needed)')
+    parser.add_argument('--split', action='store_true',
+                        help='Output each panel as a separate PNG (for manual assembly)')
     parser.add_argument('--nudt', default='')
     parser.add_argument('--nuaa', default='')
     parser.add_argument('--crop_size', type=int, default=64)
@@ -416,10 +447,10 @@ if __name__ == '__main__':
     os.makedirs(os.path.dirname(args.out) or '.', exist_ok=True)
 
     if args.demo or (not args.nudt and not args.nuaa):
-        demo_mode(args.out)
+        demo_mode(args.out, split=args.split)
     elif args.nudt:
         img_p, box_p = load_and_crop('NUDT-SIRST', args.nudt, args.root, args.crop_size)
-        make_figure(img_p, box_p, args.out, f'NUDT  {args.nudt}')
+        make_figure(img_p, box_p, args.out, f'NUDT  {args.nudt}', split=args.split)
     elif args.nuaa:
         img_p, box_p = load_and_crop('NUAA-SIRST', args.nuaa, args.root, args.crop_size)
-        make_figure(img_p, box_p, args.out, f'NUAA  {args.nuaa}')
+        make_figure(img_p, box_p, args.out, f'NUAA  {args.nuaa}', split=args.split)
