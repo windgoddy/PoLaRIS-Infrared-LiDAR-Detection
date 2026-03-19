@@ -340,13 +340,15 @@ def draw_panel_c(ax, data_nudt, data_nuaa):
     ax.axvspan(min(EXPAND_RATIOS), 1.3,  alpha=0.12, color='#FF1744', label='_nolegend_')
     ax.axvspan(1.5, max(EXPAND_RATIOS), alpha=0.10, color='#00C853', label='_nolegend_')
 
-    # 临界线
+    # 临界线（标签用轴坐标系，不影响数据 Y 轴范围）
     ax.axvline(1.3, color='#FF1744', lw=1.0, ls='--', alpha=0.7)
     ax.axvline(1.5, color='#00C853', lw=1.0, ls='--', alpha=0.7)
-    ax.text(1.3 + 0.02, ax.get_ylim()[1] if ax.get_ylim()[1] > 1 else 3.0,
-            '$R_{\\mathrm{min}}=1.3$', fontsize=7.5, color='#BF360C', va='top')
-    ax.text(1.5 + 0.02, ax.get_ylim()[1] if ax.get_ylim()[1] > 1 else 3.0,
-            '$R^*=1.5$', fontsize=7.5, color='#1B5E20', va='top')
+    # 使用 ax.get_xaxis_transform() 让 x 是数据坐标、y 是轴比例坐标
+    trans = ax.get_xaxis_transform()
+    ax.text(1.3 + 0.02, 0.97, r'$R_{\min}=1.3$', fontsize=7.5, color='#BF360C',
+            va='top', transform=trans)
+    ax.text(1.5 + 0.02, 0.97, r'$R^*=1.5$', fontsize=7.5, color='#1B5E20',
+            va='top', transform=trans)
 
     def plot_curve(ax, ratio_list, contamination_data, color, label, marker):
         ratios = [r for r, _ in contamination_data]
@@ -369,13 +371,13 @@ def draw_panel_c(ax, data_nudt, data_nuaa):
         plot_curve(ax, EXPAND_RATIOS, data_nuaa, '#2E7D32',
                    'NUAA-SIRST (medium target)', '^')
 
-    # 注释 "Danger Zone" / "Safe Platform"
-    ylim = ax.get_ylim()
-    y_mid = (ylim[0] + ylim[1]) / 2
-    ax.text(1.18, y_mid, 'Danger\nZone', fontsize=8, color='#BF360C',
-            ha='center', va='center', fontweight='bold', alpha=0.8)
-    ax.text(2.0, y_mid, 'Safe Platform', fontsize=8, color='#1B5E20',
-            ha='center', va='center', fontweight='bold', alpha=0.8)
+    # "Danger Zone" / "Safe Platform" — 轴坐标系，居中放置
+    ax.text(0.12, 0.50, 'Danger\nZone', fontsize=8, color='#BF360C',
+            ha='center', va='center', fontweight='bold', alpha=0.8,
+            transform=ax.transAxes)
+    ax.text(0.65, 0.50, 'Safe Platform', fontsize=8, color='#1B5E20',
+            ha='center', va='center', fontweight='bold', alpha=0.8,
+            transform=ax.transAxes)
 
     ax.set_xlabel(r'expand\_ratio $R$', fontsize=10)
     ax.set_ylabel(r'$\hat{\sigma}^2_{\mathrm{ctx}} \;/\; \sigma^2_0$', fontsize=11)
@@ -556,13 +558,7 @@ def demo_mode(out_path):
     draw_panel_a(axes[0], img_nudt, mask_nudt, box_nudt, 'NUDT-SIRST (tiny, dark)')
     draw_panel_b(axes[1], img_nuaa, mask_nuaa, box_nuaa, 'NUAA-SIRST (medium, bright)')
 
-    # Panel C: 先绘图，再补注释（需要 ylim 已确定）
     draw_panel_c(axes[2], curve_nudt, curve_nuaa)
-    # 此时 ylim 已设，补 "Danger/Safe" 文字用真实 ylim
-    ylim = axes[2].get_ylim()
-    y_label = ylim[0] + (ylim[1] - ylim[0]) * 0.55
-    axes[2].texts[-2].set_y(y_label)
-    axes[2].texts[-1].set_y(y_label)
 
     fig.suptitle(
         'Variance Contamination Theory: '
