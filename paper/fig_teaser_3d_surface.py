@@ -145,13 +145,44 @@ def make_halo_pag(H, W, box, bsnr_map):
 # 3D 曲面绘制工具
 # ────────────────────────────────────────────────────────────────
 
+# ── 主题配置 ────────────────────────────────────────────────────
+THEME = {
+    'dark': dict(
+        bg='#0A0A0A', ax_bg='#0A0A0A',
+        pane_color='#0A0A0A', pane_edge='#333333',
+        grid_color='#444444', tick_color='white',
+        label_color='white', info_color='#AAAAAA',
+        suptitle_color='white', legend_lc='white',
+        legend_fc='#111111', legend_ec='#555555',
+        wire_colors=['#444444', '#444444', '#6A1B9A'],
+        highlight_color='red',
+    ),
+    'light': dict(
+        bg='white', ax_bg='white',
+        pane_color='#F0F0F0', pane_edge='#BBBBBB',
+        grid_color='#CCCCCC', tick_color='#222222',
+        label_color='#222222', info_color='#555555',
+        suptitle_color='#111111', legend_lc='black',
+        legend_fc='white', legend_ec='#AAAAAA',
+        wire_colors=['#BBBBBB', '#BBBBBB', '#9C27B0'],
+        highlight_color='#D32F2F',
+    ),
+}
+# light 模式下使用对比度更好的 colormap
+CMAP_LIGHT = ['viridis', 'hot', 'plasma']
+CMAP_DARK  = ['plasma',  'inferno', 'magma']
+
+
 def draw_3d_surface(ax, Z, title, cmap, elev=28, azim=-55,
                     highlight_pos=None, zlabel='Response',
-                    alpha_surf=0.88, color_wireframe=None):
+                    alpha_surf=0.88, color_wireframe=None,
+                    theme='dark'):
     """
     绘制 3D 曲面。Z: 2D numpy array [0, 1] 范围
-    highlight_pos: (px, py) 在曲面上标记物理热点红色星号
+    theme: 'dark' | 'light'
+    highlight_pos: (px, py) 在曲面上标记物理热点
     """
+    T = THEME[theme]
     H, W = Z.shape
     xx, yy = np.meshgrid(np.arange(W), np.arange(H))
 
@@ -166,25 +197,27 @@ def draw_3d_surface(ax, Z, title, cmap, elev=28, azim=-55,
         px, py = highlight_pos
         if 0 <= px < W and 0 <= py < H:
             z_val = float(Z[py, px])
-            ax.scatter([px], [py], [z_val + 0.06], color='red',
+            ax.scatter([px], [py], [z_val + 0.06], color=T['highlight_color'],
                        s=120, zorder=10, marker='*', depthshade=False)
-            ax.plot([px, px], [py, py], [0, z_val], color='red',
+            ax.plot([px, px], [py, py], [0, z_val], color=T['highlight_color'],
                     lw=0.8, ls='--', alpha=0.6)
 
-    ax.set_title(title, fontsize=10.5, fontweight='bold', pad=4)
-    ax.set_xlabel('x', fontsize=8, labelpad=2)
-    ax.set_ylabel('y', fontsize=8, labelpad=2)
-    ax.set_zlabel(zlabel, fontsize=8, labelpad=2)
+    ax.set_title(title, fontsize=10.5, fontweight='bold', pad=4,
+                 color=T['label_color'])
+    ax.set_xlabel('x', fontsize=8, labelpad=2, color=T['label_color'])
+    ax.set_ylabel('y', fontsize=8, labelpad=2, color=T['label_color'])
+    ax.set_zlabel(zlabel, fontsize=8, labelpad=2, color=T['label_color'])
     ax.set_zlim(0, 1.05)
     ax.view_init(elev=elev, azim=azim)
-    ax.tick_params(labelsize=6, pad=1)
-    ax.xaxis.pane.fill = False
-    ax.yaxis.pane.fill = False
-    ax.zaxis.pane.fill = False
-    ax.xaxis.pane.set_edgecolor('#CCCCCC')
-    ax.yaxis.pane.set_edgecolor('#CCCCCC')
-    ax.zaxis.pane.set_edgecolor('#CCCCCC')
-    ax.grid(True, lw=0.3, alpha=0.4)
+    ax.tick_params(labelsize=6, pad=1, colors=T['tick_color'])
+
+    # 面板颜色
+    for pane in (ax.xaxis.pane, ax.yaxis.pane, ax.zaxis.pane):
+        pane.fill = theme == 'light'
+        pane.set_facecolor(T['pane_color'])
+        pane.set_edgecolor(T['pane_edge'])
+
+    ax.grid(True, lw=0.3, alpha=0.5, color=T['grid_color'])
     return surf
 
 
@@ -260,11 +293,12 @@ COL_SPECS = [
 # (title, color, cmap, show_anchor)
 
 
-def make_figure(img_patch, box_in_patch, out_path, sample_label, split=False):
+def make_figure(img_patch, box_in_patch, out_path, sample_label,
+                split=False, theme='dark'):
     """
     img_patch: float32 [0,1], shape (H, W)
-    split=True  → 输出 6 个独立 PNG（3×3D + 3×2D），文件名以 out_path 为前缀
-    split=False → 输出合并图（默认）
+    split=True  → 输出 6 个独立 PNG
+    theme: 'dark' | 'light'
     """
     (box_fill, bsnr_vis, halo,
      px_star, py_star, sigma,
@@ -279,93 +313,100 @@ def make_figure(img_patch, box_in_patch, out_path, sample_label, split=False):
     ext      = os.path.splitext(out_path)[1] or '.png'
     os.makedirs(out_dir, exist_ok=True)
 
+    T         = THEME[theme]
     col_names = ['boxfill', 'bsnr', 'halo']
+    cmaps     = CMAP_LIGHT if theme == 'light' else CMAP_DARK
 
     if split:
         # ── 独立输出 6 个文件 ────────────────────────────────────
-        for col, (title, col_color, cmap, show_anchor) in enumerate(COL_SPECS):
-            Z   = surfaces[col]
-            hlp = highlight[col]
+        for col, (title, col_color, _, show_anchor) in enumerate(COL_SPECS):
+            Z    = surfaces[col]
+            hlp  = highlight[col]
+            cmap = cmaps[col]
 
             # 3D 曲面
             fig3d = plt.figure(figsize=(5, 5))
-            fig3d.patch.set_facecolor('#0A0A0A')
+            fig3d.patch.set_facecolor(T['bg'])
             ax3d = fig3d.add_subplot(111, projection='3d')
-            ax3d.set_facecolor('#0A0A0A')
-            wire_color = '#444444' if col < 2 else '#6A1B9A'
+            ax3d.set_facecolor(T['ax_bg'])
+            wire = T['wire_colors'][col]
             draw_3d_surface(ax3d, Z, title='', cmap=cmap, elev=28, azim=-50,
                             highlight_pos=hlp, zlabel='Label Confidence',
-                            alpha_surf=0.92, color_wireframe=wire_color)
-            ax3d.set_title(title, fontsize=11, fontweight='bold', pad=6, color=col_color)
+                            alpha_surf=0.92, color_wireframe=wire, theme=theme)
+            ax3d.set_title(title, fontsize=11, fontweight='bold', pad=6,
+                           color=col_color)
             p3d = os.path.join(out_dir, f'{base}_{col_names[col]}_3d{ext}')
             plt.savefig(p3d, dpi=300, bbox_inches='tight',
-                        facecolor='#0A0A0A', edgecolor='none')
+                        facecolor=T['bg'], edgecolor='none')
             print(f"Saved → {p3d}")
             plt.close()
 
             # 2D 热图
             fig2d, ax2d = plt.subplots(figsize=(4, 4))
-            fig2d.patch.set_facecolor('#0A0A0A')
-            ax2d.set_facecolor('#0A0A0A')
+            fig2d.patch.set_facecolor(T['bg'])
+            ax2d.set_facecolor(T['ax_bg'])
             draw_2d_heatmap(ax2d, Z, title='', cmap=cmap,
                             highlight_pos=hlp, box=box if col == 0 else None)
             p2d = os.path.join(out_dir, f'{base}_{col_names[col]}_2d{ext}')
             plt.savefig(p2d, dpi=300, bbox_inches='tight',
-                        facecolor='#0A0A0A', edgecolor='none')
+                        facecolor=T['bg'], edgecolor='none')
             print(f"Saved → {p2d}")
             plt.close()
         return
 
-    # ── 合并图（默认）────────────────────────────────────────────
+    # ── 合并图 ───────────────────────────────────────────────────
     fig = plt.figure(figsize=(15, 9))
-    fig.patch.set_facecolor('#0A0A0A')
+    fig.patch.set_facecolor(T['bg'])
     gs = fig.add_gridspec(2, 3, hspace=0.06, wspace=0.04,
                           left=0.03, right=0.97, top=0.91, bottom=0.04,
                           height_ratios=[1.65, 1.0])
 
-    for col, (title, col_color, cmap, _) in enumerate(COL_SPECS):
-        Z   = surfaces[col]
-        hlp = highlight[col]
+    for col, (title, col_color, _, _show) in enumerate(COL_SPECS):
+        Z    = surfaces[col]
+        hlp  = highlight[col]
+        cmap = cmaps[col]
 
         ax3d = fig.add_subplot(gs[0, col], projection='3d')
-        ax3d.set_facecolor('#0A0A0A')
-        wire_color = '#444444' if col < 2 else '#6A1B9A'
+        ax3d.set_facecolor(T['ax_bg'])
+        wire = T['wire_colors'][col]
         draw_3d_surface(ax3d, Z, title='', cmap=cmap, elev=28, azim=-50,
                         highlight_pos=hlp, zlabel='Label Confidence',
-                        alpha_surf=0.92, color_wireframe=wire_color)
-        ax3d.set_title(title, fontsize=11, fontweight='bold', pad=6, color=col_color)
+                        alpha_surf=0.92, color_wireframe=wire, theme=theme)
+        ax3d.set_title(title, fontsize=11, fontweight='bold', pad=6,
+                       color=col_color)
 
         ax2d = fig.add_subplot(gs[1, col])
-        ax2d.set_facecolor('#0A0A0A')
+        ax2d.set_facecolor(T['ax_bg'])
         draw_2d_heatmap(ax2d, Z, title='', cmap=cmap,
                         highlight_pos=hlp, box=box if col == 0 else None)
 
     offset = np.sqrt((px_star - geo_cx)**2 + (py_star - geo_cy)**2)
     diag   = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
-    offset_ratio = offset / max(diag, 1)
     info_txt = (f"Box: {x2-x1}×{y2-y1} px  |  "
                 f"Physical anchor offset: {offset:.1f} px "
-                f"({offset_ratio*100:.0f}% of diag)  |  "
+                f"({offset/max(diag,1)*100:.0f}% of diag)  |  "
                 f"HALO σ = {sigma:.2f} px")
     fig.text(0.5, 0.005, info_txt, ha='center', va='bottom',
-             fontsize=8.5, color='#AAAAAA', style='italic')
+             fontsize=8.5, color=T['info_color'], style='italic')
     fig.suptitle(
         f'HALO: From Coarse Box to Physics-Anchored Gaussian Soft Label — {sample_label}',
-        fontsize=12.5, fontweight='bold', color='white', y=0.975,
+        fontsize=12.5, fontweight='bold', color=T['suptitle_color'], y=0.975,
     )
     from matplotlib.lines import Line2D
+    lc = T['legend_lc']
     legend_elems = [
-        Line2D([0], [0], marker='*', color='w', markerfacecolor='red',
+        Line2D([0], [0], marker='*', color=lc, markerfacecolor=T['highlight_color'],
                markersize=11, label='Physical Anchor (argmax of B-SNR)', linestyle='None'),
-        Line2D([0], [0], marker='o', color='w', markerfacecolor='white',
+        Line2D([0], [0], marker='o', color=lc, markerfacecolor=lc,
                markersize=7, label='Geometric Center (box centroid)', linestyle='None',
                alpha=0.5),
     ]
     fig.legend(handles=legend_elems, loc='upper right', fontsize=9,
-               framealpha=0.25, edgecolor='#555', labelcolor='white',
+               framealpha=0.9, edgecolor=T['legend_ec'],
+               labelcolor=T['legend_lc'], facecolor=T['legend_fc'],
                bbox_to_anchor=(0.97, 0.96))
     plt.savefig(out_path, dpi=200, bbox_inches='tight',
-                facecolor='#0A0A0A', edgecolor='none')
+                facecolor=T['bg'], edgecolor='none')
     print(f"Saved → {out_path}")
     plt.close()
 
@@ -374,7 +415,7 @@ def make_figure(img_patch, box_in_patch, out_path, sample_label, split=False):
 # 合成演示
 # ────────────────────────────────────────────────────────────────
 
-def demo_mode(out_path, split=False):
+def demo_mode(out_path, split=False, theme='dark'):
     """合成数据演示：目标偏离框几何中心"""
     size = 64
     target_px, target_py = 38, 22
@@ -384,7 +425,7 @@ def demo_mode(out_path, split=False):
                             bg_mu=0.38, bg_noise=0.09, seed=13)
     make_figure(img, box, out_path,
                 sample_label='Synthetic Demo (target offset from box center)',
-                split=split)
+                split=split, theme=theme)
 
 
 # ────────────────────────────────────────────────────────────────
@@ -439,18 +480,23 @@ if __name__ == '__main__':
                         help='Use synthetic data (no dataset needed)')
     parser.add_argument('--split', action='store_true',
                         help='Output each panel as a separate PNG (for manual assembly)')
+    parser.add_argument('--light', action='store_true',
+                        help='Use white/light background instead of dark')
     parser.add_argument('--nudt', default='')
     parser.add_argument('--nuaa', default='')
     parser.add_argument('--crop_size', type=int, default=64)
     args = parser.parse_args()
 
+    theme = 'light' if args.light else 'dark'
     os.makedirs(os.path.dirname(args.out) or '.', exist_ok=True)
 
     if args.demo or (not args.nudt and not args.nuaa):
-        demo_mode(args.out, split=args.split)
+        demo_mode(args.out, split=args.split, theme=theme)
     elif args.nudt:
         img_p, box_p = load_and_crop('NUDT-SIRST', args.nudt, args.root, args.crop_size)
-        make_figure(img_p, box_p, args.out, f'NUDT  {args.nudt}', split=args.split)
+        make_figure(img_p, box_p, args.out, f'NUDT  {args.nudt}',
+                    split=args.split, theme=theme)
     elif args.nuaa:
         img_p, box_p = load_and_crop('NUAA-SIRST', args.nuaa, args.root, args.crop_size)
-        make_figure(img_p, box_p, args.out, f'NUAA  {args.nuaa}', split=args.split)
+        make_figure(img_p, box_p, args.out, f'NUAA  {args.nuaa}',
+                    split=args.split, theme=theme)

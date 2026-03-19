@@ -245,13 +245,11 @@ def draw_panel_a(ax, img_gray, mask, box, ds_label):
     if y_bg is not None:
         ax.plot(x_range, y_bg, color='#1565C0', lw=2.5, ls='--',
                 label=fr'True BG  ($\sigma_0={std0:.1f}$)', zorder=5)
-        ax.axvline(mu0, color='#1565C0', lw=1.0, ls=':', alpha=0.55)
 
     if y_ctx is not None:
         ax.plot(x_range, y_ctx, color='#C62828', lw=2.5,
                 label=fr'Ctx Ring (r={ratio})  $\sigma={stats["std_ctx"]:.1f}$', zorder=4)
         ax.fill_between(x_range, y_ctx, alpha=0.18, color='#C62828')
-        ax.axvline(stats['mu_ctx'], color='#C62828', lw=1.0, ls=':', alpha=0.55)
 
     # 标注污染项（LaTeX-style text）
     term_val = stats['contamination_term']
@@ -259,15 +257,6 @@ def draw_panel_a(ax, img_gray, mask, box, ds_label):
     dmu_v    = stats['delta_mu']
     var0     = stats['var_true']
     var_ctx  = stats['var_ctx']
-    ann = (rf"$\alpha={alpha_v:.3f}$"  "\n"
-           rf"$\Delta\mu={dmu_v:.1f}$"  "\n"
-           rf"$\alpha(1-\alpha)\Delta\mu^2={term_val:.1f}$"  "\n"
-           rf"$\hat{{\sigma}}^2_{{\mathrm{{ctx}}}}/\sigma^2_0={var_ctx/var0:.2f}\times$")
-    ax.text(0.97, 0.97, ann, transform=ax.transAxes,
-            fontsize=8.5, va='top', ha='right',
-            bbox=dict(boxstyle='round,pad=0.4', facecolor='#FFEBEE', alpha=0.88,
-                      edgecolor='#C62828', lw=0.8),
-            color='#B71C1C')
 
     ax.set_title(f'(a) Severe Contamination\n{ds_label}  $R={ratio}$',
                  fontsize=10.5, fontweight='bold', pad=6)
@@ -309,15 +298,6 @@ def draw_panel_b(ax, img_gray, mask, box, ds_label):
     term_val = stats['contamination_term']
     var0     = stats['var_true']
     var_ctx  = stats['var_ctx']
-    ann = (rf"$\alpha={stats['alpha']:.3f}$"  "\n"
-           rf"$\alpha(1-\alpha)\Delta\mu^2={term_val:.1f}$"  "\n"
-           rf"$\hat{{\sigma}}^2_{{\mathrm{{ctx}}}}/\sigma^2_0={var_ctx/var0:.2f}\times$"  "\n"
-           r"$\approx$ No significant bias")
-    ax.text(0.97, 0.97, ann, transform=ax.transAxes,
-            fontsize=8.5, va='top', ha='right',
-            bbox=dict(boxstyle='round,pad=0.4', facecolor='#E8F5E9', alpha=0.88,
-                      edgecolor='#2E7D32', lw=0.8),
-            color='#1B5E20')
 
     ax.set_title(f'(b) Safe Platform (Design Choice)\n{ds_label}  $R={ratio}$',
                  fontsize=10.5, fontweight='bold', pad=6)
@@ -340,15 +320,9 @@ def draw_panel_c(ax, data_nudt, data_nuaa):
     ax.axvspan(min(EXPAND_RATIOS), 1.3,  alpha=0.12, color='#FF1744', label='_nolegend_')
     ax.axvspan(1.5, max(EXPAND_RATIOS), alpha=0.10, color='#00C853', label='_nolegend_')
 
-    # 临界线（标签用轴坐标系，不影响数据 Y 轴范围）
+    # 临界线（无文字标注）
     ax.axvline(1.3, color='#FF1744', lw=1.0, ls='--', alpha=0.7)
     ax.axvline(1.5, color='#00C853', lw=1.0, ls='--', alpha=0.7)
-    # 使用 ax.get_xaxis_transform() 让 x 是数据坐标、y 是轴比例坐标
-    trans = ax.get_xaxis_transform()
-    ax.text(1.3 + 0.02, 0.97, r'$R_{\min}=1.3$', fontsize=7.5, color='#BF360C',
-            va='top', transform=trans)
-    ax.text(1.5 + 0.02, 0.97, r'$R^*=1.5$', fontsize=7.5, color='#1B5E20',
-            va='top', transform=trans)
 
     def plot_curve(ax, ratio_list, contamination_data, color, label, marker):
         ratios = [r for r, _ in contamination_data]
@@ -383,7 +357,6 @@ def draw_panel_c(ax, data_nudt, data_nuaa):
     ax.set_ylabel(r'$\hat{\sigma}^2_{\mathrm{ctx}} \;/\; \sigma^2_0$', fontsize=11)
     ax.set_title('(c) Contamination Factor vs. Expand Ratio', fontsize=10.5,
                  fontweight='bold', pad=6)
-    ax.legend(fontsize=8.5, framealpha=0.9, loc='upper right')
     ax.grid(True, ls='--', lw=0.5, alpha=0.45)
     for sp in ax.spines.values():
         sp.set_linewidth(0.8); sp.set_edgecolor('#888')
@@ -529,43 +502,50 @@ def batch_analysis(ds_name, root, n_samples, out_dir):
 # 合成演示模式（无数据集）
 # ────────────────────────────────────────────────────────────────
 
-def demo_mode(out_path):
+def demo_mode(out_path, split=False):
     """
     用合成数据生成 TIP 1×3 图，验证脚本逻辑正确性
     NUDT 场景: 极小目标 (6×6px), 极暗目标, 背景纹理丰富
     NUAA 场景: 中等目标 (20×20px), 较亮目标
     """
-    # ── NUDT-like ────────────────────────────────────────────────
-    # 挑战性: 目标比背景更暗 (暗目标), 背景高噪声
     img_nudt, mask_nudt, box_nudt = make_synthetic_sample(
         target_brightness=90, bg_mu=120, bg_sigma=22, img_size=256,
         box_size=6, seed=7)
-
-    # ── NUAA-like ────────────────────────────────────────────────
     img_nuaa, mask_nuaa, box_nuaa = make_synthetic_sample(
         target_brightness=220, bg_mu=110, bg_sigma=18, img_size=256,
         box_size=20, seed=42)
-
-    # 污染曲线数据
     curve_nudt = compute_contamination_curve(img_nudt, mask_nudt, box_nudt)
     curve_nuaa = compute_contamination_curve(img_nuaa, mask_nuaa, box_nuaa)
 
-    # ── 绘图 ──────────────────────────────────────────────────────
+    out_dir = os.path.dirname(out_path) or '.'
+    base    = os.path.splitext(os.path.basename(out_path))[0]
+    ext     = os.path.splitext(out_path)[1] or '.png'
+    os.makedirs(out_dir, exist_ok=True)
+
+    if split:
+        save_single_panel(draw_panel_a,
+                          (img_nudt, mask_nudt, box_nudt, 'NUDT-SIRST (tiny, dark)'),
+                          os.path.join(out_dir, f'{base}_panel_a{ext}'))
+        save_single_panel(draw_panel_b,
+                          (img_nuaa, mask_nuaa, box_nuaa, 'NUAA-SIRST (medium, bright)'),
+                          os.path.join(out_dir, f'{base}_panel_b{ext}'))
+        save_single_panel(draw_panel_c,
+                          (curve_nudt, curve_nuaa),
+                          os.path.join(out_dir, f'{base}_panel_c{ext}'))
+        return
+
+    # ── 合并图 ───────────────────────────────────────────────────
     fig, axes = plt.subplots(1, 3, figsize=(16, 5))
     fig.patch.set_facecolor('white')
     plt.subplots_adjust(wspace=0.32, left=0.06, right=0.97, top=0.88, bottom=0.13)
-
     draw_panel_a(axes[0], img_nudt, mask_nudt, box_nudt, 'NUDT-SIRST (tiny, dark)')
     draw_panel_b(axes[1], img_nuaa, mask_nuaa, box_nuaa, 'NUAA-SIRST (medium, bright)')
-
     draw_panel_c(axes[2], curve_nudt, curve_nuaa)
-
     fig.suptitle(
         'Variance Contamination Theory: '
         r'$\hat{\sigma}^2_{\mathrm{ctx}} \approx \sigma^2_0 + \alpha(1-\alpha)\Delta\mu^2$',
         fontsize=12, fontweight='bold', y=0.995,
     )
-    os.makedirs(os.path.dirname(out_path) or '.', exist_ok=True)
     plt.savefig(out_path, dpi=200, bbox_inches='tight', facecolor='white')
     print(f"Demo saved → {out_path}")
     plt.close()
@@ -687,7 +667,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.demo:
-        demo_mode(args.out)
+        demo_mode(args.out, split=args.split)
     elif args.batch:
         batch_analysis(args.dataset, args.root, args.n, args.out_dir)
     else:
