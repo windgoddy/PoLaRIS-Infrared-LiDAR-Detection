@@ -408,7 +408,6 @@ class PoLaRISTrainLoader(Dataset):
         else:
             # Fallback to zeros if not generated yet
             oracle_mask = Image.new('L', mask.size, 0)
-            print(f"Warning: Oracle mask not found for {img_id}, using zeros")
 
         # Load LiDAR point cloud
         lidar_points = self._load_lidar(lidar_path)
