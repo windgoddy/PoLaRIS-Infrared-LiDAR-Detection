@@ -78,7 +78,7 @@ DEFAULT_EXPAND_RATIO   = 1.5
 DEFAULT_SIGMA_RATIO    = 1.5
 
 # 扫描范围
-EXPAND_RATIO_VALUES  = [1.1, 1.3, 1.5, 2.0, 3.0]
+EXPAND_RATIO_VALUES  = [1.0, 1.1, 1.3, 1.5, 2.0, 3.0]
 # 1.274 ≈ 1/sqrt(0.616)，是 2D 高斯 FWHM 加权方差的精确物理校准值
 SIGMA_RATIO_VALUES   = [0.8, 1.0, 1.274, 1.5, 2.0, 2.5]
 
