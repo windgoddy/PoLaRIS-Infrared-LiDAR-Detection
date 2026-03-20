@@ -28,31 +28,10 @@ Figure: Variance Contamination Theory — TIP-Style 1×3 Empirical Validation
         --split
     # 同时在 paper/figures/variance_contamination/ 下生成
     #   stats_NUDT_000259.csv  和  stats_NUAA_Misc_87.csv
+# 唯一需要在论文 caption 里说清楚的一句话：
+# "curves represent median contamination factor with IQR shading across N images, 
+# computed independently per dataset"——避免审稿人质疑样本选择。
 
-  ── 服务器：用真实数据生成合并版（单张 1×3）────────────────────────────────
-    python paper/fig_variance_contamination.py \
-        --nudt 000259 --nuaa Misc_87 \
-        --out paper/figures/fig_variance_theory.png
-
-  ── 服务器：先生成 CSV，本地再绘图（适合图像不在本地的情况）─────────────────
-    # Step 1 在服务器：生成 CSV（会自动保存到 --out_dir）
-    python paper/fig_variance_contamination.py \
-        --nudt 000259 --nuaa Misc_87 \
-        --out paper/figures/fig_variance_theory.png
-    # Step 2 把 CSV 拷到本地后，本地绘图（Panel A/B 需要图像，Panel C 仅需 CSV）
-    python paper/fig_variance_contamination.py \
-        --csv_nudt paper/figures/variance_contamination/stats_NUDT_000259.csv \
-        --csv_nuaa paper/figures/variance_contamination/stats_NUAA_Misc_87.csv \
-        --out paper/figures/fig_variance_theory.png \
-        --split
-
-  ── 服务器：批量统计（输出平均污染曲线，供论文引用）────────────────────────
-    python paper/fig_variance_contamination.py \
-        --batch --dataset NUDT-SIRST --n 50 \
-        --out_dir paper/figures/variance_batch
-
-  ── 本地演示（合成数据，无需数据集，验证脚本逻辑）──────────────────────────
-    python paper/fig_variance_contamination.py --demo --split
 """
 
 import os
@@ -427,7 +406,7 @@ def draw_panel_b(ax, img_gray, mask, box, ds_label, ratio_design=1.5):  # noqa: 
         sp.set_linewidth(0.8); sp.set_edgecolor('#888')
 
 
-def draw_panel_c(ax, data_nudt, data_nuaa):
+def draw_panel_c(ax, data_nudt, data_nuaa, data_irstd=None):
     """
     Panel C: 污染曲线 — σ²_win/σ²_ring vs expand_ratio
 
@@ -473,6 +452,11 @@ def draw_panel_c(ax, data_nudt, data_nuaa):
         n_str = f', N={data_nuaa[0][4]}' if is_b else ''
         lbl   = f'NUAA-SIRST (medium target{n_str})' + (' median±IQR' if is_b else '')
         plot_curve(ax, data_nuaa, '#2E7D32', lbl, '^')
+    if data_irstd:
+        is_b = len(data_irstd[0]) == 5
+        n_str = f', N={data_irstd[0][4]}' if is_b else ''
+        lbl   = f'IRSTD-1k (mixed target{n_str})' + (' median±IQR' if is_b else '')
+        plot_curve(ax, data_irstd, '#E65100', lbl, 's')
 
     ax.text(0.12, 0.75, 'Danger\nZone', fontsize=8, color='#BF360C',
             ha='center', va='center', fontweight='bold', alpha=0.8,
@@ -749,7 +733,7 @@ def demo_mode(out_path, split=False):
                           (img_nudt, mask_nudt, box_nudt, panel_b_label, 3.0),
                           os.path.join(out_dir, f'{base}_panel_b{ext}'))
         save_single_panel(draw_panel_c,
-                          (curve_nudt, curve_nuaa),
+                          (curve_nudt, curve_nuaa, None),
                           os.path.join(out_dir, f'{base}_panel_c{ext}'))
         return
 
@@ -759,7 +743,7 @@ def demo_mode(out_path, split=False):
     plt.subplots_adjust(wspace=0.32, left=0.06, right=0.97, top=0.88, bottom=0.13)
     draw_panel_a(axes[0], img_nudt, mask_nudt, box_nudt, 'NUDT-SIRST (tiny target, R=1.1)')
     draw_panel_b(axes[1], img_nudt, mask_nudt, box_nudt, panel_b_label, ratio_design=3.0)
-    draw_panel_c(axes[2], curve_nudt, curve_nuaa)
+    draw_panel_c(axes[2], curve_nudt, curve_nuaa, None)
     fig.suptitle(
         'Variance Contamination Theory: '
         r'$\hat{\sigma}^2_{\mathrm{ctx}} \approx \sigma^2_0 + \alpha(1-\alpha)\Delta\mu^2$',
@@ -832,6 +816,10 @@ def main_single(args):
     else:
         curve_nuaa = load_curve_from_csv(args.csv_nuaa)
 
+    # IRSTD-1k 曲线（仅用于 Panel C，无需加载单张图）
+    curve_irstd = compute_batch_contamination_curve('IRSTD-1k', args.root, args.batch_n) \
+        if args.batch_n > 0 else []
+
     out_dir = os.path.dirname(args.out) or '.'
     base    = os.path.splitext(os.path.basename(args.out))[0]
     ext     = os.path.splitext(args.out)[1] or '.png'
@@ -856,7 +844,7 @@ def main_single(args):
                                panel_ab_lbl, 3.0),
                               os.path.join(out_dir, f'{base}_panel_b{ext}'))
         save_single_panel(draw_panel_c,
-                          (curve_nudt, curve_nuaa),
+                          (curve_nudt, curve_nuaa, curve_irstd),
                           os.path.join(out_dir, f'{base}_panel_c{ext}'))
     else:
         # ── 合并输出（默认）──────────────────────────────────────
@@ -868,7 +856,7 @@ def main_single(args):
             draw_panel_a(axes[0], panel_ab_img, panel_ab_mask, panel_ab_box, panel_ab_lbl)
             draw_panel_b(axes[1], panel_ab_img, panel_ab_mask, panel_ab_box,
                          panel_ab_lbl, ratio_design=3.0)
-        draw_panel_c(axes[2], curve_nudt, curve_nuaa)
+        draw_panel_c(axes[2], curve_nudt, curve_nuaa, curve_irstd)
 
         fig.suptitle(
             'Variance Contamination Theory: '
