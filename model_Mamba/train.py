@@ -279,6 +279,7 @@ def parse_args():
     if args.save_dir:
         # Use pre-created directory (from auto_train_gpu.sh)
         save_dir = args.save_dir
+        os.makedirs(save_dir, exist_ok=True)
         dt_string = os.path.basename(save_dir).split('_')[-1]  # Extract timestamp from dir name
         print(f"✅ Using pre-created experiment directory: {save_dir}")
     else:
