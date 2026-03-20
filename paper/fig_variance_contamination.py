@@ -5,7 +5,7 @@ Figure: Variance Contamination Theory — TIP-Style 1×3 Empirical Validation
 排版: 1 行 × 3 列
 
   Panel A (左) ── 极小目标重度污染区 (NUDT, expand_ratio=1.1)
-    Context Ring PDF (红) 严重右移/展宽 vs True BG (蓝虚线)
+    Ctx Window PDF (红, 含目标像素) 严重右移/展宽 vs True BG (蓝虚线)
     图内标注: α·(1-α)·Δμ² = XXX  (LaTeX)
 
   Panel B (中) ── 中等目标安全平台区 (NUAA, expand_ratio=1.5)
@@ -23,7 +23,7 @@ Figure: Variance Contamination Theory — TIP-Style 1×3 Empirical Validation
 
   ── 【推荐】服务器：用真实数据生成 panel_a/b/c 三张独立图 ──────────────────
     python paper/fig_variance_contamination.py \
-        --nudt 000259 --nuaa Misc_87 \
+        --nudt 000259 --nudt 000259 \
         --out paper/figures/fig_variance_theory.png \
         --split
     # 同时在 paper/figures/variance_contamination/ 下生成
@@ -288,134 +288,140 @@ def _kde_line(pixels, x_range):
         return None
 
 
-def draw_panel_a(ax, img_gray, mask, box, ds_label):
+def _extract_ring_and_window(img_gray, box, expand_ratio):
     """
-    Panel A: 极小目标，紧 expand_ratio=1.1 → 目标亮斑混入 ctx window，方差严重污染。
+    返回 (ring_pixels, window_pixels, alpha, mu_ring, delta_mu)
+    ─ ring_pixels:   ctx box 内排除 box interior 的像素（局部纯背景估计，不依赖 GT mask）
+    ─ window_pixels: ctx box 内全部像素，含 box interior（含目标，被污染）
+    ─ alpha:         box_area / ctx_window_area（混入比例）
+    ─ mu_ring:       ring 均值
+    ─ delta_mu:      box interior 均值 - ring 均值（正=亮目标，负=暗目标）
+    """
+    H, W = img_gray.shape
+    x1, y1, x2, y2 = box
+    cx1, cy1, cx2, cy2 = get_context_box(box, expand_ratio, H, W)
 
-    正确展示逻辑（与 HALO 理论一致）：
-    ─ 蓝色虚线：True BG（远离目标的纯背景，排除 GT mask，代表 σ²₀）
-    ─ 红色实线：ctx_window (R=1.1，含目标像素，不排除！)
-      → 目标亮斑混入，分布右偏 / 展宽，直观体现"方差污染"
+    ctx_mask   = np.zeros((H, W), dtype=bool)
+    inner_mask = np.zeros((H, W), dtype=bool)
+    ctx_mask[cy1:cy2, cx1:cx2]   = True
+    inner_mask[y1:y2,  x1:x2]    = True
+    ring_mask   = ctx_mask & ~inner_mask
 
-    理论预测：σ²_ctx ≈ σ²₀ + α(1-α)Δμ²
+    ring_pixels   = img_gray[ring_mask].astype(np.float32)
+    window_pixels = img_gray[ctx_mask].astype(np.float32)
+
+    box_area   = int(inner_mask.sum())
+    n_window   = max(1, int(ctx_mask.sum()))
+    alpha      = box_area / n_window
+
+    mu_ring    = float(np.mean(ring_pixels))   if len(ring_pixels)   > 0 else 128.0
+    box_pixels = img_gray[inner_mask].astype(np.float32)
+    mu_box     = float(np.mean(box_pixels))    if len(box_pixels)    > 0 else mu_ring
+    delta_mu   = mu_box - mu_ring
+
+    return ring_pixels, window_pixels, alpha, mu_ring, delta_mu
+
+
+def draw_panel_a(ax, img_gray, mask, box, ds_label):  # noqa: mask kept for API compat
+    """
+    Panel A: 极小目标，紧 expand_ratio=1.1 → box内像素混入 ctx window，方差被污染。
+
+    比较对象：同一局部区域 (R=1.1) 的两种采样方式：
+    ─ 蓝色虚线：Ctx Ring (R=1.1，排除 box interior) — 局部纯背景，代表 σ²₀
+    ─ 红色实线：Ctx Window (R=1.1，含 box interior) — 被目标污染的估计
+      → σ²_win = σ²_ring + α(1-α)Δμ²，始终 ≥ σ²_ring（无论亮/暗目标）
+
+    此设计消除了全图异质性问题：两者来自同一局部 patch，差异纯粹来自 box 内目标混入。
     """
     ratio_small = 1.1
+    ring_px, win_px, alpha, mu_ring, delta_mu = _extract_ring_and_window(
+        img_gray, box, ratio_small)
 
-    # ── 纯背景基准（排除 GT 目标）───────────────────────────────
-    true_bg = extract_true_bg(img_gray, mask, box, bg_margin=40)
-    mu0  = float(np.mean(true_bg)) if len(true_bg) > 0 else 128.0
-    std0 = float(np.std(true_bg))  if len(true_bg) > 0 else 1.0
-
-    # ── Ctx Window (R=1.1，含目标像素）──────────────────────────
-    ctx_w, alpha, _ = extract_ctx_window(img_gray, box, ratio_small, exclude_mask=None)
-    std_w = float(np.std(ctx_w)) if len(ctx_w) > 5 else 0.0
-
-    # ── 理论污染项 ───────────────────────────────────────────────
-    if mask is not None and np.any(mask[box[1]:box[3], box[0]:box[2]] > 127):
-        target_px = img_gray[box[1]:box[3], box[0]:box[2]][
-            mask[box[1]:box[3], box[0]:box[2]] > 127].astype(np.float32)
-        mu_tgt = float(np.mean(target_px))
-    else:
-        mu_tgt = float(np.mean(img_gray[box[1]:box[3], box[0]:box[2]]))
-    delta_mu = mu_tgt - mu0
+    std_ring = float(np.std(ring_px)) if len(ring_px) > 5 else 1.0
+    std_win  = float(np.std(win_px))  if len(win_px)  > 5 else 1.0
     ct = alpha * (1.0 - alpha) * delta_mu ** 2
 
-    # ── KDE 绘制 ─────────────────────────────────────────────────
-    lo = max(0,   min(mu0, float(np.mean(ctx_w))) - 5.0 * max(std0, std_w, 1.0))
-    hi = min(255, max(mu0, float(np.mean(ctx_w))) + 5.0 * max(std0, std_w, 1.0))
+    lo = max(0,   min(mu_ring, float(np.mean(win_px))) - 5.0 * max(std_ring, std_win, 1.0))
+    hi = min(255, max(mu_ring, float(np.mean(win_px))) + 5.0 * max(std_ring, std_win, 1.0))
     x_range = np.linspace(lo, hi, 600)
 
-    y_bg  = _kde_line(true_bg, x_range)
-    y_ctx = _kde_line(ctx_w,   x_range)
+    y_ring = _kde_line(ring_px, x_range)
+    y_win  = _kde_line(win_px,  x_range)
 
-    if y_bg is not None:
-        ax.plot(x_range, y_bg, color='#1565C0', lw=2.5, ls='--',
-                label=fr'True BG  $\sigma_0={std0:.1f}$', zorder=5)
-        ax.fill_between(x_range, y_bg, alpha=0.10, color='#1565C0')
+    if y_ring is not None:
+        ax.plot(x_range, y_ring, color='#1565C0', lw=2.5, ls='--', zorder=5)
+        ax.fill_between(x_range, y_ring, alpha=0.10, color='#1565C0')
 
-    if y_ctx is not None:
-        ax.plot(x_range, y_ctx, color='#C62828', lw=2.5,
-                label=fr'Ctx Window (R={ratio_small})  $\sigma={std_w:.1f}$', zorder=4)
-        ax.fill_between(x_range, y_ctx, alpha=0.18, color='#C62828')
+    if y_win is not None:
+        ax.plot(x_range, y_win, color='#C62828', lw=2.5, zorder=4)
+        ax.fill_between(x_range, y_win, alpha=0.18, color='#C62828')
 
-    # 污染项标注
-    ax.text(0.97, 0.95,
-            r'$\alpha(1-\alpha)\Delta\mu^2$' + f' = {ct:.1f}',
-            fontsize=8, color='#C62828', ha='right', va='top',
-            transform=ax.transAxes)
-    ax.text(0.97, 0.82,
-            fr'$\alpha = {alpha:.3f}$',
-            fontsize=8, color='#555555', ha='right', va='top',
-            transform=ax.transAxes)
+    # 右上角文字标注（替代图例，避免遮挡峰值）
+    # ax.text(0.97, 0.97, fr'Ctx Ring  $\sigma_0={std_ring:.1f}$',
+    #         fontsize=8, color='#1565C0', ha='right', va='top', transform=ax.transAxes)
+    # ax.text(0.97, 0.88, fr'Ctx Window  $\sigma={std_win:.1f}$',
+    #         fontsize=8, color='#C62828', ha='right', va='top', transform=ax.transAxes)
+    # ax.text(0.97, 0.76,
+    #         r'$\alpha(1-\alpha)\Delta\mu^2$' + f' = {ct:.1f}',
+    #         fontsize=8, color='#C62828', ha='right', va='top', transform=ax.transAxes)
+    # ax.text(0.97, 0.67, fr'$\alpha = {alpha:.3f}$',
+    #         fontsize=8, color='#555555', ha='right', va='top', transform=ax.transAxes)
 
     ax.set_title(f'(a) Severe Contamination\n{ds_label}  $R={ratio_small}$',
                  fontsize=10.5, fontweight='bold', pad=6)
     ax.set_xlabel('Pixel Intensity', fontsize=10)
     ax.set_ylabel('Probability Density', fontsize=10)
-    ax.legend(fontsize=8.5, framealpha=0.9, loc='upper left')
     ax.grid(True, ls='--', lw=0.5, alpha=0.45)
     for sp in ax.spines.values():
         sp.set_linewidth(0.8); sp.set_edgecolor('#888')
 
 
-def draw_panel_b(ax, img_gray, mask, box, ds_label, ratio_design=1.5):
+def draw_panel_b(ax, img_gray, mask, box, ds_label, ratio_design=1.5):  # noqa: mask kept for API compat
     """
-    Panel B: 充分扩展 ctx (默认 R=1.5，演示用 R=3.0) → α 小，分布贴近真实背景（安全平台）。
+    Panel B: 充分扩展 ctx (默认 R=1.5，演示用 R=3.0) → α 小，window 与 ring 高度重叠（安全平台）。
 
-    ─ 蓝色虚线：True BG（排除 GT mask，代表 σ²₀）
-    ─ 绿色实线：ctx_window (ratio_design，含目标像素)
-      → 目标像素被 ring 充分稀释，分布与 True BG 高度重叠
+    ─ 蓝色虚线：Ctx Ring (ratio_design，排除 box) — 局部纯背景基准
+    ─ 绿色实线：Ctx Window (ratio_design，含 box) — 污染已被充分稀释
 
-    对比 Panel A（同一目标，更小 R） → 直观展示 α 降低使污染缓解
+    对比 Panel A（同一目标，更小 R）→ Ring 与 Window 的差距缩小，说明污染缓解
     """
+    ring_px, win_px, alpha, mu_ring, delta_mu = _extract_ring_and_window(
+        img_gray, box, ratio_design)
 
-    true_bg = extract_true_bg(img_gray, mask, box, bg_margin=40)
-    mu0  = float(np.mean(true_bg)) if len(true_bg) > 0 else 128.0
-    std0 = float(np.std(true_bg))  if len(true_bg) > 0 else 1.0
-
-    ctx_w, alpha, _ = extract_ctx_window(img_gray, box, ratio_design, exclude_mask=None)
-    std_w = float(np.std(ctx_w)) if len(ctx_w) > 5 else 0.0
-
-    if mask is not None and np.any(mask[box[1]:box[3], box[0]:box[2]] > 127):
-        target_px = img_gray[box[1]:box[3], box[0]:box[2]][
-            mask[box[1]:box[3], box[0]:box[2]] > 127].astype(np.float32)
-        mu_tgt = float(np.mean(target_px))
-    else:
-        mu_tgt = float(np.mean(img_gray[box[1]:box[3], box[0]:box[2]]))
-    delta_mu = mu_tgt - mu0
+    std_ring = float(np.std(ring_px)) if len(ring_px) > 5 else 1.0
+    std_win  = float(np.std(win_px))  if len(win_px)  > 5 else 1.0
     ct = alpha * (1.0 - alpha) * delta_mu ** 2
 
-    lo = max(0,   min(mu0, float(np.mean(ctx_w))) - 5.0 * max(std0, std_w, 1.0))
-    hi = min(255, max(mu0, float(np.mean(ctx_w))) + 5.0 * max(std0, std_w, 1.0))
+    lo = max(0,   min(mu_ring, float(np.mean(win_px))) - 5.0 * max(std_ring, std_win, 1.0))
+    hi = min(255, max(mu_ring, float(np.mean(win_px))) + 5.0 * max(std_ring, std_win, 1.0))
     x_range = np.linspace(lo, hi, 600)
 
-    y_bg  = _kde_line(true_bg, x_range)
-    y_ctx = _kde_line(ctx_w,   x_range)
+    y_ring = _kde_line(ring_px, x_range)
+    y_win  = _kde_line(win_px,  x_range)
 
-    if y_bg is not None:
-        ax.plot(x_range, y_bg, color='#1565C0', lw=2.5, ls='--',
-                label=fr'True BG  $\sigma_0={std0:.1f}$', zorder=5)
-        ax.fill_between(x_range, y_bg, alpha=0.10, color='#1565C0')
+    if y_ring is not None:
+        ax.plot(x_range, y_ring, color='#1565C0', lw=2.5, ls='--', zorder=5)
+        ax.fill_between(x_range, y_ring, alpha=0.10, color='#1565C0')
 
-    if y_ctx is not None:
-        ax.plot(x_range, y_ctx, color='#2E7D32', lw=2.5,
-                label=fr'Ctx Window (R={ratio_design})  $\sigma={std_w:.1f}$', zorder=4)
-        ax.fill_between(x_range, y_ctx, alpha=0.18, color='#2E7D32')
+    if y_win is not None:
+        ax.plot(x_range, y_win, color='#2E7D32', lw=2.5, zorder=4)
+        ax.fill_between(x_range, y_win, alpha=0.18, color='#2E7D32')
 
-    ax.text(0.97, 0.95,
-            r'$\alpha(1-\alpha)\Delta\mu^2$' + f' = {ct:.1f}',
-            fontsize=8, color='#2E7D32', ha='right', va='top',
-            transform=ax.transAxes)
-    ax.text(0.97, 0.82,
-            fr'$\alpha = {alpha:.3f}$',
-            fontsize=8, color='#555555', ha='right', va='top',
-            transform=ax.transAxes)
+    # 右上角文字标注（替代图例）
+    # ax.text(0.97, 0.97, fr'Ctx Ring  $\sigma_0={std_ring:.1f}$',
+    #         fontsize=8, color='#1565C0', ha='right', va='top', transform=ax.transAxes)
+    # ax.text(0.97, 0.88, fr'Ctx Window  $\sigma={std_win:.1f}$',
+    #         fontsize=8, color='#2E7D32', ha='right', va='top', transform=ax.transAxes)
+    # ax.text(0.97, 0.76,
+    #         r'$\alpha(1-\alpha)\Delta\mu^2$' + f' = {ct:.1f}',
+    #         fontsize=8, color='#2E7D32', ha='right', va='top', transform=ax.transAxes)
+    # ax.text(0.97, 0.67, fr'$\alpha = {alpha:.3f}$',
+    #         fontsize=8, color='#555555', ha='right', va='top', transform=ax.transAxes)
 
     ax.set_title(f'(b) Mitigated: Larger Context\n{ds_label}  $R={ratio_design}$',
                  fontsize=10.5, fontweight='bold', pad=6)
     ax.set_xlabel('Pixel Intensity', fontsize=10)
     ax.set_ylabel('Probability Density', fontsize=10)
-    ax.legend(fontsize=8.5, framealpha=0.9, loc='upper left')
     ax.grid(True, ls='--', lw=0.5, alpha=0.45)
     for sp in ax.spines.values():
         sp.set_linewidth(0.8); sp.set_edgecolor('#888')
@@ -423,11 +429,11 @@ def draw_panel_b(ax, img_gray, mask, box, ds_label, ratio_design=1.5):
 
 def draw_panel_c(ax, data_nudt, data_nuaa):
     """
-    Panel C: 污染曲线 — σ²(ctx_win with target) / σ²₀ vs expand_ratio
-    Y 轴基准 σ²₀ = 真实背景方差（全图背景，排除目标）
+    Panel C: 污染曲线 — σ²_win/σ²_ring vs expand_ratio
 
-    正确方向：R 越小 → α 越大 → 曲线 > 1（危险区）
-              R 越大 → α 越小 → 曲线 → 1（安全区）
+    data 格式支持两种：
+      单样本：[(ratio, val), ...]
+      批量：  [(ratio, mean, std, n), ...]  — 画均值线 + ±1std 阴影置信区间
     """
     ax.axvspan(min(EXPAND_RATIOS), 1.3,  alpha=0.12, color='#FF1744', label='_nolegend_')
     ax.axvspan(1.5, max(EXPAND_RATIOS), alpha=0.10, color='#00C853', label='_nolegend_')
@@ -435,34 +441,48 @@ def draw_panel_c(ax, data_nudt, data_nuaa):
     ax.axvline(1.3, color='#FF1744', lw=1.0, ls='--', alpha=0.7)
     ax.axvline(1.5, color='#00C853', lw=1.0, ls='--', alpha=0.7)
 
-    def plot_curve(ax_, contamination_data, color, label, marker):
-        ratios = [r for r, _ in contamination_data]
-        vals   = [v for _, v in contamination_data]
-        ax_.plot(ratios, vals, marker=marker, color=color, lw=2.2,
+    def plot_curve(ax_, data, color, label, marker):
+        is_batch = len(data[0]) == 5   # (ratio, median, q25, q75, n)
+        ratios  = [d[0] for d in data]
+        medians = [d[1] for d in data]
+        ax_.plot(ratios, medians, marker=marker, color=color, lw=2.2,
                  markersize=7, label=label, zorder=4)
-        for r, v in zip(ratios, vals):
-            ax_.annotate(f'{v:.2f}', xy=(r, v), xytext=(0, 5),
-                         textcoords='offset points', ha='center',
-                         fontsize=7, color=color)
+        if is_batch:
+            q25s = [d[2] for d in data]
+            q75s = [d[3] for d in data]
+            ax_.fill_between(ratios, q25s, q75s,
+                             alpha=0.20, color=color, zorder=3,
+                             label='_nolegend_')
+        else:
+            for r, v in zip(ratios, medians):
+                ax_.annotate(f'{v:.2f}', xy=(r, v), xytext=(0, 5),
+                             textcoords='offset points', ha='center',
+                             fontsize=7, color=color)
 
     # 基准线 = 1
     ax.axhline(1.0, color='#37474F', lw=1.5, ls='-', alpha=0.7,
-               label=r'Baseline  $\sigma^2_0$', zorder=3)
+               label=r'Baseline  $\sigma^2_{\mathrm{ring}}$', zorder=3)
 
     if data_nudt:
-        plot_curve(ax, data_nudt, '#C62828', 'NUDT-SIRST (tiny target)', 'o')
+        is_b = len(data_nudt[0]) == 5
+        n_str = f', N={data_nudt[0][4]}' if is_b else ''
+        lbl   = f'NUDT-SIRST (tiny target{n_str})' + (' median±IQR' if is_b else '')
+        plot_curve(ax, data_nudt, '#C62828', lbl, 'o')
     if data_nuaa:
-        plot_curve(ax, data_nuaa, '#2E7D32', 'NUAA-SIRST (medium target)', '^')
+        is_b = len(data_nuaa[0]) == 5
+        n_str = f', N={data_nuaa[0][4]}' if is_b else ''
+        lbl   = f'NUAA-SIRST (medium target{n_str})' + (' median±IQR' if is_b else '')
+        plot_curve(ax, data_nuaa, '#2E7D32', lbl, '^')
 
     ax.text(0.12, 0.75, 'Danger\nZone', fontsize=8, color='#BF360C',
             ha='center', va='center', fontweight='bold', alpha=0.8,
             transform=ax.transAxes)
-    ax.text(0.72, 0.25, 'Safe\nPlatform', fontsize=8, color='#1B5E20',
+    ax.text(0.72, 0.25, 'Design\nRegion', fontsize=8, color='#1B5E20',
             ha='center', va='center', fontweight='bold', alpha=0.8,
             transform=ax.transAxes)
 
     ax.set_xlabel(r'expand\_ratio $R$', fontsize=10)
-    ax.set_ylabel(r'$\hat{\sigma}^2_{\mathrm{ctx}} \;/\; \sigma^2_0$', fontsize=11)
+    ax.set_ylabel(r'$\sigma^2_{\mathrm{win}} \;/\; \sigma^2_{\mathrm{ring}}$', fontsize=11)
     ax.set_title('(c) Contamination Factor vs. Expand Ratio', fontsize=10.5,
                  fontweight='bold', pad=6)
     ax.legend(fontsize=8, framealpha=0.9, loc='upper right')
@@ -488,26 +508,83 @@ def load_sample(ds_name, sample_name, root):
     return img_gray, mask, boxes
 
 
-def compute_contamination_curve(img_gray, mask, box):
+def compute_contamination_curve(img_gray, mask, box):  # noqa: mask kept for API compat
     """
-    返回 [(expand_ratio, var_ctx_win / var0)] 列表
-    ─ 分子：ctx_window (含目标，不排除) 的方差 = σ²(ctx_win with target)
-    ─ 分母：True BG 的方差 σ²₀（全图背景，排除 GT mask）
+    返回 [(expand_ratio, var_ctx_win / var_ctx_ring)] 列表
 
-    理论预测：σ²_ctx_win / σ²₀ = 1 + α(1-α)Δμ²/σ²₀ > 1 when R is small
-    R 越大 → α 越小 → 比值 → 1（曲线从高于 1 降到 1）
+    ─ 分母：Ctx Ring（同 R，排除 box interior）的方差 = 局部纯背景方差 σ²_ring
+    ─ 分子：Ctx Window（同 R，含 box interior）的方差 = 被污染的估计 σ²_win
+
+    由总方差公式：σ²_win = σ²_ring + α(1-α)Δμ² ≥ σ²_ring
+    → 比值始终 ≥ 1（亮/暗目标均成立），R 越小 α 越大 → 比值越高（危险区）
+                                           R 越大 α 越小 → 比值 → 1 （安全区）
+    此设计无需 GT mask，也不受全图背景异质性影响。
     """
-    true_bg = extract_true_bg(img_gray, mask, box, bg_margin=40)
-    var0 = float(np.var(true_bg)) if len(true_bg) > 5 else np.nan
-    if np.isnan(var0) or var0 < 1:
-        return []
-
     result = []
     for ratio in EXPAND_RATIOS:
-        ctx_w, _, _ = extract_ctx_window(img_gray, box, ratio, exclude_mask=None)
-        if len(ctx_w) < 5:
+        ring_px, win_px, _, _, _ = _extract_ring_and_window(img_gray, box, ratio)
+        if len(ring_px) < 5 or len(win_px) < 5:
             continue
-        result.append((ratio, float(np.var(ctx_w)) / var0))
+        var_ring = float(np.var(ring_px))
+        if var_ring < 0.1:      # 极度均匀背景，比值无意义
+            continue
+        result.append((ratio, float(np.var(win_px)) / var_ring))
+    return result
+
+
+def compute_batch_contamination_curve(ds_name, root, n_samples=100):
+    """
+    批量扫描数据集，返回 [(ratio, mean, std, n)] 格式的平均污染曲线。
+    只统计 var_ring > 1 的有效样本，自动剔除异常值（>mean+3std）。
+    """
+    cfg = DATASET_CONFIGS.get(ds_name)
+    if cfg is None:
+        return []
+    split_file = os.path.join(root, cfg['split'])
+    if not os.path.exists(split_file):
+        return []
+    with open(split_file) as f:
+        names = [l.strip() for l in f if l.strip()]
+
+    records = {r: [] for r in EXPAND_RATIOS}
+    count = 0
+    for name in names:
+        if count >= n_samples:
+            break
+        lp = os.path.join(root, cfg['label_dir'], name + '.txt')
+        if not os.path.exists(lp) or os.path.getsize(lp) == 0:
+            continue
+        img_bgr = cv2.imread(os.path.join(root, cfg['img_dir'], name + cfg['img_ext']))
+        if img_bgr is None:
+            continue
+        img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        H, W = img_gray.shape
+        boxes = load_yolo_boxes(lp, H, W)
+        if not boxes:
+            continue
+        for box in boxes:
+            for ratio in EXPAND_RATIOS:
+                ring_px, win_px, _, _, _ = _extract_ring_and_window(img_gray, box, ratio)
+                if len(ring_px) < 5 or len(win_px) < 5:
+                    continue
+                var_ring = float(np.var(ring_px))
+                if var_ring < 1.0:
+                    continue
+                records[ratio].append(float(np.var(win_px)) / var_ring)
+        count += 1
+
+    print(f"[Batch] {ds_name}: {count} images scanned")
+    result = []
+    for ratio in EXPAND_RATIOS:
+        vals = np.array(records[ratio])
+        if len(vals) < 3:
+            continue
+        # 用中位数 + IQR（25%-75%），对极端值鲁棒，且下界自然 ≥ 1
+        median = float(np.median(vals))
+        q25    = float(np.percentile(vals, 25))
+        q75    = float(np.percentile(vals, 75))
+        result.append((ratio, median, q25, q75, len(vals)))
+        print(f"  R={ratio}: median={median:.3f}  IQR=[{q25:.3f}, {q75:.3f}]  (n={len(vals)})")
     return result
 
 
@@ -576,19 +653,27 @@ def batch_analysis(ds_name, root, n_samples, out_dir):
             continue
         for box in boxes:
             for ratio in EXPAND_RATIOS:
-                _, ctx_ring, _, s = extract_regions(img_gray, mask, box, expand_ratio=ratio)
-                if len(ctx_ring) < 5 or np.isnan(s['var_true']) or s['var_true'] < 1:
+                ring_px, win_px, alpha, _, delta_mu = _extract_ring_and_window(
+                    img_gray, box, ratio)
+                if len(ring_px) < 5 or len(win_px) < 5:
                     continue
-                records[ratio]['measured'].append(s['var_ctx']        / s['var_true'])
-                records[ratio]['theory'].append(s['var_ctx_theory']   / s['var_true'])
-                records[ratio]['alpha'].append(s['alpha'])
-                records[ratio]['delta_mu'].append(abs(s['delta_mu']))
-                records[ratio]['var0'].append(s['var_true'])
+                var_ring = float(np.var(ring_px))
+                if var_ring < 0.1:
+                    continue
+                var_win = float(np.var(win_px))
+                # measured: σ²_win/σ²_ring（实测，始终≥1）
+                # theory:  1 + α(1-α)Δμ²/σ²_ring（理论预测）
+                theory_ratio = 1.0 + alpha * (1.0 - alpha) * delta_mu ** 2 / var_ring
+                records[ratio]['measured'].append(var_win   / var_ring)
+                records[ratio]['theory'].append(theory_ratio)
+                records[ratio]['alpha'].append(alpha)
+                records[ratio]['delta_mu'].append(abs(delta_mu))
+                records[ratio]['var0'].append(var_ring)
         count += 1
 
     print(f"\n=== Batch Analysis: {ds_name}  (n={count}) ===")
-    hdr = (f"{'R':>5} | {'σ²_ctx/σ²₀':>18} | {'Theory':>10} | "
-           f"{'α mean':>8} | {'|Δμ| mean':>10} | {'σ²₀ mean':>10} | Pearson-r")
+    hdr = (f"{'R':>5} | {'σ²_win/σ²_ring':>18} | {'Theory':>10} | "
+           f"{'α mean':>8} | {'|Δμ| mean':>10} | {'σ²_ring mean':>12} | Pearson-r")
     print(hdr); print('-' * len(hdr))
     for ratio in EXPAND_RATIOS:
         m = np.array(records[ratio]['measured'])
@@ -614,7 +699,7 @@ def batch_analysis(ds_name, root, n_samples, out_dir):
     ax.axvspan(min(EXPAND_RATIOS), 1.3, alpha=0.12, color='#FF1744')
     ax.axvspan(1.5, max(EXPAND_RATIOS), alpha=0.10, color='#00C853')
     ax.set_xlabel(r'expand\_ratio $R$', fontsize=11)
-    ax.set_ylabel(r'$\hat{\sigma}^2_{\mathrm{ctx}} / \sigma^2_0$', fontsize=11)
+    ax.set_ylabel(r'$\sigma^2_{\mathrm{win}} / \sigma^2_{\mathrm{ring}}$', fontsize=11)
     ax.set_title(f'Contamination Factor — {ds_name} (n={count})', fontsize=11)
     ax.legend(fontsize=9); ax.grid(True, ls='--', alpha=0.4)
     out_path = os.path.join(out_dir, f'contamination_batch_{ds_name.replace("-","_")}.png')
@@ -719,10 +804,16 @@ def main_single(args):
         img_nudt, mask_nudt, boxes_nudt = load_sample('NUDT-SIRST', args.nudt, args.root)
         box_nudt = boxes_nudt[0]
         label_nudt = f'NUDT  {args.nudt}'
-        curve_nudt = compute_contamination_curve(img_nudt, mask_nudt, box_nudt)
         save_csv(img_nudt, mask_nudt, box_nudt, args.out_dir, 'NUDT', args.nudt)
     else:
         img_nudt, mask_nudt, box_nudt, label_nudt = None, None, None, 'NUDT'
+
+    # Panel C 曲线：优先批量平均，fallback 单样本
+    if args.batch_n > 0:
+        curve_nudt = compute_batch_contamination_curve('NUDT-SIRST', args.root, args.batch_n)
+    elif args.nudt:
+        curve_nudt = compute_contamination_curve(img_nudt, mask_nudt, box_nudt)
+    else:
         curve_nudt = load_curve_from_csv(args.csv_nudt)
 
     # ── 加载 NUAA 样本（Panel B：安全平台）──────────────────────
@@ -730,25 +821,39 @@ def main_single(args):
         img_nuaa, mask_nuaa, boxes_nuaa = load_sample('NUAA-SIRST', args.nuaa, args.root)
         box_nuaa = boxes_nuaa[0]
         label_nuaa = f'NUAA  {args.nuaa}'
-        curve_nuaa = compute_contamination_curve(img_nuaa, mask_nuaa, box_nuaa)
         save_csv(img_nuaa, mask_nuaa, box_nuaa, args.out_dir, 'NUAA', args.nuaa)
     else:
         img_nuaa, mask_nuaa, box_nuaa, label_nuaa = None, None, None, 'NUAA'
+
+    if args.batch_n > 0:
+        curve_nuaa = compute_batch_contamination_curve('NUAA-SIRST', args.root, args.batch_n)
+    elif args.nuaa:
+        curve_nuaa = compute_contamination_curve(img_nuaa, mask_nuaa, box_nuaa)
+    else:
         curve_nuaa = load_curve_from_csv(args.csv_nuaa)
 
     out_dir = os.path.dirname(args.out) or '.'
     base    = os.path.splitext(os.path.basename(args.out))[0]
     ext     = os.path.splitext(args.out)[1] or '.png'
 
+    # Panel A/B 优先使用 NUDT 样本（小目标、背景均匀，污染效果更典型）
+    # 若 NUDT 未提供则 fallback 到 NUAA
+    panel_ab_img  = img_nudt  if img_nudt  is not None else img_nuaa
+    panel_ab_mask = mask_nudt if img_nudt  is not None else mask_nuaa
+    panel_ab_box  = box_nudt  if img_nudt  is not None else box_nuaa
+    panel_ab_lbl  = label_nudt if img_nudt is not None else label_nuaa
+
     if args.split:
         # ── 独立输出三个 Panel ──────────────────────────────────
-        if img_nudt is not None:
+        if panel_ab_img is not None:
+            # Panel A: R=1.1（严重污染）
             save_single_panel(draw_panel_a,
-                              (img_nudt, mask_nudt, box_nudt, label_nudt),
+                              (panel_ab_img, panel_ab_mask, panel_ab_box, panel_ab_lbl),
                               os.path.join(out_dir, f'{base}_panel_a{ext}'))
-        if img_nuaa is not None:
+            # Panel B: R=3.0（充分缓解，安全平台）
             save_single_panel(draw_panel_b,
-                              (img_nuaa, mask_nuaa, box_nuaa, label_nuaa),
+                              (panel_ab_img, panel_ab_mask, panel_ab_box,
+                               panel_ab_lbl, 3.0),
                               os.path.join(out_dir, f'{base}_panel_b{ext}'))
         save_single_panel(draw_panel_c,
                           (curve_nudt, curve_nuaa),
@@ -759,10 +864,10 @@ def main_single(args):
         fig.patch.set_facecolor('white')
         plt.subplots_adjust(wspace=0.32, left=0.06, right=0.97, top=0.88, bottom=0.13)
 
-        if img_nudt is not None:
-            draw_panel_a(axes[0], img_nudt, mask_nudt, box_nudt, label_nudt)
-        if img_nuaa is not None:
-            draw_panel_b(axes[1], img_nuaa, mask_nuaa, box_nuaa, label_nuaa)
+        if panel_ab_img is not None:
+            draw_panel_a(axes[0], panel_ab_img, panel_ab_mask, panel_ab_box, panel_ab_lbl)
+            draw_panel_b(axes[1], panel_ab_img, panel_ab_mask, panel_ab_box,
+                         panel_ab_lbl, ratio_design=3.0)
         draw_panel_c(axes[2], curve_nudt, curve_nuaa)
 
         fig.suptitle(
@@ -796,6 +901,8 @@ if __name__ == '__main__':
     parser.add_argument('--demo',  action='store_true',
                         help='Generate demo figure with synthetic data (no dataset needed)')
     parser.add_argument('--batch', action='store_true')
+    parser.add_argument('--batch_n', type=int, default=100,
+                        help='Panel C 批量平均样本数（0=用单样本曲线，默认100）')
     parser.add_argument('--dataset', default='NUDT-SIRST', choices=list(DATASET_CONFIGS.keys()))
     parser.add_argument('--n', type=int, default=50)
     args = parser.parse_args()
