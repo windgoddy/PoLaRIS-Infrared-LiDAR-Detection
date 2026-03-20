@@ -123,6 +123,14 @@ def parse_args():
                         help='Train/test split method')
     parser.add_argument('--image_folder', type=str, default='images',
                         help='Image folder name')
+    parser.add_argument('--mask_folder', type=str, default='masks',
+                        help='Pseudo-mask folder name within dataset_dir (default: masks). '
+                             'Use this to switch between mask variants for ablation, e.g. '
+                             'masks_bsnr_pstar (HALO p* anchor) or masks_geocenter (geo-center baseline).')
+    parser.add_argument('--eval_mask_folder', type=str, default=None,
+                        help='Mask folder for TEST SET evaluation (default: same as --mask_folder). '
+                             'Set to "masks" to always evaluate against GT masks regardless of training masks. '
+                             'This ensures ablation runs are evaluated on a common GT baseline.')
     parser.add_argument('--suffix', type=str, default='.png',
                         help='Image file suffix')
     parser.add_argument('--in_channels', type=int, default=1,
@@ -291,13 +299,14 @@ class MambaDataset(Dataset):
     Wrapper around DataLoader that generates Gaussian heatmap targets.
     Supports both PoLaRISTrainLoader (dict output) and TrainSetLoader (tuple output).
     """
-    def __init__(self, base_loader, dataset_dir, gaussian_iou=0.7, downscale=1, use_polaris_loader=True):
+    def __init__(self, base_loader, dataset_dir, gaussian_iou=0.7, downscale=1, use_polaris_loader=True, mask_folder='masks'):
         self.base_loader = base_loader
         self.dataset_dir = dataset_dir
         self.gaussian_iou = gaussian_iou
         self.downscale = downscale
         self.img_ids = base_loader._items
         self.use_polaris_loader = use_polaris_loader
+        self.mask_folder = mask_folder
 
         # [NEW 2026-02-16] Load category mapping for scene-weighted loss
         self.category_map = self._load_category_mapping(dataset_dir)
@@ -365,7 +374,7 @@ class MambaDataset(Dataset):
         # This matches DNANet's approach and avoids issues with missing/mismatched labels
         # Previously: Generated mask from YOLO labels → failed when labels missing
         # Now: Load mask PNG directly → works like DNANet
-        mask_path = os.path.join(self.dataset_dir, 'masks', f'{img_id}.png')
+        mask_path = os.path.join(self.dataset_dir, self.mask_folder, f'{img_id}.png')
 
         if os.path.exists(mask_path):
             # Load mask image (grayscale PNG)
@@ -519,12 +528,17 @@ class Trainer:
             )
 
         # Wrap with Gaussian target generation
+        # eval_mask_folder: if specified, test set uses a different mask folder (e.g. GT masks)
+        # This allows training with pseudo-masks while evaluating against GT.
+        eval_mask_folder = args.eval_mask_folder if args.eval_mask_folder else args.mask_folder
+
         self.trainset = MambaDataset(
             base_train_loader,
             dataset_dir,
             gaussian_iou=args.gaussian_iou,
             downscale=args.heatmap_downscale,
             use_polaris_loader=use_polaris_loader,
+            mask_folder=args.mask_folder,
         )
         self.testset = MambaDataset(
             base_test_loader,
@@ -532,6 +546,7 @@ class Trainer:
             gaussian_iou=args.gaussian_iou,
             downscale=args.heatmap_downscale,
             use_polaris_loader=use_polaris_loader,
+            mask_folder=eval_mask_folder,
         )
 
         # Data loaders
