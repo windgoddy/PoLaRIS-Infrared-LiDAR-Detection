@@ -93,13 +93,9 @@ def make_bsnr(img_gray_f, box, expand_ratio=1.5, tau=1.0):
     cx1 = max(0, x1 - mx); cy1 = max(0, y1 - my)
     cx2 = min(W, x2 + mx); cy2 = min(H, y2 + my)
 
-    # Context Ring
-    ctx_mask  = np.zeros((H, W), dtype=bool)
-    inner     = np.zeros((H, W), dtype=bool)
-    ctx_mask[cy1:cy2, cx1:cx2] = True
-    inner[y1:y2, x1:x2] = True
-    ring = ctx_mask & ~inner
-    ctx_pixels = img_gray_f[ring]
+    # Window method: 整个膨胀框（含原框内部）作为背景统计域
+    # 与 HALO 实际实现一致（gen_ablation_masks.py / bsnr_mask_utils.py）
+    ctx_pixels = img_gray_f[cy1:cy2, cx1:cx2].flatten()
     if len(ctx_pixels) < 5:
         mu_ctx, sigma_ctx = float(np.mean(img_gray_f)), float(np.std(img_gray_f)) + 1e-4
     else:
@@ -221,19 +217,37 @@ def draw_3d_surface(ax, Z, title, cmap, elev=28, azim=-55,
     return surf
 
 
-def draw_2d_heatmap(ax, Z, title, cmap, highlight_pos=None, box=None):
-    """底部 2D 热图（imshow）"""
+def draw_2d_heatmap(ax, Z, title, cmap, highlight_pos=None, box=None,
+                    show_box_outline=False, theme='dark'):
+    """底部 2D 热图（imshow）
+    box: YOLO 框坐标 (x1,y1,x2,y2)，在 patch 局部坐标系中
+    show_box_outline: True → 画出 YOLO 框边界（用于 B-SNR 视图，区分统计域/计算域）
+    """
+    from matplotlib.patches import Rectangle
+    box_color  = '#333333' if theme == 'light' else 'white'
+    text_color = '#222222' if theme == 'light' else 'white'
+    star_edge  = 'black'   if theme == 'light' else 'white'
+
     ax.imshow(Z, cmap=cmap, vmin=0, vmax=1, interpolation='nearest', aspect='equal')
-    if box is not None:
+    if box is not None and not show_box_outline:
+        # Box Fill 视图：虚线标出框位置
         x1, y1, x2, y2 = box
-        from matplotlib.patches import Rectangle
         rect = Rectangle((x1-0.5, y1-0.5), x2-x1, y2-y1,
-                         edgecolor='yellow', facecolor='none', lw=1.2, ls='--')
+                         edgecolor='#E65100' if theme == 'light' else 'yellow',
+                         facecolor='none', lw=1.2, ls='--')
         ax.add_patch(rect)
+    if box is not None and show_box_outline:
+        # B-SNR 视图：实线标出 YOLO 框边界（与 Context Box 背景环区分）
+        x1, y1, x2, y2 = box
+        rect = Rectangle((x1-0.5, y1-0.5), x2-x1, y2-y1,
+                         edgecolor=box_color, facecolor='none', lw=1.0, ls='-', alpha=0.85)
+        ax.add_patch(rect)
+        ax.text(x1, max(0, y1 - 1), 'YOLO box', color=text_color, fontsize=5.5,
+                va='bottom', ha='left', alpha=0.9)
     if highlight_pos is not None:
         px, py = highlight_pos
-        ax.plot(px, py, 'r*', markersize=10, markeredgewidth=0.5, markeredgecolor='white')
-    ax.set_title(title, fontsize=9, pad=3)
+        ax.plot(px, py, 'r*', markersize=10, markeredgewidth=0.5, markeredgecolor=star_edge)
+    ax.set_title(title, fontsize=9, pad=3, color=text_color)
     ax.axis('off')
 
 
@@ -274,7 +288,7 @@ def _prepare_surfaces(img_patch, box_in_patch):
     H, W = img_patch.shape
     box  = box_in_patch
     box_fill = make_box_fill(H, W, box)
-    bsnr     = make_bsnr(img_patch, box, expand_ratio=1.5, tau=1.2)
+    bsnr     = make_bsnr(img_patch, box, expand_ratio=1.5, tau=3.0)
     halo, px_star, py_star, sigma = make_halo_pag(H, W, box, bsnr)
     bsnr_vis = bsnr / bsnr.max() if bsnr.max() > 0 else bsnr
     x1, y1, x2, y2 = box
@@ -346,7 +360,10 @@ def make_figure(img_patch, box_in_patch, out_path, sample_label,
             fig2d.patch.set_facecolor(T['bg'])
             ax2d.set_facecolor(T['ax_bg'])
             draw_2d_heatmap(ax2d, Z, title='', cmap=cmap,
-                            highlight_pos=hlp, box=box if col == 0 else None)
+                            highlight_pos=hlp,
+                            box=box,
+                            show_box_outline=(col == 1),
+                            theme=theme)
             p2d = os.path.join(out_dir, f'{base}_{col_names[col]}_2d{ext}')
             plt.savefig(p2d, dpi=300, bbox_inches='tight',
                         facecolor=T['bg'], edgecolor='none')
@@ -378,7 +395,10 @@ def make_figure(img_patch, box_in_patch, out_path, sample_label,
         ax2d = fig.add_subplot(gs[1, col])
         ax2d.set_facecolor(T['ax_bg'])
         draw_2d_heatmap(ax2d, Z, title='', cmap=cmap,
-                        highlight_pos=hlp, box=box if col == 0 else None)
+                        highlight_pos=hlp,
+                        box=box,
+                        show_box_outline=(col == 1),
+                        theme=theme)
 
     offset = np.sqrt((px_star - geo_cx)**2 + (py_star - geo_cy)**2)
     diag   = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
@@ -432,7 +452,7 @@ def demo_mode(out_path, split=False, theme='dark'):
 # 真实数据模式
 # ────────────────────────────────────────────────────────────────
 
-def load_and_crop(ds_name, sample_name, root, crop_size=64):
+def load_and_crop(ds_name, sample_name, root, crop_size=64, expand_ratio=1.5):
     cfg = DATASET_CONFIGS[ds_name]
     img_bgr = cv2.imread(os.path.join(root, cfg['img_dir'], sample_name + cfg['img_ext']))
     if img_bgr is None:
@@ -457,17 +477,18 @@ def load_and_crop(ds_name, sample_name, root, crop_size=64):
             primary_box = box
 
     x1, y1, x2, y2 = primary_box
-    cx = (x1 + x2) // 2
-    cy = (y1 + y2) // 2
-    half = crop_size // 2
-    ox = max(0, min(cx - half, W - crop_size))
-    oy = max(0, min(cy - half, H - crop_size))
+    bw, bh = x2 - x1, y2 - y1
+    mx = max(2, int(bw * (expand_ratio - 1) / 2))
+    my = max(2, int(bh * (expand_ratio - 1) / 2))
 
-    img_patch = img_gray[oy:oy+crop_size, ox:ox+crop_size]
-    box_in_patch = (
-        max(0, x1 - ox), max(0, y1 - oy),
-        min(crop_size, x2 - ox), min(crop_size, y2 - oy),
-    )
+    # 以 Context Box（膨胀框）为裁剪范围，展示统计域与计算域的对应关系
+    ox  = max(0, x1 - mx)
+    oy  = max(0, y1 - my)
+    ox2 = min(W, x2 + mx)
+    oy2 = min(H, y2 + my)
+
+    img_patch = img_gray[oy:oy2, ox:ox2]
+    box_in_patch = (x1 - ox, y1 - oy, x2 - ox, y2 - oy)
     return img_patch, box_in_patch
 
 
