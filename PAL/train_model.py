@@ -375,6 +375,7 @@ def main():
     save_model_file_path = os.path.join(root_path, 'work_dirs', MODEL_NAME)
     make_dir(save_model_file_path)
     save_file_name = os.path.join(save_model_file_path, MODEL_NAME + '.txt')
+    save_best_miou_log_name = os.path.join(save_model_file_path, choose_model + '_' + choose_dataset + '_best_mIoU.log')
     save_bestmiouandPD_file_name = os.path.join(save_model_file_path,
                                                 'bestmIoUandPD_checkpoint_' + MODEL_NAME + ".pth.tar")
     save_best_miou_file_name = os.path.join(save_model_file_path,
@@ -605,12 +606,33 @@ def main():
             #     bestmIoUandPD = bestmIoUandPD
 
             if best_mIoU < mioU:
+                # 删除旧的 best_mIoU 权重文件
+                import glob as _glob
+                for _old in _glob.glob(os.path.join(save_model_file_path, 'best_mIoU_epoch*.pth.tar')):
+                    try:
+                        os.remove(_old)
+                    except Exception:
+                        pass
                 best_mIoU = mioU
                 best_mIoU_nIoU = nioU
                 best_mIoU_FA = fa
                 best_mIoU_PD = pd
                 best_mIoU_epoch = epoch
+                # 文件名包含 mIoU/nIoU/FA/PD
+                _ckpt_name = (f'best_mIoU_epoch{epoch+1:04d}'
+                              f'_mIoU{mioU:.4f}_nIoU{nioU:.4f}'
+                              f'_FA{fa*1e6:.2f}_PD{pd:.4f}.pth.tar')
+                _new_ckpt_path = os.path.join(save_model_file_path, _ckpt_name)
+                torch.save(checkpoint, _new_ckpt_path)
+                # 保留原固定名文件方便 eval 脚本查找
                 torch.save(checkpoint, save_best_miou_file_name)
+                # 写入 best_mIoU.log（仅在更新 best 时追加一行）
+                with open(save_best_miou_log_name, 'a') as _log:
+                    _log.write(
+                        f"{datetime.now().strftime('%d/%m/%Y %H:%M:%S')} - {epoch+1:04d}:"
+                        f"  mIoU: {mioU:.4f}  nIoU: {nioU:.4f}"
+                        f"  FA: {fa*1e6:.3f}  PD: {pd:.4f}\n"
+                    )
             else:
                 best_mIoU = best_mIoU
 
@@ -637,6 +659,7 @@ def main():
                 f"epoch is:{epoch + 1}  mioU:{round(mioU, 4)}  nioU:{round(nioU, 4)}  FA:{round(fa, 3)}  PD:{round(pd, 4)}\n")
             save_file.write(
                 f"best_epoch:{best_mIoU_epoch + 1}  best_miou:{round(best_mIoU, 4)}  b_niou:{round(best_mIoU_nIoU, 4)}  FA:{round(best_mIoU_FA * 1000000, 3)}  PD:{round(best_mIoU_PD, 4)}\n")
+            save_file.flush()
             # save_file.write(
             #     f"best_epoch:{bestPD_epoch + 1}  b_miou:{round(bestPD_mIou, 4)}  best_niou:{round(bestPD_nIou, 4)}  FA:{round(bestPD_FA * 1000000, 3)}  PD:{round(best_PD, 4)}\n")
             # save_file.write(
