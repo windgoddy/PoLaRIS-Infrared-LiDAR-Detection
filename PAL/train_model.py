@@ -302,6 +302,7 @@ def main():
             ),
             ToTensorV2(),
         ],
+        is_check_shapes=False,
     )
     val_transforms = A.Compose(
         [
@@ -313,6 +314,7 @@ def main():
             ),
             ToTensorV2(),
         ],
+        is_check_shapes=False,
     )
 
     test_transforms = A.Compose(
