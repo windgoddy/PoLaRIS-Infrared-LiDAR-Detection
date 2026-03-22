@@ -76,11 +76,13 @@ DATASET_CONFIGS = {
 # 默认值（论文中使用的值）
 DEFAULT_EXPAND_RATIO   = 1.5
 DEFAULT_SIGMA_RATIO    = 1.5
+DEFAULT_TEMPERATURE    = 3.0
 
 # 扫描范围
 EXPAND_RATIO_VALUES  = [1.0, 1.1, 1.3, 1.5, 2.0, 3.0]
 # 1.274 ≈ 1/sqrt(0.616)，是 2D 高斯 FWHM 加权方差的精确物理校准值
 SIGMA_RATIO_VALUES   = [0.8, 1.0, 1.274, 1.5, 2.0, 2.5]
+TEMPERATURE_VALUES   = [1.5, 3.0, 5.0]
 
 
 # ════════════════════════════════════════════════════════════
@@ -109,7 +111,7 @@ def load_yolo_boxes(label_path, img_h, img_w):
 
 def generate_pseudo_mask(img_gray, boxes, H, W,
                          expand_ratio, gauss_sigma_ratio,
-                         spatial_gaussian):
+                         spatial_gaussian, temperature=DEFAULT_TEMPERATURE):
     """
     生成 B-SNR 或 PAG 伪标签。
 
@@ -117,6 +119,7 @@ def generate_pseudo_mask(img_gray, boxes, H, W,
         spatial_gaussian: False → B-SNR（C组），True → PAG（D组）
         expand_ratio:     Context Box 膨胀倍率
         gauss_sigma_ratio: 高斯 σ 比例系数（仅 PAG 使用）
+        temperature:      B-SNR sigmoid 温度系数 τ
     """
     gray_f = img_gray.astype(np.float32) / 255.0
     mask = np.zeros((H, W), dtype=np.float32)
@@ -126,7 +129,7 @@ def generate_pseudo_mask(img_gray, boxes, H, W,
         weight = compute_bsnr_weight(
             gray_f, (x1, y1, x2, y2),
             expand_ratio=expand_ratio,
-            temperature=3.0,
+            temperature=temperature,
             spatial_gaussian=spatial_gaussian,
             gauss_sigma_ratio=gauss_sigma_ratio,
         )
@@ -326,6 +329,67 @@ def sweep_sigma_ratio(dataset_name, root='.'):
 
 
 # ════════════════════════════════════════════════════════════
+# 扫描 3：temperature (τ)
+# ════════════════════════════════════════════════════════════
+def sweep_temperature(dataset_name, root='.'):
+    """
+    固定 expand_ratio=1.5, gauss_sigma_ratio=1.5，扫描 B-SNR 温度系数 τ。
+    同时测 B-SNR 和 PAG（两者均受 temperature 影响）。
+    """
+    print(f"\n{'='*68}")
+    print(f"  [temperature sweep]  Dataset: {dataset_name}")
+    print(f"  Fixed: expand_ratio={DEFAULT_EXPAND_RATIO}, sigma_ratio={DEFAULT_SIGMA_RATIO}")
+    print(f"{'='*68}")
+
+    samples = load_dataset_images(dataset_name, root)
+    if samples is None:
+        return None
+
+    results = {t: {'bsnr': [], 'pag': []} for t in TEMPERATURE_VALUES}
+
+    for s in samples:
+        img, gt_bin, boxes = s['img'], s['gt_bin'], s['boxes']
+        H, W = s['H'], s['W']
+        for tau in TEMPERATURE_VALUES:
+            bsnr_mask = generate_pseudo_mask(img, boxes, H, W,
+                                             expand_ratio=DEFAULT_EXPAND_RATIO,
+                                             gauss_sigma_ratio=DEFAULT_SIGMA_RATIO,
+                                             spatial_gaussian=False,
+                                             temperature=tau)
+            pag_mask  = generate_pseudo_mask(img, boxes, H, W,
+                                             expand_ratio=DEFAULT_EXPAND_RATIO,
+                                             gauss_sigma_ratio=DEFAULT_SIGMA_RATIO,
+                                             spatial_gaussian=True,
+                                             temperature=tau)
+            results[tau]['bsnr'].append(compute_pseudo_iou(bsnr_mask, gt_bin))
+            results[tau]['pag'].append(compute_pseudo_iou(pag_mask,  gt_bin))
+
+    summary = {}
+    for tau in TEMPERATURE_VALUES:
+        bsnr_iou = float(np.mean(results[tau]['bsnr'])) * 100
+        pag_iou  = float(np.mean(results[tau]['pag']))  * 100
+        summary[tau] = {'bsnr': bsnr_iou, 'pag': pag_iou}
+
+    default_bsnr = summary[DEFAULT_TEMPERATURE]['bsnr']
+    default_pag  = summary[DEFAULT_TEMPERATURE]['pag']
+
+    print(f"\n  {'temperature (τ)':<16} {'B-SNR IoU':>12}  {'vs default':>10}"
+          f"  {'PAG IoU':>10}  {'vs default':>10}")
+    print(f"  {'-'*64}")
+    for tau in TEMPERATURE_VALUES:
+        tag = ' ← default' if tau == DEFAULT_TEMPERATURE else ''
+        bsnr_diff = summary[tau]['bsnr'] - default_bsnr
+        pag_diff  = summary[tau]['pag']  - default_pag
+        print(f"  {tau:<16.1f} {summary[tau]['bsnr']:>11.2f}%  "
+              f"{bsnr_diff:>+9.2f}%  "
+              f"{summary[tau]['pag']:>9.2f}%  "
+              f"{pag_diff:>+9.2f}%{tag}")
+    print(f"{'='*68}")
+
+    return summary
+
+
+# ════════════════════════════════════════════════════════════
 # 跨数据集汇总
 # ════════════════════════════════════════════════════════════
 def print_cross_dataset_summary(all_results_expand, all_results_sigma):
@@ -407,7 +471,7 @@ if __name__ == '__main__':
                         choices=['NUAA-SIRST', 'NUDT-SIRST', 'IRSTD-1k', 'all'],
                         help='Dataset to evaluate (default: all)')
     parser.add_argument('--sweep', default='all',
-                        choices=['expand', 'sigma', 'all'],
+                        choices=['expand', 'sigma', 'temperature', 'all'],
                         help='Which sweep to run (default: all)')
     parser.add_argument('--root', default='.',
                         help='Project root directory (default: current dir)')
@@ -416,8 +480,9 @@ if __name__ == '__main__':
     datasets = (list(DATASET_CONFIGS.keys())
                 if args.dataset == 'all' else [args.dataset])
 
-    all_results_expand = {}
-    all_results_sigma  = {}
+    all_results_expand      = {}
+    all_results_sigma       = {}
+    all_results_temperature = {}
 
     for ds in datasets:
         print(f"\n{'#'*68}")
@@ -434,6 +499,32 @@ if __name__ == '__main__':
             if r:
                 all_results_sigma[ds] = r
 
+        if args.sweep in ('temperature', 'all'):
+            r = sweep_temperature(ds, root=args.root)
+            if r:
+                all_results_temperature[ds] = r
+
     # 跨数据集汇总（仅三个数据集都跑完时）
     if (len(all_results_expand) > 1 or len(all_results_sigma) > 1):
         print_cross_dataset_summary(all_results_expand, all_results_sigma)
+
+    if len(all_results_temperature) > 1:
+        ds_names = list(all_results_temperature.keys())
+        print("\n\n" + "="*72)
+        print("  【论文用汇总表 3】temperature (τ) sensitivity — PAG IoU (三数据集均值)")
+        print("="*72)
+        print(f"  {'temperature':<14}" + "".join(f"  {d[:12]:>13}" for d in ds_names)
+              + f"  {'平均':>8}")
+        print(f"  {'-'*64}")
+        for tau in TEMPERATURE_VALUES:
+            vals = [all_results_temperature[ds][tau]['pag'] for ds in ds_names]
+            tag = ' ←' if tau == DEFAULT_TEMPERATURE else ''
+            row = (f"  {tau:<14.1f}"
+                   + "".join(f"  {v:>12.2f}%" for v in vals)
+                   + f"  {np.mean(vals):>7.2f}%{tag}")
+            print(row)
+        tau_avgs = [np.mean([all_results_temperature[ds][t]['pag'] for ds in ds_names])
+                    for t in TEMPERATURE_VALUES]
+        print(f"\n  temperature [{TEMPERATURE_VALUES[0]}–{TEMPERATURE_VALUES[-1]}]:"
+              f"  最大波动 {max(tau_avgs) - min(tau_avgs):.2f}%")
+        print("="*72)
