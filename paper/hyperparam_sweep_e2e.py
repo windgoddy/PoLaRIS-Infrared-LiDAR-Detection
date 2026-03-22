@@ -202,7 +202,7 @@ def run_training(dataset_name, cfg, mask_folder_name, experiment_tag,
     ]
 
     print(f"\n  [Train] {dataset_name} mask={mask_folder_name} epochs={epochs}")
-    print(f"  experiment_tag={experiment_tag}")
+    print(f"  experiment_tag={experiment_tag}  CUDA_VISIBLE_DEVICES={gpu}")
 
     # 记录开始时间，用于在 result/ 目录中定位新建的 checkpoint 目录
     t_start = time.time()
@@ -212,8 +212,12 @@ def run_training(dataset_name, cfg, mask_folder_name, experiment_tag,
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, f'{experiment_tag}.log')
 
+    # train.py 使用 model.cuda()（无 device 参数），必须通过 CUDA_VISIBLE_DEVICES 指定 GPU
+    env = os.environ.copy()
+    env['CUDA_VISIBLE_DEVICES'] = gpu
+
     with open(log_file, 'w') as flog:
-        proc = subprocess.run(cmd, cwd=ROOT, stdout=flog, stderr=subprocess.STDOUT)
+        proc = subprocess.run(cmd, cwd=ROOT, stdout=flog, stderr=subprocess.STDOUT, env=env)
 
     if proc.returncode != 0:
         print(f"  [WARN] Training returned non-zero exit code {proc.returncode}")
