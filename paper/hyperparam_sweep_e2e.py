@@ -172,16 +172,10 @@ def generate_pseudolabels(dataset_name, cfg, output_mask_dir,
 # ──────────────────────────────────────────────────────────────────────────────
 # Step 2: 调用 train.py 训练，捕获最佳 mIoU
 # ──────────────────────────────────────────────────────────────────────────────
-def run_training(dataset_name, cfg, mask_folder_name, experiment_tag,
-                 epochs=1500, gpu='0', seed=42):
-    """
-    调用 train.py，mask_folder 指向已生成的伪标签目录。
-    使用 --experiment_name 为每次训练打标签，之后在 result/ 目录查找 checkpoint。
-    """
-    # train.py 通过 make_dir() 自动创建:
-    #   result/{experiment_name}_{dataset}_{model}_{timestamp}_wDS/
-    # 所以用 experiment_tag 作为前缀来定位输出目录
-    cmd = [
+def _make_train_cmd(dataset_name, cfg, mask_folder_name, experiment_tag,
+                    epochs=1500, gpu='0', seed=42):
+    """构造 train.py 调用命令（不执行）。"""
+    return [
         sys.executable, os.path.join(ROOT, 'train.py'),
         '--model',           'DNANet',
         '--dataset',         dataset_name,
@@ -201,18 +195,23 @@ def run_training(dataset_name, cfg, mask_folder_name, experiment_tag,
         '--crop_size',       '256',
     ]
 
+
+def run_training(dataset_name, cfg, mask_folder_name, experiment_tag,
+                 epochs=1500, gpu='0', seed=42):
+    """
+    单进程串行训练（sequential 模式）。
+    train.py 用 model.cuda()，必须通过 CUDA_VISIBLE_DEVICES 指定 GPU。
+    """
+    cmd = _make_train_cmd(dataset_name, cfg, mask_folder_name, experiment_tag,
+                          epochs, gpu, seed)
     print(f"\n  [Train] {dataset_name} mask={mask_folder_name} epochs={epochs}")
-    print(f"  experiment_tag={experiment_tag}  CUDA_VISIBLE_DEVICES={gpu}")
+    print(f"  experiment_tag={experiment_tag}  GPU={gpu}")
 
-    # 记录开始时间，用于在 result/ 目录中定位新建的 checkpoint 目录
     t_start = time.time()
-
-    # 将 stdout/stderr 同时写到 result/sweep_logs/ 以便调试
-    log_dir = os.path.join(ROOT, 'result', 'sweep_logs')
+    log_dir  = os.path.join(ROOT, 'result', 'sweep_logs')
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, f'{experiment_tag}.log')
 
-    # train.py 使用 model.cuda()（无 device 参数），必须通过 CUDA_VISIBLE_DEVICES 指定 GPU
     env = os.environ.copy()
     env['CUDA_VISIBLE_DEVICES'] = gpu
 
@@ -222,10 +221,33 @@ def run_training(dataset_name, cfg, mask_folder_name, experiment_tag,
     if proc.returncode != 0:
         print(f"  [WARN] Training returned non-zero exit code {proc.returncode}")
 
-    # 在 result/ 中找 experiment_tag 前缀且创建时间晚于 t_start 的目录
     best_miou = _parse_best_miou_by_tag(experiment_tag, t_start, log_file)
     print(f"  [Result] best_mIoU = {best_miou:.4f}")
     return best_miou
+
+
+def launch_training_async(dataset_name, cfg, mask_folder_name, experiment_tag,
+                          epochs=1500, gpu='0', seed=42):
+    """
+    异步启动训练进程（parallel 模式）。
+    返回 (Popen对象, log_file路径, t_start, experiment_tag)。
+    """
+    cmd = _make_train_cmd(dataset_name, cfg, mask_folder_name, experiment_tag,
+                          epochs, gpu, seed)
+    print(f"  [Launch] {dataset_name} sigma/expand={experiment_tag.split('_')[-1]}  GPU={gpu}")
+    print(f"           log → result/sweep_logs/{experiment_tag}.log")
+
+    log_dir  = os.path.join(ROOT, 'result', 'sweep_logs')
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, f'{experiment_tag}.log')
+
+    env = os.environ.copy()
+    env['CUDA_VISIBLE_DEVICES'] = gpu
+    t_start = time.time()
+
+    flog = open(log_file, 'w')
+    proc = subprocess.Popen(cmd, cwd=ROOT, stdout=flog, stderr=subprocess.STDOUT, env=env)
+    return proc, flog, log_file, t_start, experiment_tag
 
 
 def _parse_best_miou_by_tag(experiment_tag, t_start, fallback_log=None):
@@ -395,6 +417,111 @@ def run_expand_sweep(datasets, expand_values, out_root, epochs, gpu, seed):
     return results
 
 
+def run_parallel_sweep(jobs, gpu_list):
+    """
+    并行模式：
+      jobs = [(ds_name, cfg, param_val, param_type, mask_folder, experiment_tag, mask_dir), ...]
+      gpu_list = ['3', '4', '5', '6', ...]  按 round-robin 分配给各 job
+
+    流程：
+      1. 依次生成所有伪标签（串行，很快）
+      2. 同时启动所有训练进程（并行，每个进程独占一个 GPU）
+      3. 等待全部完成，收集 mIoU
+      4. 清理临时伪标签目录
+    """
+    # Step 1: 批量生成伪标签
+    print(f"\n[Parallel] Step 1: 生成所有伪标签...")
+    for job in jobs:
+        ds_name, cfg, param_val, param_type, mask_folder, exp_tag, mask_dir = job
+        expand = 1.5 if param_type == 'sigma' else param_val
+        sigma  = param_val if param_type == 'sigma' else 1.5
+        generate_pseudolabels(ds_name, cfg, mask_dir,
+                              expand_ratio=expand, sigma_ratio=sigma)
+
+    # Step 2: 并行启动所有训练
+    print(f"\n[Parallel] Step 2: 并行启动 {len(jobs)} 个训练进程...")
+    procs = []
+    for i, job in enumerate(jobs):
+        ds_name, cfg, param_val, param_type, mask_folder, exp_tag, mask_dir = job
+        gpu = gpu_list[i % len(gpu_list)]
+        proc, flog, log_file, t_start, exp_tag = launch_training_async(
+            ds_name, cfg, mask_folder, exp_tag,
+            epochs=jobs[0][0] if False else _EPOCHS_GLOBAL,
+            gpu=gpu, seed=_SEED_GLOBAL,
+        )
+        procs.append((proc, flog, log_file, t_start, exp_tag, job))
+
+    # Step 3: 等待全部完成
+    print(f"\n[Parallel] Step 3: 等待所有训练完成...")
+    results_map = {}  # exp_tag -> miou
+    for proc, flog, log_file, t_start, exp_tag, job in procs:
+        proc.wait()
+        flog.close()
+        rc = proc.returncode
+        if rc != 0:
+            print(f"  [WARN] {exp_tag}: exit code {rc}")
+        miou = _parse_best_miou_by_tag(exp_tag, t_start, log_file)
+        print(f"  [Done] {exp_tag}: best_mIoU = {miou:.4f}")
+        results_map[exp_tag] = miou
+
+    # Step 4: 清理临时伪标签
+    for job in jobs:
+        _, _, _, _, _, _, mask_dir = job
+        if os.path.isdir(mask_dir):
+            shutil.rmtree(mask_dir)
+            print(f"  [Clean] {mask_dir}")
+
+    return results_map
+
+
+# 全局变量，parallel 模式下通过闭包传递 epochs/seed
+_EPOCHS_GLOBAL = 1500
+_SEED_GLOBAL   = 42
+
+
+def build_sigma_jobs(datasets, sigma_values):
+    """构造 sigma sweep 的 job 列表。"""
+    EXPAND_FIXED = 1.5
+    jobs = []
+    for ds_name in datasets:
+        cfg = DATASET_CONFIGS[ds_name]
+        ds_base = os.path.join(ROOT, cfg['base_mask_dir'])
+        for sigma in sigma_values:
+            tag = f"sigma{sigma:.3f}_expand{EXPAND_FIXED:.1f}"
+            mask_folder = f"masks_sweep_{tag}"
+            mask_dir    = os.path.join(ds_base, mask_folder)
+            exp_tag     = f"sweep_{ds_name}_{tag}"
+            jobs.append((ds_name, cfg, sigma, 'sigma', mask_folder, exp_tag, mask_dir))
+    return jobs
+
+
+def build_expand_jobs(datasets, expand_values):
+    """构造 expand sweep 的 job 列表。"""
+    SIGMA_FIXED = 1.5
+    jobs = []
+    for ds_name in datasets:
+        cfg = DATASET_CONFIGS[ds_name]
+        ds_base = os.path.join(ROOT, cfg['base_mask_dir'])
+        for expand in expand_values:
+            tag = f"sigma{SIGMA_FIXED:.1f}_expand{expand:.1f}"
+            mask_folder = f"masks_sweep_{tag}"
+            mask_dir    = os.path.join(ds_base, mask_folder)
+            exp_tag     = f"sweep_{ds_name}_{tag}"
+            jobs.append((ds_name, cfg, expand, 'expand', mask_folder, exp_tag, mask_dir))
+    return jobs
+
+
+def jobs_to_results(jobs, results_map):
+    """将 results_map 重组为 {dataset: {param_val: miou}} 格式。"""
+    results = {}
+    for job in jobs:
+        ds_name, _, param_val, _, _, exp_tag, _ = job
+        if ds_name not in results:
+            results[ds_name] = {}
+        results[ds_name][param_val] = results_map.get(exp_tag, float('nan'))
+    return results
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Step 4: 输出汇总表格（可直接贴入 ADVISOR_REPORT.md）
 # ──────────────────────────────────────────────────────────────────────────────
@@ -462,27 +589,48 @@ def print_and_save_results(results, param_name, param_values, out_root,
 # ──────────────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(
-        description='End-to-End Hyperparameter Sweep for HALO (Training mIoU)')
+        description='End-to-End Hyperparameter Sweep for HALO (Training mIoU)',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  # 串行（单 GPU）
+  python paper/hyperparam_sweep_e2e.py --sweep sigma --sigma_values 1.5,2.0 --gpu 3
+
+  # 并行（多 GPU，每个 job 独占一个 GPU）
+  python paper/hyperparam_sweep_e2e.py --sweep sigma --sigma_values 1.5,2.0 --gpus 3,4,5,6,7,8
+
+  # 并行 + 指定数据集
+  python paper/hyperparam_sweep_e2e.py --sweep both --gpus 3,4,5,6,7,8
+""")
     parser.add_argument('--sweep', choices=['sigma', 'expand', 'both'],
-                        default='sigma',
-                        help='Which parameter to sweep (default: sigma)')
+                        default='sigma')
     parser.add_argument('--dataset', default='all',
-                        choices=['NUAA-SIRST', 'NUDT-SIRST', 'IRSTD-1k', 'all'],
-                        help='Dataset(s) to run (default: all)')
+                        choices=['NUAA-SIRST', 'NUDT-SIRST', 'IRSTD-1k', 'all'])
     parser.add_argument('--sigma_values', type=str, default=None,
-                        help='Comma-separated sigma_ratio values, e.g. "1.5,2.0" '
-                             '(default: 1.0,1.274,1.5,2.0)')
+                        help='逗号分隔，如 "1.5,2.0"（默认: 1.0,1.274,1.5,2.0）')
     parser.add_argument('--expand_values', type=str, default=None,
-                        help='Comma-separated expand_ratio values, e.g. "1.0,1.5,2.0"')
-    parser.add_argument('--epochs', type=int, default=1500,
-                        help='Training epochs per run (default: 1500; use 500 for quick check)')
-    parser.add_argument('--gpu', type=str, default='0',
-                        help='GPU ID (default: 0)')
-    parser.add_argument('--seed', type=int, default=42,
-                        help='Random seed (default: 42)')
-    parser.add_argument('--out_dir', type=str, default=None,
-                        help='Output root dir (default: result/hyperparam_sweep_e2e_TIMESTAMP)')
+                        help='逗号分隔，如 "1.0,1.5,2.0"')
+    parser.add_argument('--epochs', type=int, default=1500)
+    parser.add_argument('--gpu', type=str, default=None,
+                        help='串行模式：单个 GPU ID（如 "3"）')
+    parser.add_argument('--gpus', type=str, default=None,
+                        help='并行模式：逗号分隔的 GPU ID 列表（如 "3,4,5,6"）'
+                             '，job 数量超过 GPU 数时按 round-robin 分配')
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--out_dir', type=str, default=None)
+    parser.add_argument('--gen_only', action='store_true',
+                        help='只生成伪标签，不训练（配合 tmux 手动启动训练）')
+    parser.add_argument('--collect', action='store_true',
+                        help='只汇总已完成训练的结果（从 result/ 目录读取 checkpoint）')
     args = parser.parse_args()
+
+    # 确定串行/并行模式
+    if args.gpus:
+        gpu_list  = [g.strip() for g in args.gpus.split(',')]
+        parallel  = True
+    else:
+        gpu_list  = [args.gpu or '0']
+        parallel  = False
 
     # 参数解析
     datasets = (list(DATASET_CONFIGS.keys()) if args.dataset == 'all'
@@ -493,38 +641,118 @@ def main():
                      if args.expand_values else EXPAND_VALUES)
 
     timestamp = time.strftime('%Y%m%d_%H%M%S')
-    out_root = args.out_dir or os.path.join(ROOT, 'result', f'hyperparam_sweep_e2e_{timestamp}')
+    out_root  = args.out_dir or os.path.join(ROOT, 'result', f'hyperparam_sweep_e2e_{timestamp}')
     os.makedirs(out_root, exist_ok=True)
 
-    print(f"\n{'='*70}")
-    print(f"  HALO End-to-End Hyperparameter Sweep")
-    print(f"  sweep={args.sweep}  datasets={datasets}")
-    print(f"  epochs={args.epochs}  gpu={args.gpu}  seed={args.seed}")
-    print(f"  output → {out_root}")
-    print(f"{'='*70}")
+    # 把 epochs/seed 写入全局，供 run_parallel_sweep 内部使用
+    global _EPOCHS_GLOBAL, _SEED_GLOBAL
+    _EPOCHS_GLOBAL = args.epochs
+    _SEED_GLOBAL   = args.seed
 
-    # 估算总训练时间
     n_sigma  = len(sigma_values)  if args.sweep in ('sigma',  'both') else 0
     n_expand = len(expand_values) if args.sweep in ('expand', 'both') else 0
     n_runs   = (n_sigma + n_expand) * len(datasets)
-    print(f"  预计训练次数: {n_runs}  （每次约 30-60min for 1500 epoch on 1 GPU）\n")
 
-    # 执行 sweep
-    if args.sweep in ('sigma', 'both'):
-        print(f"\n>>> sigma_ratio sweep: {sigma_values}  (expand_ratio=1.5 fixed)")
-        sigma_results = run_sigma_sweep(
-            datasets, sigma_values, out_root, args.epochs, args.gpu, args.seed)
-        print_and_save_results(
-            sigma_results, 'sigma_ratio', sigma_values, out_root,
-            default_val=1.5, sweep_type='sigma')
+    print(f"\n{'='*70}")
+    print(f"  HALO End-to-End Hyperparameter Sweep")
+    print(f"  mode={'gen_only' if args.gen_only else ('parallel' if parallel else 'sequential')}")
+    print(f"  sweep={args.sweep}  datasets={datasets}")
+    print(f"  epochs={args.epochs}  gpus={gpu_list}  seed={args.seed}")
+    print(f"  训练次数: {n_runs}  output → {out_root}")
+    print(f"{'='*70}\n")
 
-    if args.sweep in ('expand', 'both'):
-        print(f"\n>>> expand_ratio sweep: {expand_values}  (sigma_ratio=1.5 fixed)")
-        expand_results = run_expand_sweep(
-            datasets, expand_values, out_root, args.epochs, args.gpu, args.seed)
-        print_and_save_results(
-            expand_results, 'expand_ratio', expand_values, out_root,
-            default_val=1.5, sweep_type='expand')
+    # ── gen_only 模式：只生成伪标签，打印训练命令供手动执行 ──
+    if args.gen_only:
+        all_sigma_jobs  = build_sigma_jobs(datasets, sigma_values)  if args.sweep in ('sigma', 'both') else []
+        all_expand_jobs = build_expand_jobs(datasets, expand_values) if args.sweep in ('expand', 'both') else []
+        all_jobs = all_sigma_jobs + all_expand_jobs
+
+        print("[gen_only] 生成所有伪标签...")
+        for job in all_jobs:
+            ds_name, cfg, param_val, param_type, mask_folder, exp_tag, mask_dir = job
+            expand = 1.5 if param_type == 'sigma' else param_val
+            sigma  = param_val if param_type == 'sigma' else 1.5
+            generate_pseudolabels(ds_name, cfg, mask_dir,
+                                  expand_ratio=expand, sigma_ratio=sigma)
+
+        print(f"\n[gen_only] 完成！共生成 {len(all_jobs)} 套伪标签。")
+        print("\n以下是对应的训练命令（在不同 GPU/tmux 窗口中执行）：\n")
+        for i, job in enumerate(all_jobs):
+            ds_name, cfg, param_val, param_type, mask_folder, exp_tag, mask_dir = job
+            img_folder = cfg['image_folder']
+            split      = cfg['split_method']
+            print(f"# Job {i+1}: {exp_tag}")
+            print(f"CUDA_VISIBLE_DEVICES=? python train.py \\")
+            print(f"    --model DNANet --dataset {ds_name} --split_method {split} \\")
+            print(f"    --root dataset --image_folder {img_folder} --mask_folder {mask_folder} \\")
+            print(f"    --epochs {args.epochs} --experiment_name {exp_tag} \\")
+            print(f"    --seed {args.seed} --in_channels 1 --base_size 256 --crop_size 256 \\")
+            print(f"    --deep_supervision True --train_batch_size 4 --test_batch_size 4")
+            print()
+        return
+
+    # ── collect 模式：扫描已完成的 checkpoint，直接输出结果表格 ──
+    if args.collect:
+        all_sigma_jobs  = build_sigma_jobs(datasets, sigma_values)  if args.sweep in ('sigma', 'both') else []
+        all_expand_jobs = build_expand_jobs(datasets, expand_values) if args.sweep in ('expand', 'both') else []
+
+        if all_sigma_jobs:
+            print("[collect] 扫描 sigma sweep 结果...")
+            results_map = {}
+            for job in all_sigma_jobs:
+                _, _, _, _, _, exp_tag, _ = job
+                miou = _parse_best_miou_by_tag(exp_tag, t_start=0)
+                print(f"  {exp_tag}: {miou:.4f}" if not (miou != miou) else f"  {exp_tag}: not found")
+                results_map[exp_tag] = miou
+            sigma_results = jobs_to_results(all_sigma_jobs, results_map)
+            print_and_save_results(sigma_results, 'sigma_ratio', sigma_values, out_root,
+                                   default_val=1.5, sweep_type='sigma')
+
+        if all_expand_jobs:
+            print("[collect] 扫描 expand sweep 结果...")
+            results_map = {}
+            for job in all_expand_jobs:
+                _, _, _, _, _, exp_tag, _ = job
+                miou = _parse_best_miou_by_tag(exp_tag, t_start=0)
+                print(f"  {exp_tag}: {miou:.4f}" if not (miou != miou) else f"  {exp_tag}: not found")
+                results_map[exp_tag] = miou
+            expand_results = jobs_to_results(all_expand_jobs, results_map)
+            print_and_save_results(expand_results, 'expand_ratio', expand_values, out_root,
+                                   default_val=1.5, sweep_type='expand')
+        return
+
+    if parallel:
+        # ── 并行模式：一次性收集所有 job，同时启动 ──
+        all_sigma_jobs  = build_sigma_jobs(datasets, sigma_values)  if args.sweep in ('sigma', 'both') else []
+        all_expand_jobs = build_expand_jobs(datasets, expand_values) if args.sweep in ('expand', 'both') else []
+        all_jobs = all_sigma_jobs + all_expand_jobs
+
+        print(f"[Parallel] {len(all_jobs)} jobs → {len(gpu_list)} GPUs ({gpu_list})")
+        results_map = run_parallel_sweep(all_jobs, gpu_list)
+
+        if all_sigma_jobs:
+            sigma_results = jobs_to_results(all_sigma_jobs, results_map)
+            print_and_save_results(sigma_results, 'sigma_ratio', sigma_values, out_root,
+                                   default_val=1.5, sweep_type='sigma')
+        if all_expand_jobs:
+            expand_results = jobs_to_results(all_expand_jobs, results_map)
+            print_and_save_results(expand_results, 'expand_ratio', expand_values, out_root,
+                                   default_val=1.5, sweep_type='expand')
+    else:
+        # ── 串行模式（原逻辑）──
+        gpu = gpu_list[0]
+        if args.sweep in ('sigma', 'both'):
+            print(f">>> sigma_ratio sweep: {sigma_values}  (expand_ratio=1.5 fixed)")
+            sigma_results = run_sigma_sweep(datasets, sigma_values, out_root,
+                                            args.epochs, gpu, args.seed)
+            print_and_save_results(sigma_results, 'sigma_ratio', sigma_values, out_root,
+                                   default_val=1.5, sweep_type='sigma')
+        if args.sweep in ('expand', 'both'):
+            print(f">>> expand_ratio sweep: {expand_values}  (sigma_ratio=1.5 fixed)")
+            expand_results = run_expand_sweep(datasets, expand_values, out_root,
+                                              args.epochs, gpu, args.seed)
+            print_and_save_results(expand_results, 'expand_ratio', expand_values, out_root,
+                                   default_val=1.5, sweep_type='expand')
 
     print(f"\n{'='*70}")
     print(f"  All done. Results in: {out_root}")
