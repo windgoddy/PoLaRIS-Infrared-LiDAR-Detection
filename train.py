@@ -100,7 +100,13 @@ class Trainer(object):
 
         # pluggable tricks
         self.ohem_ratio = getattr(args, 'ohem_ratio', 0.0)
-        self.scaler = torch.amp.GradScaler('cuda') if getattr(args, 'use_amp', False) else None
+        if getattr(args, 'use_amp', False):
+            try:
+                self.scaler = torch.amp.GradScaler('cuda')       # PyTorch >= 2.0
+            except AttributeError:
+                self.scaler = torch.cuda.amp.GradScaler()        # PyTorch < 2.0
+        else:
+            self.scaler = None
 
         # Loss function (2026-03-17)
         self.loss_type = getattr(args, 'loss_type', 'soft_iou')
@@ -137,7 +143,13 @@ class Trainer(object):
             data   = data.cuda()
             labels = labels.cuda()
             self.optimizer.zero_grad()
-            amp_ctx = torch.amp.autocast('cuda') if self.scaler is not None else contextlib.nullcontext()
+            if self.scaler is not None:
+                try:
+                    amp_ctx = torch.amp.autocast('cuda')         # PyTorch >= 2.0
+                except AttributeError:
+                    amp_ctx = torch.cuda.amp.autocast()          # PyTorch < 2.0
+            else:
+                amp_ctx = contextlib.nullcontext()
             with amp_ctx:
                 if args.deep_supervision == 'True':
                     preds= self.model(data)
