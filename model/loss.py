@@ -22,6 +22,25 @@ def SoftIoULoss( pred, target):
 
         return loss
 
+def focal_loss_per_pixel(pred, target, alpha=2.0, gamma=4.0):
+    """Per-pixel Focal Loss without reduction (same formulation as LESPS utils.py)."""
+    pred = torch.sigmoid(pred)
+    eps = 1e-12
+    pos_weights = target
+    neg_weights = (1 - target).pow(gamma)
+    pos_loss = -(pred + eps).log() * (1 - pred).pow(alpha) * pos_weights
+    neg_loss = -(1 - pred + eps).log() * pred.pow(alpha) * neg_weights
+    return pos_loss + neg_loss
+
+def focal_loss_ohem(pred, target, ohem_ratio=0.5, alpha=2.0, gamma=4.0):
+    """Focal Loss + OHEM: keep the hardest (1 - ohem_ratio) fraction of pixels."""
+    per_pixel = focal_loss_per_pixel(pred, target, alpha=alpha, gamma=gamma)
+    loss_flat = per_pixel.reshape(-1)
+    n_keep = max(int(loss_flat.numel() * (1.0 - ohem_ratio)), 1)
+    topk_loss, _ = loss_flat.topk(n_keep)
+    avg_factor = max(1, int((target > 0.5).sum().item()))
+    return topk_loss.sum() / avg_factor
+
 class ConfidenceLoss(nn.Module):
     def __init__(self):
         super(ConfidenceLoss, self).__init__()

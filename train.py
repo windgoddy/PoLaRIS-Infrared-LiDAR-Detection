@@ -6,12 +6,14 @@ from torch.optim      import lr_scheduler
 from torchvision      import transforms
 from torch.utils.data import DataLoader
 from model.parse_args_train import  parse_args
+import contextlib
 
 # metric, loss .etc
 from model.utils import *
 from model.metric import *
 from model.metric import calculate_mask_to_box_iou  # 2026-02-03: Added Mask-to-Box IoU
 from model.loss import *
+from model.loss import focal_loss_ohem
 from model.load_param_data import  load_dataset, load_param
 from model_Mamba.core.loss_advanced import LossFactory  # 2026-03-17: projection/hybrid loss support
 
@@ -48,7 +50,7 @@ class Trainer(object):
                 transforms.Normalize([.485, .456, .406], [.229, .224, .225])])
                 
         mask_folder = getattr(args, 'mask_folder', 'masks')
-        trainset        = TrainSetLoader(dataset_dir,img_id=train_img_ids,base_size=args.base_size,crop_size=args.crop_size,transform=input_transform,suffix=args.suffix, in_channels=args.in_channels, image_folder=args.image_folder, mask_folder=mask_folder)
+        trainset        = TrainSetLoader(dataset_dir,img_id=train_img_ids,base_size=args.base_size,crop_size=args.crop_size,transform=input_transform,suffix=args.suffix, in_channels=args.in_channels, image_folder=args.image_folder, mask_folder=mask_folder, aug_rotate=getattr(args, 'aug_rotate', False))
         testset         = TestSetLoader (dataset_dir,img_id=val_img_ids,base_size=args.base_size, crop_size=args.crop_size, transform=input_transform,suffix=args.suffix, in_channels=args.in_channels, image_folder=args.image_folder, mask_folder='masks')
         self.train_data = DataLoader(dataset=trainset, batch_size=args.train_batch_size, shuffle=True, num_workers=args.workers,drop_last=True)
         self.test_data  = DataLoader(dataset=testset,  batch_size=args.test_batch_size, num_workers=args.workers,drop_last=False)
@@ -73,8 +75,14 @@ class Trainer(object):
             self.optimizer  = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr)
         elif args.optimizer == 'Adagrad':
             self.optimizer  = torch.optim.Adagrad(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr)
+        elif args.optimizer == 'AdamW':
+            self.optimizer  = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, weight_decay=1e-4)
         if args.scheduler   == 'CosineAnnealingLR':
             self.scheduler  = lr_scheduler.CosineAnnealingLR( self.optimizer, T_max=args.epochs, eta_min=args.min_lr)
+
+        # pluggable tricks
+        self.ohem_ratio = getattr(args, 'ohem_ratio', 0.0)
+        self.scaler = torch.cuda.amp.GradScaler() if getattr(args, 'use_amp', False) else None
 
         # Loss function (2026-03-17)
         self.loss_type = getattr(args, 'loss_type', 'soft_iou')
@@ -110,24 +118,35 @@ class Trainer(object):
         for i, ( data, labels, _) in enumerate(tbar):
             data   = data.cuda()
             labels = labels.cuda()
-            if args.deep_supervision == 'True':
-                preds= self.model(data)
-                loss = 0
-                for pred in preds:
-                    if self.loss_type == 'soft_iou':
-                        loss += SoftIoULoss(pred, labels)
-                    else:
-                        loss += self.criterion(torch.sigmoid(pred), labels)
-                loss /= len(preds)
-            else:
-               pred = self.model(data)
-               if self.loss_type == 'soft_iou':
-                   loss = SoftIoULoss(pred, labels)
-               else:
-                   loss = self.criterion(torch.sigmoid(pred), labels)
             self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
+            amp_ctx = torch.cuda.amp.autocast() if self.scaler is not None else contextlib.nullcontext()
+            with amp_ctx:
+                if args.deep_supervision == 'True':
+                    preds= self.model(data)
+                    loss = 0
+                    for pred in preds:
+                        if self.ohem_ratio > 0:
+                            loss += focal_loss_ohem(pred, labels, ohem_ratio=self.ohem_ratio)
+                        elif self.loss_type == 'soft_iou':
+                            loss += SoftIoULoss(pred, labels)
+                        else:
+                            loss += self.criterion(torch.sigmoid(pred), labels)
+                    loss /= len(preds)
+                else:
+                    pred = self.model(data)
+                    if self.ohem_ratio > 0:
+                        loss = focal_loss_ohem(pred, labels, ohem_ratio=self.ohem_ratio)
+                    elif self.loss_type == 'soft_iou':
+                        loss = SoftIoULoss(pred, labels)
+                    else:
+                        loss = self.criterion(torch.sigmoid(pred), labels)
+            if self.scaler is not None:
+                self.scaler.scale(loss).backward()
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                loss.backward()
+                self.optimizer.step()
             losses.update(loss.item(), pred.size(0))
             tbar.set_description('Epoch %d, training loss %.4f' % (epoch, losses.avg))
         self.train_loss = losses.avg

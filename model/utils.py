@@ -17,7 +17,7 @@ class TrainSetLoader(Dataset):
     """Iceberg Segmentation dataset."""
     NUM_CLASS = 1
 
-    def __init__(self, dataset_dir, img_id ,base_size=512,crop_size=480,transform=None,suffix='.png', in_channels=3, image_folder='images', mask_folder='masks'):
+    def __init__(self, dataset_dir, img_id ,base_size=512,crop_size=480,transform=None,suffix='.png', in_channels=3, image_folder='images', mask_folder='masks', aug_rotate=False):
         super(TrainSetLoader, self).__init__()
 
         self.transform = transform
@@ -30,6 +30,7 @@ class TrainSetLoader(Dataset):
         self.crop_size = crop_size
         self.suffix = suffix
         self.in_channels = in_channels
+        self.aug_rotate = aug_rotate
 
     def _sync_transform(self, img, mask, depth=None, oracle_mask=None):
         # random mirror
@@ -40,6 +41,17 @@ class TrainSetLoader(Dataset):
                 depth = depth.transpose(Image.FLIP_LEFT_RIGHT)
             if oracle_mask is not None:
                 oracle_mask = oracle_mask.transpose(Image.FLIP_LEFT_RIGHT)
+        # pluggable trick: random 90-degree rotation
+        if self.aug_rotate:
+            k = random.randint(0, 3)
+            if k > 0:
+                rot_map = {1: Image.ROTATE_90, 2: Image.ROTATE_180, 3: Image.ROTATE_270}
+                img = img.transpose(rot_map[k])
+                mask = mask.transpose(rot_map[k])
+                if depth is not None:
+                    depth = depth.transpose(rot_map[k])
+                if oracle_mask is not None:
+                    oracle_mask = oracle_mask.transpose(rot_map[k])
         crop_size = self.crop_size
         # random scale (short edge)
         long_size = random.randint(int(self.base_size * 0.5), int(self.base_size * 2.0))

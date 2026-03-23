@@ -50,7 +50,7 @@ def parse_args():
     parser.add_argument('--min_lr', default=1e-5,
                         type=float, help='minimum learning rate')
     parser.add_argument('--optimizer', type=str, default='Adagrad',
-                        help=' Adam, Adagrad')
+                        help='Adam, Adagrad, AdamW')
     parser.add_argument('--scheduler', default='CosineAnnealingLR',
                         choices=['CosineAnnealingLR', 'ReduceLROnPlateau'])
     parser.add_argument('--lr', type=float, default=0.05, metavar='LR',
@@ -68,6 +68,15 @@ def parse_args():
     # reproducibility
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed for reproducibility (default: 42)')
+
+    # ---------- pluggable training tricks (all off by default) ----------
+    parser.add_argument('--use_amp', action='store_true',
+                        help='Mixed-precision training (AMP); speeds up training, no metric change')
+    parser.add_argument('--ohem_ratio', type=float, default=0.0,
+                        help='OHEM: keep hardest fraction; 0.0=disabled, 0.5=keep hardest 50%%. '
+                             'When >0, switches loss to per-pixel Focal Loss + OHEM.')
+    parser.add_argument('--aug_rotate', action='store_true',
+                        help='Add random 90-degree rotation to training augmentation')
 
     # loss function
     parser.add_argument('--loss_type', type=str, default='soft_iou',
