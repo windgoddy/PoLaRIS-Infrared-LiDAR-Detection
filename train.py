@@ -82,7 +82,7 @@ class Trainer(object):
 
         # pluggable tricks
         self.ohem_ratio = getattr(args, 'ohem_ratio', 0.0)
-        self.scaler = torch.cuda.amp.GradScaler() if getattr(args, 'use_amp', False) else None
+        self.scaler = torch.amp.GradScaler('cuda') if getattr(args, 'use_amp', False) else None
 
         # Loss function (2026-03-17)
         self.loss_type = getattr(args, 'loss_type', 'soft_iou')
@@ -119,7 +119,7 @@ class Trainer(object):
             data   = data.cuda()
             labels = labels.cuda()
             self.optimizer.zero_grad()
-            amp_ctx = torch.cuda.amp.autocast() if self.scaler is not None else contextlib.nullcontext()
+            amp_ctx = torch.amp.autocast('cuda') if self.scaler is not None else contextlib.nullcontext()
             with amp_ctx:
                 if args.deep_supervision == 'True':
                     preds= self.model(data)
@@ -155,7 +155,12 @@ class Trainer(object):
     # Testing
     def testing (self, epoch):
         tbar = tqdm(self.test_data)
-        self.model.eval()
+        # When train_batch_size=1, BN running_var decays to ~0 and eval mode collapses.
+        # Use train-mode batch stats (test_batch_size>=4) to bypass corrupted running stats.
+        if getattr(self.args, 'train_batch_size', 4) == 1:
+            self.model.train()
+        else:
+            self.model.eval()
         self.mIoU.reset()
         self.PD_FA.reset()
         losses = AverageMeter()

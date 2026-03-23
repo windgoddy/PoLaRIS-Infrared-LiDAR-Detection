@@ -45,7 +45,7 @@ class TrainSetLoader(Dataset):
         if self.aug_rotate:
             k = random.randint(0, 3)
             if k > 0:
-                rot_map = {1: Image.ROTATE_90, 2: Image.ROTATE_180, 3: Image.ROTATE_270}
+                rot_map = {1: Image.Transpose.ROTATE_90, 2: Image.Transpose.ROTATE_180, 3: Image.Transpose.ROTATE_270}
                 img = img.transpose(rot_map[k])
                 mask = mask.transpose(rot_map[k])
                 if depth is not None:
