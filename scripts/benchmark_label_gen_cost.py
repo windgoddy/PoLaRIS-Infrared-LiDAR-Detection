@@ -60,16 +60,46 @@ def load_img_ids(root, dataset, split_method='50_50'):
     return ids
 
 
+def detect_image_folder(root, dataset, img_id_sample, suffix):
+    """
+    自动探测数据集的图像文件夹名和后缀。
+    依次尝试常见目录名和后缀，返回 (images_dir, suffix)。
+    """
+    candidate_folders = ['images', 'images-8bit', 'img', 'image', 'imgs',
+                         'IRSTD1k_Img', 'NUDT-SIRST', 'NUAA-SIRST']
+    candidate_suffixes = [suffix, '.png', '.jpg', '.jpeg', '.bmp']
+
+    for folder in candidate_folders:
+        images_dir = os.path.join(root, dataset, folder)
+        if not os.path.isdir(images_dir):
+            continue
+        for suf in candidate_suffixes:
+            test_path = os.path.join(images_dir, img_id_sample + suf)
+            if os.path.exists(test_path):
+                if folder != 'images' or suf != suffix:
+                    print(f"  [auto-detect] {dataset}: 图像目录={folder}, 后缀={suf}")
+                return images_dir, suf
+    # 找不到时返回默认值，让后续读取失败时打印 skip
+    return os.path.join(root, dataset, 'images'), suffix
+
+
 def time_halo_on_dataset(root, dataset, img_ids, suffix,
                           expand_ratio, temperature, gauss_sigma_ratio,
-                          mode='D', dry_run=None):
+                          mode='D', dry_run=None, image_folder=None):
     """
     对指定数据集的全部训练图像运行 HALO 标签生成，返回计时统计。
 
     mode: 'C' = 仅 B-SNR（无高斯），'D' = B-SNR + PAG 高斯（完整 HALO）
     """
-    images_dir = os.path.join(root, dataset, 'images')
     labels_dir = os.path.join(root, dataset, 'labels_box')
+
+    # 自动探测图像目录和后缀（可被 --image_folder 覆盖）
+    sample_id = img_ids[0] if img_ids else 'unknown'
+    if image_folder:
+        images_dir = os.path.join(root, dataset, image_folder)
+        print(f"  [override] {dataset}: 图像目录={image_folder}")
+    else:
+        images_dir, suffix = detect_image_folder(root, dataset, sample_id, suffix)
 
     spatial_gaussian = (mode == 'D')
     ids = img_ids[:dry_run] if dry_run else img_ids
@@ -210,6 +240,8 @@ def main():
                         help='只测 HALO，跳过 B-SNR only（C组）')
     parser.add_argument('--dry_run', type=int, default=None,
                         help='每个数据集只处理前 N 张（调试用）')
+    parser.add_argument('--image_folder', type=str, default=None,
+                        help='强制指定图像子目录名（如 IRSTD1k_Img），覆盖自动探测')
     args = parser.parse_args()
 
     print("=" * 65)
@@ -243,14 +275,14 @@ def main():
             r = time_halo_on_dataset(
                 args.root, ds, ids, args.suffix,
                 args.expand_ratio, args.temperature, args.gauss_sigma_ratio,
-                mode='C', dry_run=args.dry_run
+                mode='C', dry_run=args.dry_run, image_folder=args.image_folder
             )
             results_C[ds] = r
 
         r = time_halo_on_dataset(
             args.root, ds, ids, args.suffix,
             args.expand_ratio, args.temperature, args.gauss_sigma_ratio,
-            mode='D', dry_run=args.dry_run
+            mode='D', dry_run=args.dry_run, image_folder=args.image_folder
         )
         results_D[ds] = r
 
