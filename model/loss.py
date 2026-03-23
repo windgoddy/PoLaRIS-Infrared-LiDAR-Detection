@@ -24,8 +24,8 @@ def SoftIoULoss( pred, target):
 
 def focal_loss_per_pixel(pred, target, alpha=2.0, gamma=4.0):
     """Per-pixel Focal Loss without reduction (same formulation as LESPS utils.py)."""
-    pred = torch.sigmoid(pred)
-    eps = 1e-12
+    pred = torch.sigmoid(pred).clamp(min=1e-6, max=1-1e-6)  # float16-safe: avoids log(0)=nan under AMP
+    eps = 1e-6
     pos_weights = target
     neg_weights = (1 - target).pow(gamma)
     pos_loss = -(pred + eps).log() * (1 - pred).pow(alpha) * pos_weights
