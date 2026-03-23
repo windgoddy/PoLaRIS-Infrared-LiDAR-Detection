@@ -67,6 +67,24 @@ class Trainer(object):
 
         model           = model.cuda()
         model.apply(weights_init_xavier)
+        # batch_size=1: BatchNorm var=0 → output collapses to constant bias; replace with GroupNorm
+        if args.train_batch_size == 1:
+            def _bn_to_gn(m):
+                for name, child in m.named_children():
+                    if isinstance(child, torch.nn.BatchNorm2d):
+                        num_ch = child.num_features
+                        g = 32
+                        while g > 1 and num_ch % g != 0:
+                            g //= 2
+                        gn = torch.nn.GroupNorm(g, num_ch, eps=child.eps, affine=child.affine).cuda()
+                        if child.affine:
+                            gn.weight.data.copy_(child.weight.data)
+                            gn.bias.data.copy_(child.bias.data)
+                        setattr(m, name, gn)
+                    else:
+                        _bn_to_gn(child)
+            _bn_to_gn(model)
+            print("[Info] train_batch_size=1: replaced BatchNorm2d → GroupNorm")
         print("Model Initializing")
         self.model      = model
 
