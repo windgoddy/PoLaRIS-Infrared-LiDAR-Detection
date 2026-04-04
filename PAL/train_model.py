@@ -39,7 +39,7 @@ choose_dataset_type = os.environ.get('PAL_DATASET_TYPE', 'masks_centroid')
 LEARNING_RATE = 1e-3  #default: 1e-3;    When the choose_model = 'GGL' or 'ALCL', "LEARNING_RATE = 5e-4" can be considered to obtain relatively more stable training.
 # GPU 由外部 CUDA_VISIBLE_DEVICES 控制，此处不再覆盖
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-TRAIN_BATCH_SIZE = 16   #default: 16
+TRAIN_BATCH_SIZE = 4   #default: 16
 TEST_BATCH_SIZE = 1
 TEST_PATCH_BATCH_SIZE = 16
 NUM_EPOCHS = 400     #default: 400

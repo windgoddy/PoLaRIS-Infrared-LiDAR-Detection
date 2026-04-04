@@ -43,6 +43,7 @@ def compute_bsnr_weight(
     epsilon: float = 1e-4,
     spatial_gaussian: bool = False,
     gauss_sigma_ratio: float = 1.5,
+    return_sigma: bool = False,
 ) -> np.ndarray:
     """
     计算单个 Box 内的 B-SNR 物理权重图。
@@ -63,9 +64,14 @@ def compute_bsnr_weight(
                            gauss_sigma_ratio=1.5 → 保守，允许目标边缘有残余响应
                            默认 1.5；σ 下界 1.0 px（防极端退化）
 
+        return_sigma: bool = False,  —— 若为 True 且 spatial_gaussian=True，
+                           则返回 (weight, sigma_px) 元组；否则只返回 weight
+
     Returns:
         weight: (box_h, box_w) float32，值域 [0, 1]，物理 SNR 权重
                 若 spatial_gaussian=True，则为 B-SNR × 物理锚定高斯的乘积
+        sigma_px (仅当 return_sigma=True 且 spatial_gaussian=True 时额外返回):
+                PAG 高斯的标准差（像素），即 FWHM 区域 SNR 加权扩散半径 × ratio
     """
     H, W = image_gray.shape
     x1, y1, x2, y2 = box
@@ -73,7 +79,8 @@ def compute_bsnr_weight(
     box_h = y2 - y1
 
     if box_w <= 0 or box_h <= 0:
-        return np.zeros((max(1, box_h), max(1, box_w)), dtype=np.float32)
+        result = np.zeros((max(1, box_h), max(1, box_w)), dtype=np.float32)
+        return (result, 1.0) if (return_sigma and spatial_gaussian) else result
 
     # === Step 1: 计算膨胀后的 Context Box ===
     # 每边向外扩展 (expand_ratio - 1) / 2 * box_dim
@@ -143,6 +150,8 @@ def compute_bsnr_weight(
         gauss = np.exp(-dist_sq / (2 * sigma_px ** 2)).astype(np.float32)
         weight = weight * gauss
 
+    if return_sigma and spatial_gaussian:
+        return weight.astype(np.float32), sigma_px
     return weight.astype(np.float32)
 
 

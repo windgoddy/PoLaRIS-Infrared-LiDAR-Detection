@@ -99,10 +99,10 @@ def load_yolo_boxes(label_path, img_h, img_w):
             if len(parts) < 5:
                 continue
             _, cx, cy, w, h = int(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])
-            x1 = max(0, int((cx - w / 2) * img_w))
-            y1 = max(0, int((cy - h / 2) * img_h))
-            x2 = min(img_w, int((cx + w / 2) * img_w))
-            y2 = min(img_h, int((cy + h / 2) * img_h))
+            x1 = max(0, round((cx - w / 2) * img_w))
+            y1 = max(0, round((cy - h / 2) * img_h))
+            x2 = min(img_w, round((cx + w / 2) * img_w))
+            y2 = min(img_h, round((cy + h / 2) * img_h))
             if x2 > x1 and y2 > y1:
                 boxes.append((x1, y1, x2, y2))
     return boxes
@@ -202,6 +202,11 @@ def load_data(ds_name, sample_name, root, compute_bsnr_weight):
     cx = (bx1 + bx2) // 2
     cy = (by1 + by2) // 2
 
+    _, sigma_px = compute_bsnr_weight(
+        img_float, primary_box, expand_ratio=1.5, temperature=3.0,
+        spatial_gaussian=True, gauss_sigma_ratio=1.5, return_sigma=True
+    )
+
     geo_full = make_geo_gaussian([primary_box], H, W)
 
     # Step 4: 以主 box 中心裁剪（上下文大图，用于 01-04, 08, 10）
@@ -225,6 +230,7 @@ def load_data(ds_name, sample_name, root, compute_bsnr_weight):
     bsnr_z,  _,   _   = crop_patch(bsnr_full, px_star, py_star, zoom_size)
     halo_z,  _,   _   = crop_patch(halo_full, px_star, py_star, zoom_size)
     geo_z,   _,   _   = crop_patch(geo_full,  px_star, py_star, zoom_size)
+    mask_z,  _,   _   = crop_patch(mask_full.astype(np.float32), px_star, py_star, zoom_size)
     boxes_z = [(primary_box[0] - zox, primary_box[1] - zoy,
                 primary_box[2] - zox, primary_box[3] - zoy)]
     px_star_z = px_star - zox
@@ -238,12 +244,18 @@ def load_data(ds_name, sample_name, root, compute_bsnr_weight):
         'px_star_p': px_star_p, 'py_star_p': py_star_p,
         # 放大切片（紧凑）
         'img_z': img_z, 'bsnr_z': bsnr_z, 'halo_z': halo_z, 'geo_z': geo_z,
+        'mask_z': mask_z,
         'boxes_z': boxes_z,
         'px_star_z': px_star_z, 'py_star_z': py_star_z,
         'zoom_size': zoom_size,
+        'sigma_px': sigma_px,
         # meta
         'H': H, 'W': W, 'ox': ox, 'oy': oy,
         'primary_box': primary_box,
+        # zoom 裁剪原点（供外部 preds 加载时复用）
+        'zox': zox, 'zoy': zoy,
+        'zoom_size': zoom_size,
+        'px_star': px_star, 'py_star': py_star,
     }
 
 
@@ -265,7 +277,9 @@ def save_patch(path, render_fn, dpi=DPI):
 def draw_box_in_patch(ax, boxes_p, color='#FF3333', lw=2.5, ls='-'):
     for (x1, y1, x2, y2) in boxes_p:
         w, h = x2 - x1, y2 - y1
-        rect = mpatches.Rectangle((x1, y1), w, h,
+        # -0.5 aligns the rectangle edge with the pixel boundary
+        # (imshow centers pixel i at coordinate i, so edge is at i-0.5)
+        rect = mpatches.Rectangle((x1 - 0.5, y1 - 0.5), w, h,
                                    linewidth=lw, edgecolor=color,
                                    facecolor='none', linestyle=ls)
         ax.add_patch(rect)
@@ -281,17 +295,22 @@ def draw_context_box(ax, boxes_p, expand_ratio=1.5, color='#FF8800', lw=1.8):
         cy1 = y1 - margin_y
         cw  = bw + 2 * margin_x
         ch  = bh + 2 * margin_y
-        rect = mpatches.Rectangle((cx1, cy1), cw, ch,
+        # -0.5 aligns the rectangle edge with the pixel boundary
+        rect = mpatches.Rectangle((cx1 - 0.5, cy1 - 0.5), cw, ch,
                                    linewidth=1.8, edgecolor=color,
                                    facecolor='none', linestyle='--')
         ax.add_patch(rect)
 
 
-def draw_crosshair(ax, px, py, size=6, color='#FFFF00', lw=1.8):
-    """在 (px, py) 画准星（十字+圆圈）标注物理热点 p*。"""
+def draw_crosshair(ax, px, py, size=6, color='#FFFF00', lw=1.8, radius=None):
+    """在 (px, py) 画准星（十字+圆圈）标注物理热点 p*。
+    radius: 圆圈半径；若为 None 则退回到 size * 0.8（经验值）。
+            建议传入 PAG 的 sigma_px，使圆圈对应高斯软标签的 e^(-1/2) 等高线。
+    """
     ax.plot([px - size, px + size], [py, py], color=color, lw=lw, zorder=10)
     ax.plot([px, px], [py - size, py + size], color=color, lw=lw, zorder=10)
-    circle = mpatches.Circle((px, py), radius=size * 0.8,
+    r = radius if radius is not None else size * 0.8
+    circle = mpatches.Circle((px, py), radius=r,
                                linewidth=lw, edgecolor=color,
                                facecolor='none', zorder=10)
     ax.add_patch(circle)
@@ -317,14 +336,16 @@ def generate_patches(data, out_dir):
     bsnr_z   = data['bsnr_z']
     halo_z   = data['halo_z']
     geo_z    = data['geo_z']
+    mask_z   = data['mask_z']
     boxes_z  = data['boxes_z']
     px_sz    = data['px_star_z']
     py_sz    = data['py_star_z']
     ZS       = data['zoom_size']
+    sigma_px = data['sigma_px']
 
     os.makedirs(out_dir, exist_ok=True)
 
-    # 标记尺寸（在 zoom 坐标空间内）
+    # 准星十字臂长 —— 经验尺寸；圆圈半径用 PAG 的物理 σ
     mk_zoom = max(2, ZS // 8)
     lw_zoom = 1.2
 
@@ -388,7 +409,7 @@ def generate_patches(data, out_dir):
     def r07(fig, ax):
         overlay_heatmap(ax, img_z, bsnr_z, cmap='inferno', alpha=0.65)
         draw_box_in_patch(ax, boxes_z, color='#FF3333', lw=lw_zoom, ls='--')
-        draw_crosshair(ax, px_sz, py_sz, size=mk_zoom, color='#FFFF00', lw=lw_zoom)
+        draw_crosshair(ax, px_sz, py_sz, size=mk_zoom, color='#FFFF00', lw=lw_zoom, radius=sigma_px)
         ax.set_xlim(0, ZS); ax.set_ylim(ZS, 0)
     save_patch(os.path.join(out_dir, '07_argmax_marker.png'), r07)
 
@@ -396,9 +417,16 @@ def generate_patches(data, out_dir):
     def r08(fig, ax):
         overlay_heatmap(ax, img_z, halo_z, cmap='inferno', alpha=0.75)
         draw_box_in_patch(ax, boxes_z, color='#FF3333', lw=lw_zoom, ls='--')
-        draw_crosshair(ax, px_sz, py_sz, size=mk_zoom, color='#FFFF00', lw=lw_zoom)
+        draw_crosshair(ax, px_sz, py_sz, size=mk_zoom, color='#FFFF00', lw=lw_zoom, radius=sigma_px)
         ax.set_xlim(0, ZS); ax.set_ylim(ZS, 0)
     save_patch(os.path.join(out_dir, '08_halo.png'), r08)
+
+    # ── 08b HALO PAG 软标签（无准星）【ZOOM】 ────────────────────────
+    def r08b(fig, ax):
+        overlay_heatmap(ax, img_z, halo_z, cmap='inferno', alpha=0.75)
+        draw_box_in_patch(ax, boxes_z, color='#FF3333', lw=lw_zoom, ls='--')
+        ax.set_xlim(0, ZS); ax.set_ylim(ZS, 0)
+    save_patch(os.path.join(out_dir, '08b_halo_nomarker.png'), r08b)
 
     # ── 09 失败预测（BoxFill 代理）【ZOOM】 ───────────────────────
     def r09(fig, ax):
@@ -413,19 +441,10 @@ def generate_patches(data, out_dir):
         ax.set_xlim(0, ZS); ax.set_ylim(ZS, 0)
     save_patch(os.path.join(out_dir, '09_fail_pred.png'), r09)
 
-    # ── 10 成功预测（HALO 二值化代理）【ZOOM】 ────────────────────
-    def r10(fig, ax):
-        ax.imshow(img_z, cmap='gray', interpolation='nearest', vmin=0, vmax=255)
-        succ_overlay = np.zeros((*img_z.shape, 4), dtype=np.float32)
-        succ_overlay[halo_z > 0.35, :] = [0.0, 1.0, 1.0, 0.80]
-        ax.imshow(succ_overlay, interpolation='nearest')
-        ax.set_xlim(0, ZS); ax.set_ylim(ZS, 0)
-    save_patch(os.path.join(out_dir, '10_success_pred.png'), r10)
-
     # ── 11 鲁棒性：±2px 偏移框 + 不变的 HALO【ZOOM】 ─────────────
     def r11(fig, ax):
         overlay_heatmap(ax, img_z, halo_z, cmap='inferno', alpha=0.75)
-        draw_crosshair(ax, px_sz, py_sz, size=mk_zoom, color='#FFFF00', lw=lw_zoom)
+        draw_crosshair(ax, px_sz, py_sz, size=mk_zoom, color='#FFFF00', lw=lw_zoom, radius=sigma_px)
         draw_box_in_patch(ax, boxes_z, color='#FF3333', lw=lw_zoom)
         for delta in [-2, +2]:
             shifted = [(x1+delta, y1+delta, x2+delta, y2+delta)
@@ -433,6 +452,122 @@ def generate_patches(data, out_dir):
             draw_box_in_patch(ax, shifted, color='#FF9999', lw=0.8, ls='--')
         ax.set_xlim(0, ZS); ax.set_ylim(ZS, 0)
     save_patch(os.path.join(out_dir, '11_robustness.png'), r11)
+
+    # ── 12a-12d 真实预测对比【ZOOM】（需要 preds_maps 已加载）─────
+    # preds_maps: dict of {method: (H,W) float32 [0,1]} in zoom coords
+    # 颜色方案：GT=白，HALO=青，B-SNR=绿，BoxFill=橙
+    # ── 12a-12e 真实预测对比【ZOOM】（需要 preds_maps 已加载）─────
+    # 颜色方案：GT annotation=白，GT-pred=白，HALO=青，B-SNR=绿，BoxFill=橙
+
+    # 12a: 原始 GT 像素标注（直接来自 mask_z，非预测结果）
+    def r12a(fig, ax):
+        ax.imshow(img_z, cmap='gray', interpolation='nearest', vmin=0, vmax=255)
+        gt_overlay = np.zeros((*img_z.shape, 4), dtype=np.float32)
+        gt_overlay[mask_z > 127, :] = [1.0, 1.0, 1.0, 0.90]
+        ax.imshow(gt_overlay, interpolation='nearest')
+        ax.set_xlim(0, ZS); ax.set_ylim(ZS, 0)
+    save_patch(os.path.join(out_dir, '12a_gt_annotation.png'), r12a)
+
+    _pred_cfg = [
+        ('12b_pred_gt.png',      'gt',      [1.0, 1.0, 1.0, 0.85]),
+        ('12c_pred_halo.png',    'halo',    [0.0, 1.0, 1.0, 0.85]),
+        ('12d_pred_bsnr.png',    'bsnr',    [0.2, 1.0, 0.2, 0.85]),
+        ('12e_pred_boxfill.png', 'boxfill', [1.0, 0.6, 0.0, 0.85]),
+    ]
+    preds_maps = data.get('preds_maps', {})
+    for fname, method, rgba in _pred_cfg:
+        if method not in preds_maps:
+            continue
+        pred_z = preds_maps[method]
+        def _make_r(pz=pred_z, c=rgba):
+            def _r(fig, ax):
+                ax.imshow(img_z, cmap='gray', interpolation='nearest', vmin=0, vmax=255)
+                overlay = np.zeros((*img_z.shape, 4), dtype=np.float32)
+                overlay[pz > 0.5, :] = c
+                ax.imshow(overlay, interpolation='nearest')
+                ax.set_xlim(0, ZS); ax.set_ylim(ZS, 0)
+            return _r
+        save_patch(os.path.join(out_dir, fname), _make_r())
+
+    # ── 13/14  B-SNR & HALO 3D/2D 能量曲面【ZOOM】──────────────────
+    # 利用真实 compute_bsnr_weight 算出的 bsnr_z / halo_z，
+    # 复用 fig_teaser_3d_surface.py 的 draw_3d_surface / draw_2d_heatmap。
+    import importlib.util as _ilu
+    from mpl_toolkits.mplot3d import Axes3D as _Axes3D  # noqa: F401 触发 3d 注册
+    _spec3d = _ilu.spec_from_file_location(
+        '_3d_utils',
+        os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                     'fig_teaser_3d_surface.py')
+    )
+    _mod3d = _ilu.module_from_spec(_spec3d)
+    _spec3d.loader.exec_module(_mod3d)
+    _draw3d = _mod3d.draw_3d_surface
+    _draw2d = _mod3d.draw_2d_heatmap
+    _T      = _mod3d.THEME['dark']
+    _FIG3D  = 4.5   # 英寸，3D patch 固定尺寸
+
+    bz = boxes_z[0]  # (x1, y1, x2, y2) 在 zoom 坐标系
+    _bx1, _by1, _bx2, _by2 = bz
+
+    # ── 裁剪到 YOLO 框内，p* 换算为框内局部坐标 ──────────────────
+    bsnr_box = bsnr_z[_by1:_by2, _bx1:_bx2].copy()
+    halo_box  = halo_z[_by1:_by2, _bx1:_bx2].copy()
+    px_box = px_sz - _bx1   # p* 在框内 x
+    py_box = py_sz - _by1   # p* 在框内 y
+
+    _surf_cfg = [
+        # (文件前缀,  Z 数据(框内),  cmap,      标题颜色,   p*星号颜色)
+        # B-SNR inferno 峰值为亮黄，红色不可见 → 用亮青色
+        ('13_bsnr',  bsnr_box, 'inferno', '#FB8C00', '#00FFFF'),
+        # HALO magma 峰值为深色，红色可见 → 沿用红色
+        ('14_halo',  halo_box, 'magma',   '#7B1FA2', '#FF3333'),
+    ]
+    _wire = [_T['wire_colors'][1], _T['wire_colors'][2]]  # bsnr→idx1, halo→idx2
+
+    for _i, (pref, Z, cmap, col_color, star_color) in enumerate(_surf_cfg):
+        # ── 3D 曲面（仅框内像素） ─────────────────────────────────
+        fig3d = plt.figure(figsize=(_FIG3D, _FIG3D), dpi=DPI)
+        fig3d.patch.set_facecolor(_T['bg'])
+        ax3d = fig3d.add_subplot(111, projection='3d')
+        ax3d.set_facecolor(_T['ax_bg'])
+        # 先画曲面（不带 highlight，避免 highlight_color='red' 在 inferno 上不可见）
+        _draw3d(ax3d, Z, title='', cmap=cmap, elev=28, azim=-50,
+                highlight_pos=None,
+                zlabel='Label Confidence', alpha_surf=0.92,
+                color_wireframe=_wire[_i], theme='dark')
+        # 再单独画 p* 星号（自定义颜色，保证在各 cmap 上均清晰可见）
+        if 0 <= px_box < Z.shape[1] and 0 <= py_box < Z.shape[0]:
+            _z_star = float(Z[py_box, px_box])
+            ax3d.scatter([px_box], [py_box], [_z_star + 0.06],
+                         color=star_color, s=160, zorder=10,
+                         marker='*', depthshade=False)
+            ax3d.plot([px_box, px_box], [py_box, py_box], [0, _z_star],
+                      color=star_color, lw=0.9, ls='--', alpha=0.7)
+        ax3d.set_title(pref.split('_', 1)[1].upper(),
+                       fontsize=11, fontweight='bold', pad=6, color=col_color)
+        _p3d = os.path.join(out_dir, f'{pref}_3d.png')
+        plt.savefig(_p3d, dpi=DPI, bbox_inches='tight',
+                    facecolor=_T['bg'], edgecolor='none')
+        plt.close(fig3d)
+        print(f"  → {os.path.basename(_p3d)}")
+
+        # ── 2D 热图（仅框内像素，无需画框轮廓） ───────────────────
+        fig2d, ax2d = plt.subplots(figsize=(_FIG3D, _FIG3D), dpi=DPI)
+        fig2d.patch.set_facecolor(_T['bg'])
+        ax2d.set_facecolor(_T['ax_bg'])
+        # highlight_pos=None，避免 draw_2d_heatmap 内部硬编码的 'r*' 覆盖颜色
+        _draw2d(ax2d, Z, title='', cmap=cmap,
+                highlight_pos=None,
+                box=None, show_box_outline=False, theme='dark')
+        # 单独画 p* 星号（与 3D 图保持相同自定义颜色）
+        ax2d.plot(px_box, py_box, marker='*', color=star_color,
+                  markersize=12, markeredgewidth=0.6,
+                  markeredgecolor='black', zorder=10)
+        _p2d = os.path.join(out_dir, f'{pref}_2d.png')
+        plt.savefig(_p2d, dpi=DPI, bbox_inches='tight',
+                    facecolor=_T['bg'], edgecolor='none')
+        plt.close(fig2d)
+        print(f"  → {os.path.basename(_p2d)}")
 
 
 # ────────────────────────────────────────────────────────────────
@@ -444,15 +579,19 @@ def make_preview(data, out_dir):
         '01_ir.png',
         '02_ir.png', '03_ir_box.png', '04_ir_context.png',
         '05_geo_gaussian.png', '06_bsnr.png', '07_argmax_marker.png',
-        '08_halo.png', '09_fail_pred.png', '10_success_pred.png',
+        '08_halo.png', '09_fail_pred.png',
         '11_robustness.png',
+        '13_bsnr_3d.png', '13_bsnr_2d.png',
+        '14_halo_3d.png', '14_halo_2d.png',
     ]
     captions = [
         '01 Full Image\n(zoom region)',
         '02 Zoom IR', '03 Zoom+Box', '04 Zoom+Context',
         '05 Geo-Gaussian\n(Wrong)', '06 B-SNR', '07 Argmax p*',
-        '08 HALO PAG\n(Ours)', '09 Fail Pred\n(BoxFill)', '10 Success\n(HALO)',
+        '08 HALO PAG\n(Ours)', '09 Fail Pred\n(BoxFill)',
         '11 Robustness\n(±2px)',
+        '13 B-SNR 3D', '13 B-SNR 2D',
+        '14 HALO 3D', '14 HALO 2D',
     ]
     n = len(files)
     cols = 4
@@ -573,6 +712,27 @@ def main(args):
 
     data = load_data(ds_name, sample_name, args.root, compute_bsnr_weight)
 
+    # ── 加载真实预测掩码，裁出 zoom 区域 ──────────────────────────
+    DS_SUFFIX = {'NUAA-SIRST': 'nuaa', 'NUDT-SIRST': 'nudt', 'IRSTD-1k': 'irstd'}
+    preds_root = args.preds_root
+    ds_suffix  = DS_SUFFIX.get(ds_name, '')
+    preds_maps = {}
+    for method in ['gt', 'halo', 'bsnr', 'boxfill']:
+        pred_path = os.path.join(preds_root, f'{method}_{ds_suffix}',
+                                 sample_name + '.png')
+        if not os.path.exists(pred_path):
+            print(f"  [WARN] preds not found: {pred_path}")
+            continue
+        pred_full = cv2.imread(pred_path, cv2.IMREAD_GRAYSCALE)
+        if pred_full is None:
+            continue
+        # 按与 img_z 相同的 zoom 裁剪参数裁切
+        pred_z, _, _ = crop_patch(pred_full.astype(np.float32),
+                                  data['px_star'], data['py_star'],
+                                  data['zoom_size'])
+        preds_maps[method] = pred_z / 255.0
+    data['preds_maps'] = preds_maps
+
     out_dir = args.out_dir
     print(f"\nGenerating patches → {out_dir}/")
     generate_patches(data, out_dir)
@@ -595,6 +755,9 @@ if __name__ == '__main__':
     parser.add_argument('--root', default=ROOT)
     parser.add_argument('--out_dir', default=os.path.join(
         ROOT, 'paper', 'figures', 'teaser_patches'))
+    parser.add_argument('--preds_root', default=os.path.join(
+        ROOT, 'paper', 'figures', 'preds'),
+        help='Root dir containing gt_*/halo_*/bsnr_*/boxfill_* prediction folders')
     parser.add_argument('--nuaa',  default='')
     parser.add_argument('--nudt',  default='')
     parser.add_argument('--irstd', default='')
