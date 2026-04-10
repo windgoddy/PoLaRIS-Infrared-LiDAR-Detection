@@ -69,7 +69,7 @@ case "$CMD" in
     (
       cd "$BOXINSTSEG_ROOT"
       CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" \
-        python tools/train.py "$CONFIG_PATH" --work-dir "$WORK_DIR"
+        python -W ignore tools/train.py "$CONFIG_PATH" --work-dir "$WORK_DIR"
     )
     ;;
 
@@ -84,7 +84,7 @@ case "$CMD" in
     (
       cd "$BOXINSTSEG_ROOT"
       CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" \
-        python tools/test.py "$CONFIG_PATH" "$ckpt" --out "$RESULTS_PKL"
+        python -W ignore tools/test.py "$CONFIG_PATH" "$ckpt" --out "$RESULTS_PKL"
     )
     echo "Saved results to $RESULTS_PKL"
     ;;
