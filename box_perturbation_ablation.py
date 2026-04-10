@@ -101,6 +101,68 @@ def perturb_boxes(boxes, delta, img_h, img_w, rng):
     return perturbed
 
 
+def perturb_center_shift(boxes, shift, img_h, img_w):
+    """
+    系统性中心偏移：所有框中心统一偏移 (dx, dy) 像素。
+    模拟检测器的定位 bias（系统误差，非随机）。
+    对 4 个方向各偏移一次取平均以消除方向性。
+    返回 4 个方向的扰动列表：[(dx,dy), boxes_list]
+    """
+    directions = [(shift, 0), (-shift, 0), (0, shift), (0, -shift)]
+    all_shifted = []
+    for (dx, dy) in directions:
+        shifted = []
+        for (x1, y1, x2, y2) in boxes:
+            w, h = x2 - x1, y2 - y1
+            cx = (x1 + x2) / 2 + dx
+            cy = (y1 + y2) / 2 + dy
+            nx1 = int(np.clip(cx - w / 2, 0, img_w - 2))
+            ny1 = int(np.clip(cy - h / 2, 0, img_h - 2))
+            nx2 = int(np.clip(cx + w / 2, nx1 + 1, img_w - 1))
+            ny2 = int(np.clip(cy + h / 2, ny1 + 1, img_h - 1))
+            shifted.append((nx1, ny1, nx2, ny2))
+        all_shifted.append(shifted)
+    return all_shifted  # list of 4 box-lists (one per direction)
+
+
+def perturb_scale_expand(boxes, scale, img_h, img_w):
+    """
+    均匀尺度膨胀：所有框等比放大 scale 倍（中心不变）。
+    模拟检测器倾向给大框的系统性偏差。
+    """
+    expanded = []
+    for (x1, y1, x2, y2) in boxes:
+        cx = (x1 + x2) / 2
+        cy = (y1 + y2) / 2
+        hw = (x2 - x1) / 2 * scale
+        hh = (y2 - y1) / 2 * scale
+        nx1 = int(np.clip(cx - hw, 0, img_w - 2))
+        ny1 = int(np.clip(cy - hh, 0, img_h - 2))
+        nx2 = int(np.clip(cx + hw, nx1 + 1, img_w - 1))
+        ny2 = int(np.clip(cy + hh, ny1 + 1, img_h - 1))
+        expanded.append((nx1, ny1, nx2, ny2))
+    return expanded
+
+
+def perturb_aspect_ratio(boxes, w_scale, h_scale, img_h, img_w):
+    """
+    长宽比扰动：宽高分别独立缩放。
+    模拟非正方形目标的误差（w_scale ≠ h_scale）。
+    """
+    perturbed = []
+    for (x1, y1, x2, y2) in boxes:
+        cx = (x1 + x2) / 2
+        cy = (y1 + y2) / 2
+        hw = (x2 - x1) / 2 * w_scale
+        hh = (y2 - y1) / 2 * h_scale
+        nx1 = int(np.clip(cx - hw, 0, img_w - 2))
+        ny1 = int(np.clip(cy - hh, 0, img_h - 2))
+        nx2 = int(np.clip(cx + hw, nx1 + 1, img_w - 1))
+        ny2 = int(np.clip(cy + hh, ny1 + 1, img_h - 1))
+        perturbed.append((nx1, ny1, nx2, ny2))
+    return perturbed
+
+
 def generate_box_fill(boxes, H, W):
     """Box Fill 伪标签：直接将整个框填为前景"""
     mask = np.zeros((H, W), dtype=np.float32)
@@ -254,6 +316,153 @@ def evaluate_perturbation(dataset_name, root='.'):
 
 
 # ════════════════════════════════════════════════════════════
+# 结构化扰动评估
+# ════════════════════════════════════════════════════════════
+
+# 结构化扰动参数
+SHIFT_LEVELS  = [0, 2, 4]          # 中心偏移（像素）
+SCALE_LEVELS  = [1.0, 1.3, 1.5, 2.0]  # 尺度膨胀倍数
+ASPECT_LEVELS = [                  # (w_scale, h_scale)
+    (1.0, 1.0),
+    (1.2, 0.8),
+    (0.8, 1.2),
+]
+
+
+def _eval_boxes(img, boxes, H, W, gt_bin):
+    """对给定 boxes 计算三种方法的 IoU，返回 (bf, bsnr, pag)"""
+    bf_mask   = generate_box_fill(boxes, H, W)
+    bsnr_mask = generate_bsnr_mask(img, boxes, H, W, spatial_gaussian=False)
+    pag_mask  = generate_bsnr_mask(img, boxes, H, W, spatial_gaussian=True)
+    return (compute_pseudo_iou(bf_mask, gt_bin),
+            compute_pseudo_iou(bsnr_mask, gt_bin),
+            compute_pseudo_iou(pag_mask, gt_bin))
+
+
+def evaluate_structured_perturbation(dataset_name, root='.'):
+    cfg = DATASET_CONFIGS[dataset_name]
+    img_dir    = os.path.join(root, cfg['img_dir'])
+    mask_dir   = os.path.join(root, cfg['mask_dir'])
+    label_dir  = os.path.join(root, cfg['label_dir'])
+    split_file = os.path.join(root, cfg['split_file'])
+
+    if not os.path.exists(split_file):
+        print(f"[SKIP] split file not found: {split_file}")
+        return None
+
+    with open(split_file, 'r') as f:
+        names = [line.strip() for line in f if line.strip()]
+
+    # 结果容器
+    shift_res  = {s: {'box_fill': [], 'bsnr': [], 'pag': []} for s in SHIFT_LEVELS}
+    scale_res  = {s: {'box_fill': [], 'bsnr': [], 'pag': []} for s in SCALE_LEVELS}
+    aspect_res = {k: {'box_fill': [], 'bsnr': [], 'pag': []} for k in ASPECT_LEVELS}
+
+    skipped = 0
+    for name in names:
+        img_path = None
+        for suffix in ['.png', '.bmp', '.jpg']:
+            p = os.path.join(img_dir, name + suffix)
+            if os.path.exists(p):
+                img_path = p
+                mask_path = os.path.join(mask_dir, name + suffix)
+                break
+        if img_path is None or not os.path.exists(mask_path):
+            skipped += 1
+            continue
+
+        img = cv2.imread(img_path,  cv2.IMREAD_GRAYSCALE)
+        gt  = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        if img is None or gt is None:
+            skipped += 1
+            continue
+
+        H, W = img.shape
+        if gt.shape != img.shape:
+            gt = cv2.resize(gt, (W, H), interpolation=cv2.INTER_NEAREST)
+        gt_bin = (gt > 0).astype(np.uint8)
+
+        label_path = os.path.join(label_dir, name + '.txt')
+        orig_boxes = load_yolo_boxes(label_path, H, W)
+        if not orig_boxes:
+            continue
+
+        # 1. 中心偏移
+        for shift in SHIFT_LEVELS:
+            if shift == 0:
+                bf, bs, pg = _eval_boxes(img, orig_boxes, H, W, gt_bin)
+            else:
+                # 4 方向取平均
+                dirs_boxes = perturb_center_shift(orig_boxes, shift, H, W)
+                bfs, bss, pgs = [], [], []
+                for db in dirs_boxes:
+                    b, s, p = _eval_boxes(img, db, H, W, gt_bin)
+                    bfs.append(b); bss.append(s); pgs.append(p)
+                bf, bs, pg = np.mean(bfs), np.mean(bss), np.mean(pgs)
+            shift_res[shift]['box_fill'].append(bf)
+            shift_res[shift]['bsnr'].append(bs)
+            shift_res[shift]['pag'].append(pg)
+
+        # 2. 尺度膨胀
+        for scale in SCALE_LEVELS:
+            if scale == 1.0:
+                bf, bs, pg = _eval_boxes(img, orig_boxes, H, W, gt_bin)
+            else:
+                sb = perturb_scale_expand(orig_boxes, scale, H, W)
+                bf, bs, pg = _eval_boxes(img, sb, H, W, gt_bin)
+            scale_res[scale]['box_fill'].append(bf)
+            scale_res[scale]['bsnr'].append(bs)
+            scale_res[scale]['pag'].append(pg)
+
+        # 3. 长宽比扰动
+        for (ws, hs) in ASPECT_LEVELS:
+            if ws == 1.0 and hs == 1.0:
+                bf, bs, pg = _eval_boxes(img, orig_boxes, H, W, gt_bin)
+            else:
+                ab = perturb_aspect_ratio(orig_boxes, ws, hs, H, W)
+                bf, bs, pg = _eval_boxes(img, ab, H, W, gt_bin)
+            aspect_res[(ws, hs)]['box_fill'].append(bf)
+            aspect_res[(ws, hs)]['bsnr'].append(bs)
+            aspect_res[(ws, hs)]['pag'].append(pg)
+
+    n = len(shift_res[0]['box_fill'])
+    print(f"\n{'='*70}")
+    print(f"  结构化框扰动实验 — {dataset_name}  (N={n}, skipped={skipped})")
+    print(f"{'='*70}")
+
+    def row(d):
+        return (float(np.mean(d['box_fill'])) * 100,
+                float(np.mean(d['bsnr']))     * 100,
+                float(np.mean(d['pag']))      * 100)
+
+    print(f"\n  [1] 系统性中心偏移（4方向平均）")
+    print(f"  {'偏移量':<10} {'Box Fill':>10} {'B-SNR':>10} {'PAG':>10}")
+    print(f"  {'-'*44}")
+    for s in SHIFT_LEVELS:
+        bf, bs, pg = row(shift_res[s])
+        print(f"  {s}px{'':<7} {bf:>9.2f}%  {bs:>9.2f}%  {pg:>9.2f}%")
+
+    print(f"\n  [2] 均匀尺度膨胀")
+    print(f"  {'膨胀倍数':<10} {'Box Fill':>10} {'B-SNR':>10} {'PAG':>10}")
+    print(f"  {'-'*44}")
+    for s in SCALE_LEVELS:
+        bf, bs, pg = row(scale_res[s])
+        print(f"  {s:.1f}x{'':<6} {bf:>9.2f}%  {bs:>9.2f}%  {pg:>9.2f}%")
+
+    print(f"\n  [3] 长宽比扰动")
+    print(f"  {'(w×,h×)':<12} {'Box Fill':>10} {'B-SNR':>10} {'PAG':>10}")
+    print(f"  {'-'*46}")
+    for (ws, hs) in ASPECT_LEVELS:
+        bf, bs, pg = row(aspect_res[(ws, hs)])
+        label = f"({ws:.1f},{hs:.1f})"
+        print(f"  {label:<12} {bf:>9.2f}%  {bs:>9.2f}%  {pg:>9.2f}%")
+
+    print(f"{'='*70}")
+
+    return {'shift': shift_res, 'scale': scale_res, 'aspect': aspect_res}
+
+
+# ════════════════════════════════════════════════════════════
 # 入口
 # ════════════════════════════════════════════════════════════
 if __name__ == '__main__':
@@ -264,35 +473,44 @@ if __name__ == '__main__':
                         help='Dataset to evaluate (default: all)')
     parser.add_argument('--root', default='.',
                         help='Project root directory (default: current dir)')
+    parser.add_argument('--mode', default='all',
+                        choices=['random', 'structured', 'all'],
+                        help='Perturbation mode: random (原四边随机) / structured (新结构化) / all')
     args = parser.parse_args()
 
     datasets = (list(DATASET_CONFIGS.keys())
                 if args.dataset == 'all' else [args.dataset])
 
-    all_results = {}
-    for ds in datasets:
-        r = evaluate_perturbation(ds, root=args.root)
-        if r:
-            all_results[ds] = r
+    # ——— 随机扰动（原有实验）———
+    if args.mode in ('random', 'all'):
+        all_results = {}
+        for ds in datasets:
+            r = evaluate_perturbation(ds, root=args.root)
+            if r:
+                all_results[ds] = r
 
-    # 跨数据集 PAG 鲁棒性汇总
-    if len(all_results) > 1:
-        print("\n\n====== PAG 跨数据集鲁棒性汇总（Pseudo-Label IoU %）======")
-        ds_names = list(all_results.keys())
-        header = f"{'δ(px)':<6}" + "".join(f"  {d[:12]:>13}" for d in ds_names) + f"  {'平均':>8}"
-        print(header)
-        print('-' * len(header))
-        for delta in PERTURBATION_LEVELS:
-            vals = [all_results[ds][delta]['pag'] for ds in ds_names]
-            row = f"{delta:<6}" + "".join(f"  {v:>12.2f}%" for v in vals)
-            row += f"  {np.mean(vals):>7.2f}%"
-            print(row)
-        print('=' * len(header))
+        if len(all_results) > 1:
+            print("\n\n====== PAG 跨数据集鲁棒性汇总（Pseudo-Label IoU %）======")
+            ds_names = list(all_results.keys())
+            header = f"{'δ(px)':<6}" + "".join(f"  {d[:12]:>13}" for d in ds_names) + f"  {'平均':>8}"
+            print(header)
+            print('-' * len(header))
+            for delta in PERTURBATION_LEVELS:
+                vals = [all_results[ds][delta]['pag'] for ds in ds_names]
+                row_str = f"{delta:<6}" + "".join(f"  {v:>12.2f}%" for v in vals)
+                row_str += f"  {np.mean(vals):>7.2f}%"
+                print(row_str)
+            print('=' * len(header))
 
-        print("\n====== 三方法对比（δ=8px 时的绝对值，越高越鲁棒）======")
-        print(f"{'Dataset':<15} {'Box Fill':>10} {'B-SNR':>10} {'PAG':>10}")
-        print('-' * 48)
-        for ds in ds_names:
-            r = all_results[ds][8]
-            print(f"{ds:<15} {r['box_fill']:>9.2f}%  {r['bsnr']:>9.2f}%  {r['pag']:>9.2f}%")
-        print('=' * 48)
+            print("\n====== 三方法对比（δ=8px 时的绝对值，越高越鲁棒）======")
+            print(f"{'Dataset':<15} {'Box Fill':>10} {'B-SNR':>10} {'PAG':>10}")
+            print('-' * 48)
+            for ds in ds_names:
+                r = all_results[ds][8]
+                print(f"{ds:<15} {r['box_fill']:>9.2f}%  {r['bsnr']:>9.2f}%  {r['pag']:>9.2f}%")
+            print('=' * 48)
+
+    # ——— 结构化扰动（新实验）———
+    if args.mode in ('structured', 'all'):
+        for ds in datasets:
+            evaluate_structured_perturbation(ds, root=args.root)
