@@ -28,9 +28,9 @@ model = dict(
         stacked_convs=4,
         seg_feat_channels=256,
         strides=[8, 8, 16, 32, 32],
-        scale_ranges=((1, 96), (48, 192), (96, 384), (192, 768), (384, 2048)),
+        scale_ranges=((1, 32), (16, 64), (32, 128), (64, 256), (128, 2048)),
         sigma=0.2,
-        num_grids=[40, 36, 24, 16, 12],
+        num_grids=[16, 12, 10, 8, 6],
         cate_down_pos=0,
         loss_cate=dict(
             type='FocalLoss',
@@ -56,7 +56,7 @@ train_pipeline = [
     dict(type='LoadImageFromFile'),
     dict(type='LoadAnnotations', with_bbox=True, with_mask=False),
     dict(type='GenerateBoxMask'),
-    dict(type='Resize', img_scale=(1333, 640), keep_ratio=True),
+    dict(type='Resize', img_scale=(256, 256), keep_ratio=True),
     dict(type='RandomFlip', flip_ratio=0.5),
     dict(
         type='Normalize',
@@ -71,7 +71,7 @@ test_pipeline = [
     dict(type='LoadImageFromFile'),
     dict(
         type='MultiScaleFlipAug',
-        img_scale=(1333, 640),
+        img_scale=(256, 256),
         flip=False,
         transforms=[
             dict(type='Resize', keep_ratio=True),
@@ -100,7 +100,7 @@ data = dict(
             dict(type='LoadImageFromFile'),
             dict(type='LoadAnnotations', with_bbox=True, with_mask=False),
             dict(type='GenerateBoxMask'),
-            dict(type='Resize', img_scale=(1333, 640), keep_ratio=True),
+            dict(type='Resize', img_scale=(256, 256), keep_ratio=True),
             dict(type='RandomFlip', flip_ratio=0.5),
             dict(
                 type='Normalize',
@@ -124,7 +124,7 @@ data = dict(
             dict(type='LoadImageFromFile'),
             dict(
                 type='MultiScaleFlipAug',
-                img_scale=(1333, 640),
+                img_scale=(256, 256),
                 flip=False,
                 transforms=[
                     dict(type='Resize', keep_ratio=True),
@@ -150,7 +150,7 @@ data = dict(
             dict(type='LoadImageFromFile'),
             dict(
                 type='MultiScaleFlipAug',
-                img_scale=(1333, 640),
+                img_scale=(256, 256),
                 flip=False,
                 transforms=[
                     dict(type='Resize', keep_ratio=True),
