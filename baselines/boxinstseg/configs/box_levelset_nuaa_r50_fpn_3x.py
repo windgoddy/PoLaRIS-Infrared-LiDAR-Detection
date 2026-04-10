@@ -47,7 +47,7 @@ model = dict(
             loss_weight=1.0,
         ),
         loss_boxpro=dict(type="BoxProjectionLoss", loss_weight=3.0),
-        loss_levelset=dict(type="LevelsetLoss", loss_weight=1.0),
+        loss_levelset=dict(type="LevelsetLoss", loss_weight=0.0),
     ),
     train_cfg=dict(),
     test_cfg=dict(
