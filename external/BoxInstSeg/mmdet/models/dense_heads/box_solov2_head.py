@@ -574,6 +574,9 @@ class BoxSOLOv2Head(BaseModule):
             sigma=cfg.sigma, 
             mask_area=sum_masks)
 
+        if len(scores) == 0:
+            return empty_results(results, cate_scores[:0])
+
         seg_preds = seg_preds[keep_inds]
         seg_preds = F.interpolate(seg_preds.unsqueeze(0),
                                   size=upsampled_size_out,
@@ -589,7 +592,6 @@ class BoxSOLOv2Head(BaseModule):
         results.scores = scores
 
         return results
-
 
 
 
