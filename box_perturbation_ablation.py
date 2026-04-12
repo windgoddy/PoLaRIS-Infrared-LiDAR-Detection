@@ -316,12 +316,107 @@ def evaluate_perturbation(dataset_name, root='.'):
 
 
 # ════════════════════════════════════════════════════════════
-# 结构化扰动评估
+# 尺度膨胀专项评估（三方法对比，格式与随机扰动一致）
+# ════════════════════════════════════════════════════════════
+SCALE_LEVELS = [1.0, 1.3, 1.5, 2.0]   # 尺度膨胀倍数
+
+
+def evaluate_scale_perturbation(dataset_name, root='.'):
+    """
+    在尺度膨胀下评估三方法的伪标签质量 IoU，
+    输出绝对值 + 相对保留率，格式与 evaluate_perturbation 完全一致。
+    """
+    cfg = DATASET_CONFIGS[dataset_name]
+    img_dir    = os.path.join(root, cfg['img_dir'])
+    mask_dir   = os.path.join(root, cfg['mask_dir'])
+    label_dir  = os.path.join(root, cfg['label_dir'])
+    split_file = os.path.join(root, cfg['split_file'])
+
+    if not os.path.exists(split_file):
+        print(f"[SKIP] split file not found: {split_file}")
+        return None
+
+    with open(split_file, 'r') as f:
+        names = [line.strip() for line in f if line.strip()]
+
+    results = {s: {'box_fill': [], 'bsnr': [], 'pag': []} for s in SCALE_LEVELS}
+    skipped = 0
+
+    for name in names:
+        img_path = None
+        for suffix in ['.png', '.bmp', '.jpg']:
+            p = os.path.join(img_dir, name + suffix)
+            if os.path.exists(p):
+                img_path = p
+                mask_path = os.path.join(mask_dir, name + suffix)
+                break
+        if img_path is None or not os.path.exists(mask_path):
+            skipped += 1
+            continue
+
+        img = cv2.imread(img_path,  cv2.IMREAD_GRAYSCALE)
+        gt  = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        if img is None or gt is None:
+            skipped += 1
+            continue
+
+        H, W = img.shape
+        if gt.shape != img.shape:
+            gt = cv2.resize(gt, (W, H), interpolation=cv2.INTER_NEAREST)
+        gt_bin = (gt > 0).astype(np.uint8)
+
+        label_path = os.path.join(label_dir, name + '.txt')
+        orig_boxes = load_yolo_boxes(label_path, H, W)
+        if not orig_boxes:
+            continue
+
+        for scale in SCALE_LEVELS:
+            if scale == 1.0:
+                boxes = orig_boxes
+            else:
+                boxes = perturb_scale_expand(orig_boxes, scale, H, W)
+            bf, bs, pg = _eval_boxes(img, boxes, H, W, gt_bin)
+            results[scale]['box_fill'].append(bf)
+            results[scale]['bsnr'].append(bs)
+            results[scale]['pag'].append(pg)
+
+    n_valid = len(results[1.0]['box_fill'])
+    print(f"\n{'='*64}")
+    print(f"  Dataset : {dataset_name}  [尺度膨胀]")
+    print(f"  Samples : {n_valid} (skipped {skipped})")
+    print(f"{'='*64}")
+    print(f"  {'Scale':<7} {'Box Fill':>10} {'B-SNR':>10} {'PAG':>10}"
+          f"  {'PAG vs BF':>10}  {'PAG vs BSNR':>12}")
+    print(f"  {'-'*62}")
+
+    summary = {}
+    for s in SCALE_LEVELS:
+        bf_  = float(np.mean(results[s]['box_fill'])) * 100
+        bsnr_= float(np.mean(results[s]['bsnr']))     * 100
+        pag_ = float(np.mean(results[s]['pag']))      * 100
+        print(f"  {s:.1f}x{'':<3} {bf_:>9.2f}%  {bsnr_:>9.2f}%  {pag_:>9.2f}%"
+              f"  {pag_-bf_:>+9.2f}%  {pag_-bsnr_:>+11.2f}%")
+        summary[s] = {'box_fill': bf_, 'bsnr': bsnr_, 'pag': pag_}
+
+    base = {m: summary[1.0][m] for m in ('box_fill', 'bsnr', 'pag')}
+    print(f"\n  相对保留率（1.0× 基准 = 100%）：")
+    print(f"  {'Scale':<7} {'Box Fill':>10} {'B-SNR':>10} {'PAG':>10}")
+    print(f"  {'-'*40}")
+    for s in SCALE_LEVELS:
+        def retain(m):
+            return summary[s][m] / base[m] * 100 if base[m] > 0 else 0.0
+        print(f"  {s:.1f}x{'':<3} {retain('box_fill'):>9.1f}%  "
+              f"{retain('bsnr'):>9.1f}%  {retain('pag'):>9.1f}%")
+    print(f"{'='*64}")
+    return summary
+
+
+# ════════════════════════════════════════════════════════════
+# 结构化扰动评估（含中心偏移、尺度膨胀、长宽比）
 # ════════════════════════════════════════════════════════════
 
 # 结构化扰动参数
 SHIFT_LEVELS  = [0, 2, 4]          # 中心偏移（像素）
-SCALE_LEVELS  = [1.0, 1.3, 1.5, 2.0]  # 尺度膨胀倍数
 ASPECT_LEVELS = [                  # (w_scale, h_scale)
     (1.0, 1.0),
     (1.2, 0.8),
@@ -474,8 +569,11 @@ if __name__ == '__main__':
     parser.add_argument('--root', default='.',
                         help='Project root directory (default: current dir)')
     parser.add_argument('--mode', default='all',
-                        choices=['random', 'structured', 'all'],
-                        help='Perturbation mode: random (原四边随机) / structured (新结构化) / all')
+                        choices=['random', 'scale', 'structured', 'all'],
+                        help=('random: 原四边随机扰动 | '
+                              'scale: 尺度膨胀三方法对比（新，重点） | '
+                              'structured: 中心偏移+尺度+长宽比 | '
+                              'all: 全部'))
     args = parser.parse_args()
 
     datasets = (list(DATASET_CONFIGS.keys())
@@ -510,7 +608,34 @@ if __name__ == '__main__':
                 print(f"{ds:<15} {r['box_fill']:>9.2f}%  {r['bsnr']:>9.2f}%  {r['pag']:>9.2f}%")
             print('=' * 48)
 
-    # ——— 结构化扰动（新实验）———
+    # ——— 尺度膨胀专项（新实验，重点）———
+    if args.mode in ('scale', 'all'):
+        scale_all = {}
+        for ds in datasets:
+            r = evaluate_scale_perturbation(ds, root=args.root)
+            if r:
+                scale_all[ds] = r
+
+        if len(scale_all) > 1:
+            print("\n\n====== 尺度膨胀跨数据集汇总（保留率 %，1.0×=100%）======")
+            ds_names = list(scale_all.keys())
+            for method, label in [('box_fill', 'Box Fill'),
+                                   ('bsnr',     'B-SNR'),
+                                   ('pag',      'PAG/HALO')]:
+                print(f"\n  [{label}]")
+                print(f"  {'Scale':<7}" + "".join(f"  {d[:12]:>13}" for d in ds_names) + f"  {'平均':>8}")
+                print(f"  {'-'*60}")
+                base_vals = {ds: scale_all[ds][1.0][method] for ds in ds_names}
+                for s in SCALE_LEVELS:
+                    vals = [scale_all[ds][s][method] / base_vals[ds] * 100
+                            if base_vals[ds] > 0 else 0.0
+                            for ds in ds_names]
+                    row_str = f"  {s:.1f}x{'':<3}" + "".join(f"  {v:>12.1f}%" for v in vals)
+                    row_str += f"  {np.mean(vals):>7.1f}%"
+                    print(row_str)
+            print('=' * 60)
+
+    # ——— 结构化扰动（完整版，含中心偏移和长宽比）———
     if args.mode in ('structured', 'all'):
         for ds in datasets:
             evaluate_structured_perturbation(ds, root=args.root)
