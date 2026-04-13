@@ -40,6 +40,12 @@ DATASET_CONFIGS = {
         'label_dir':  'dataset/IRSTD-1k/labels_box',
         'split_file': 'dataset/IRSTD-1k/50_50/test.txt',
     },
+    'SIRST3': {
+        'img_dir':    'dataset/SIRST3/images',
+        'mask_dir':   'dataset/SIRST3/masks',
+        'label_dir':  'dataset/SIRST3/labels_box',
+        'split_file': 'dataset/SIRST3/50_50/test.txt',
+    },
 }
 
 
@@ -239,7 +245,7 @@ def evaluate_dataset(dataset_name, root='.'):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='GrabCut Baseline for IRSTD')
     parser.add_argument('--dataset', default='all',
-                        choices=['NUAA-SIRST', 'NUDT-SIRST', 'IRSTD-1k', 'all'],
+                        choices=['NUAA-SIRST', 'NUDT-SIRST', 'IRSTD-1k', 'SIRST3', 'all'],
                         help='Dataset to evaluate')
     parser.add_argument('--root', default='.',
                         help='Project root directory (default: current dir)')
