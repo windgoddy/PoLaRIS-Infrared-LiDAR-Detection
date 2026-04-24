@@ -11,7 +11,7 @@ Hyperparameter Sensitivity Ablation for HALO
 
 扫描参数：
   1. expand_ratio sweep（固定 gauss_sigma_ratio=1.5）:
-       [1.1, 1.3, 1.5, 2.0, 3.0]
+       [1.1, 1.3, 1.5, 2.0, 2.5, 3.0, 3.5]
        物理含义：Context Box 相对原始框的膨胀倍率，类似 CA-CFAR 的背景窗比
 
   2. gauss_sigma_ratio sweep（固定 expand_ratio=1.5）:
@@ -79,7 +79,7 @@ DEFAULT_SIGMA_RATIO    = 1.5
 DEFAULT_TEMPERATURE    = 3.0
 
 # 扫描范围
-EXPAND_RATIO_VALUES  = [1.0, 1.1, 1.3, 1.5, 2.0, 3.0]
+EXPAND_RATIO_VALUES  = [1.0, 1.1, 1.3, 1.5, 2.0, 2.5, 3.0, 3.5]
 # 1.274 ≈ 1/sqrt(0.616)，是 2D 高斯 FWHM 加权方差的精确物理校准值
 SIGMA_RATIO_VALUES   = [0.8, 1.0, 1.274, 1.5, 2.0, 2.5]
 TEMPERATURE_VALUES   = [1.5, 3.0, 5.0]

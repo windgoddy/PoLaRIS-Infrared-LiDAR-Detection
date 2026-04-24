@@ -1036,3 +1036,4 @@ logs/p1/done/P1_D_pag_nudt.done
 model_Mamba/scripts/.train_multiscale_full.sh.swp
 # BoxInstSeg training outputs
 baselines/boxinstseg/work_dirs/
+paper copy
