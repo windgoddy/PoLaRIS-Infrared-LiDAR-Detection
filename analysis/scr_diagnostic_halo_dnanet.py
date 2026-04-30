@@ -14,7 +14,7 @@ paper copy/ADVISOR_REPORT.md.
 
 Example:
   python analysis/scr_diagnostic_halo_dnanet.py --device cuda:0 --cache_json
-  python analysis/scr_diagnostic_halo_dnanet.py --threshold 0.3 --output_dir analysis/results/scr_halo_dnanet
+  python analysis/scr_diagnostic_halo_dnanet.py --eval_mode legacy256 --normalization fixed --threshold 0.3
 """
 
 from __future__ import annotations
@@ -193,6 +193,46 @@ def bin_label(scr: float) -> Optional[str]:
     return None
 
 
+def compute_mean_std(
+    image_dir: Path,
+    ids: Optional[Sequence[str]],
+    suffixes: Sequence[str],
+    in_channels: int,
+) -> Tuple[List[float], List[float]]:
+    """Dataset-adaptive normalization, matching HALO->PAL's diagnostic style."""
+    if ids is None:
+        image_paths = sorted(
+            p for p in image_dir.iterdir() if p.is_file() and p.suffix.lower() in {s.lower() for s in suffixes}
+        )
+    else:
+        image_paths = [find_existing_image(image_dir / image_id, suffixes) for image_id in ids]
+
+    if not image_paths:
+        raise FileNotFoundError(f"No images found for adaptive stats in {image_dir}")
+
+    channel_sum = None
+    channel_sq_sum = None
+    pixel_count = 0
+    mode = "L" if in_channels == 1 else "RGB"
+    for path in image_paths:
+        arr = np.asarray(Image.open(path).convert(mode), dtype=np.float32) / 255.0
+        if arr.ndim == 2:
+            arr = arr[:, :, None]
+        flat = arr.reshape(-1, arr.shape[-1])
+        if channel_sum is None:
+            channel_sum = flat.sum(axis=0)
+            channel_sq_sum = (flat ** 2).sum(axis=0)
+        else:
+            channel_sum += flat.sum(axis=0)
+            channel_sq_sum += (flat ** 2).sum(axis=0)
+        pixel_count += flat.shape[0]
+
+    mean = channel_sum / max(pixel_count, 1)
+    var = channel_sq_sum / max(pixel_count, 1) - mean ** 2
+    std = np.sqrt(np.maximum(var, 1e-12))
+    return mean.astype(float).tolist(), std.astype(float).tolist()
+
+
 class ScrDiagnosticDataset(Dataset):
     def __init__(
         self,
@@ -202,6 +242,9 @@ class ScrDiagnosticDataset(Dataset):
         base_size: int,
         in_channels: int,
         suffixes: Sequence[str],
+        eval_mode: str,
+        normalization: str,
+        adaptive_stats_scope: str,
     ) -> None:
         self.dataset_root = dataset_root
         self.cfg = dataset_cfg
@@ -209,16 +252,21 @@ class ScrDiagnosticDataset(Dataset):
         self.base_size = base_size
         self.in_channels = in_channels
         self.suffixes = tuple(suffixes)
+        self.eval_mode = eval_mode
         self.image_dir = dataset_root / dataset_cfg.dataset / dataset_cfg.image_folder
         self.mask_dir = dataset_root / dataset_cfg.dataset / "masks"
-        if in_channels == 1:
-            self.transform = transforms.Compose(
-                [transforms.ToTensor(), transforms.Normalize([0.5], [0.5])]
+        if normalization == "adaptive":
+            mean, std = compute_mean_std(
+                self.image_dir,
+                self.ids if adaptive_stats_scope == "split" else None,
+                self.suffixes,
+                in_channels,
             )
+        elif in_channels == 1:
+            mean, std = [0.5], [0.5]
         else:
-            self.transform = transforms.Compose(
-                [transforms.ToTensor(), transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])]
-            )
+            mean, std = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
+        self.transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean, std)])
 
     def __len__(self) -> int:
         return len(self.ids)
@@ -231,15 +279,31 @@ class ScrDiagnosticDataset(Dataset):
         image_gray = np.array(Image.open(image_path).convert("L"))
         mask_gray = np.array(Image.open(mask_path).convert("L"))
         has_target = bool(mask_gray.max() > 127)
-        scr = compute_image_scr(image_gray, mask_gray) if has_target else float("nan")
+        target_scr_values = compute_scr_values(image_gray, mask_gray) if has_target else []
+        scr = float(np.min(target_scr_values)) if target_scr_values else float("nan")
 
         image_mode = "L" if self.in_channels == 1 else "RGB"
         image = Image.open(image_path).convert(image_mode)
         mask = Image.open(mask_path).convert("L")
-        image = image.resize((self.base_size, self.base_size), Image.BILINEAR)
-        mask = mask.resize((self.base_size, self.base_size), Image.NEAREST)
+        orig_w, orig_h = image.size
 
-        image_tensor = self.transform(image)
+        if self.eval_mode == "legacy256":
+            image = image.resize((self.base_size, self.base_size), Image.BILINEAR)
+            mask = mask.resize((self.base_size, self.base_size), Image.NEAREST)
+            image_for_tensor = image
+        else:
+            image_arr = np.asarray(image)
+            if image_arr.ndim == 2:
+                pad_h = math.ceil(orig_h / 32) * 32 - orig_h
+                pad_w = math.ceil(orig_w / 32) * 32 - orig_w
+                image_arr = np.pad(image_arr, ((0, pad_h), (0, pad_w)), mode="constant")
+            else:
+                pad_h = math.ceil(orig_h / 32) * 32 - orig_h
+                pad_w = math.ceil(orig_w / 32) * 32 - orig_w
+                image_arr = np.pad(image_arr, ((0, pad_h), (0, pad_w), (0, 0)), mode="constant")
+            image_for_tensor = image_arr
+
+        image_tensor = self.transform(image_for_tensor)
         mask_arr = np.asarray(mask, dtype=np.float32) / 255.0
         mask_tensor = torch.from_numpy(mask_arr).unsqueeze(0)
 
@@ -248,7 +312,10 @@ class ScrDiagnosticDataset(Dataset):
             "mask": mask_tensor,
             "id": image_id,
             "scr": torch.tensor(scr, dtype=torch.float32),
+            "target_scr_values": json.dumps(target_scr_values),
             "has_target": torch.tensor(has_target, dtype=torch.bool),
+            "orig_h": torch.tensor(orig_h, dtype=torch.int64),
+            "orig_w": torch.tensor(orig_w, dtype=torch.int64),
         }
 
 
@@ -312,10 +379,26 @@ def evaluate_dataset(
     workers: int,
     threshold: float,
     suffixes: Sequence[str],
+    eval_mode: str,
+    normalization: str,
+    adaptive_stats_scope: str,
 ) -> Tuple[List[dict], dict]:
     model, checkpoint_info, in_channels = load_dnanet_checkpoint(checkpoint_path, device)
     ids = load_test_ids(dataset_root / cfg.dataset, cfg.split_method)
-    dataset = ScrDiagnosticDataset(dataset_root, cfg, ids, base_size, in_channels, suffixes)
+    dataset = ScrDiagnosticDataset(
+        dataset_root,
+        cfg,
+        ids,
+        base_size,
+        in_channels,
+        suffixes,
+        eval_mode,
+        normalization,
+        adaptive_stats_scope,
+    )
+    if eval_mode == "original_pad" and batch_size != 1:
+        print("[INFO] original_pad uses variable image sizes; forcing batch_size=1.")
+        batch_size = 1
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=workers, pin_memory=True)
 
     records: List[dict] = []
@@ -333,16 +416,24 @@ def evaluate_dataset(
             if isinstance(output, (list, tuple)):
                 output = output[-1]
             probs = torch.sigmoid(output)
-            pred_bin = (probs > threshold).cpu().numpy().astype(bool)
-            gt_bin = (masks > 0.5).cpu().numpy().astype(bool)
 
             ids_batch = batch["id"]
             scr_batch = batch["scr"].cpu().numpy()
+            target_scr_batch = batch["target_scr_values"]
             has_target_batch = batch["has_target"].cpu().numpy().astype(bool)
+            orig_h_batch = batch["orig_h"].cpu().numpy()
+            orig_w_batch = batch["orig_w"].cpu().numpy()
 
             for idx, image_id in enumerate(ids_batch):
-                pred = pred_bin[idx, 0]
-                gt = gt_bin[idx, 0]
+                if eval_mode == "original_pad":
+                    orig_h = int(orig_h_batch[idx])
+                    orig_w = int(orig_w_batch[idx])
+                    prob = probs[idx, 0, :orig_h, :orig_w].cpu().numpy()
+                    gt = (masks[idx, 0].cpu().numpy() > 0.5)
+                else:
+                    prob = probs[idx, 0].cpu().numpy()
+                    gt = (masks[idx, 0].cpu().numpy() > 0.5)
+                pred = prob > threshold
                 inter = int(np.logical_and(pred, gt).sum())
                 union = int(np.logical_or(pred, gt).sum())
                 iou = 1.0 if union == 0 else float(inter) / float(union)
@@ -361,6 +452,7 @@ def evaluate_dataset(
                         "dataset_label": cfg.label,
                         "id": image_id,
                         "scr": scr_value,
+                        "target_scr_values": json.loads(target_scr_batch[idx]),
                         "scr_bin": label,
                         "iou": iou,
                         "intersection": inter,
@@ -379,6 +471,10 @@ def evaluate_dataset(
         "n_valid_scr": total_with_valid_scr,
         "global_iou": float(total_inter / total_union) if total_union > 0 else float("nan"),
         "mean_per_image_iou": float(np.mean([r["iou"] for r in records])) if records else float("nan"),
+        "threshold": threshold,
+        "eval_mode": eval_mode,
+        "normalization": normalization,
+        "adaptive_stats_scope": adaptive_stats_scope,
     }
     return records, overall
 
@@ -418,6 +514,52 @@ def summarize_records(records: Sequence[dict]) -> List[dict]:
     return rows
 
 
+def summarize_target_scr(records: Sequence[dict]) -> List[dict]:
+    rows: List[dict] = []
+    target_values = []
+    for record in records:
+        target_values.extend(float(v) for v in record.get("target_scr_values", []))
+
+    for label in SCR_BIN_LABELS:
+        lo = SCR_BINS[SCR_BIN_LABELS.index(label)]
+        hi = SCR_BINS[SCR_BIN_LABELS.index(label) + 1]
+        subset = [v for v in target_values if lo <= v < hi]
+        rows.append(
+            {
+                "scr_bin": label,
+                "n_targets": len(subset),
+                "ratio": float(len(subset) / len(target_values)) if target_values else float("nan"),
+                "scr_mean": float(np.mean(subset)) if subset else float("nan"),
+                "scr_median": float(np.median(subset)) if subset else float("nan"),
+            }
+        )
+    return rows
+
+
+def target_scr_overall(records: Sequence[dict]) -> dict:
+    target_values = []
+    for record in records:
+        target_values.extend(float(v) for v in record.get("target_scr_values", []))
+    values = np.asarray(target_values, dtype=np.float32)
+    if values.size == 0:
+        return {
+            "n_targets": 0,
+            "scr_mean": float("nan"),
+            "scr_median": float("nan"),
+            "scr_std": float("nan"),
+            "scr_lt_1_ratio": float("nan"),
+            "scr_lt_3_ratio": float("nan"),
+        }
+    return {
+        "n_targets": int(values.size),
+        "scr_mean": float(values.mean()),
+        "scr_median": float(np.median(values)),
+        "scr_std": float(values.std()),
+        "scr_lt_1_ratio": float((values < 1.0).mean()),
+        "scr_lt_3_ratio": float((values < 3.0).mean()),
+    }
+
+
 def write_csv(path: Path, rows: Sequence[dict], fieldnames: Sequence[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as f:
@@ -430,6 +572,13 @@ def print_markdown_summary(all_records: Dict[str, List[dict]], all_overall: Dict
     print("\n" + "=" * 92)
     print("SCR-binned Diagnostic - DNANet+HALO standalone")
     print(f"SCR: pure_background, expand_ratio={SCR_EXPAND_RATIO}; image SCR = min target SCR")
+    first_overall = next(iter(all_overall.values()), {})
+    if first_overall:
+        print(
+            f"Eval: threshold={first_overall.get('threshold')}, "
+            f"eval_mode={first_overall.get('eval_mode')}, "
+            f"normalization={first_overall.get('normalization')}"
+        )
     print("=" * 92)
     header = "| SCR Bin |"
     sep = "| --- |"
@@ -452,10 +601,13 @@ def print_markdown_summary(all_records: Dict[str, List[dict]], all_overall: Dict
 
     print("\nOverall:")
     for key, overall in all_overall.items():
+        target_overall = target_scr_overall(all_records[key])
         print(
             f"  {key}: n={overall['n_images']}, valid SCR={overall['n_valid_scr']}, "
             f"mean per-image IoU={overall['mean_per_image_iou']:.4f}, "
-            f"global IoU={overall['global_iou']:.4f}"
+            f"global IoU={overall['global_iou']:.4f}; "
+            f"target-level SCR<3={target_overall['scr_lt_3_ratio'] * 100:.1f}% "
+            f"(targets={target_overall['n_targets']})"
         )
 
 
@@ -523,14 +675,22 @@ def plot_results(all_records: Dict[str, List[dict]], output_dir: Path, selected_
     print(f"Saved plot: {bar_path}")
 
 
-def cache_ready(cache_path: Path, dataset_keys: Iterable[str]) -> bool:
+def cache_ready(cache_path: Path, dataset_keys: Iterable[str], run_config: dict) -> bool:
     if not cache_path.exists():
         return False
     try:
         cached = json.loads(cache_path.read_text())
     except json.JSONDecodeError:
         return False
-    return all(key in cached.get("records", {}) for key in dataset_keys)
+    if cached.get("run_config") != run_config:
+        return False
+    records = cached.get("records", {})
+    for key in dataset_keys:
+        if key not in records:
+            return False
+        if records[key] and "target_scr_values" not in records[key][0]:
+            return False
+    return True
 
 
 def main() -> None:
@@ -539,11 +699,29 @@ def main() -> None:
     parser.add_argument("--dataset_root", default=str(ROOT / "dataset"), help="Dataset root directory")
     parser.add_argument("--output_dir", default=str(ROOT / "analysis" / "results" / "scr_halo_dnanet"))
     parser.add_argument("--datasets", nargs="+", default=list(DEFAULT_DATASETS.keys()), choices=list(DEFAULT_DATASETS.keys()))
-    parser.add_argument("--threshold", type=float, default=0.3, help="Binary threshold after sigmoid")
+    parser.add_argument("--threshold", type=float, default=0.5, help="Binary threshold after sigmoid")
     parser.add_argument("--base_size", type=int, default=256, help="Evaluation resize size, matching test.py default")
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--suffixes", nargs="+", default=[".png", ".bmp", ".jpg", ".jpeg"])
+    parser.add_argument(
+        "--eval_mode",
+        choices=["original_pad", "legacy256"],
+        default="original_pad",
+        help="original_pad matches HALO->PAL diagnostic; legacy256 reproduces the original PoLaRIS test.py style.",
+    )
+    parser.add_argument(
+        "--normalization",
+        choices=["adaptive", "fixed"],
+        default="adaptive",
+        help="adaptive matches HALO->PAL diagnostic; fixed uses the original DNANet/ImageNet-style normalization.",
+    )
+    parser.add_argument(
+        "--adaptive_stats_scope",
+        choices=["all", "split"],
+        default="all",
+        help="Image set used for adaptive mean/std when --normalization adaptive.",
+    )
     parser.add_argument("--cache_json", action="store_true", help="Reuse/save per-image JSON cache")
     parser.add_argument("--no_plots", action="store_true", help="Skip matplotlib figures")
     parser.add_argument("--nuaa_checkpoint", default=DEFAULT_DATASETS["NUAA"].checkpoint)
@@ -560,6 +738,15 @@ def main() -> None:
         "IRSTD": args.irstd_checkpoint,
     }
     selected_cfgs = {key: DEFAULT_DATASETS[key] for key in args.datasets}
+    run_config = {
+        "threshold": args.threshold,
+        "eval_mode": args.eval_mode,
+        "normalization": args.normalization,
+        "adaptive_stats_scope": args.adaptive_stats_scope,
+        "base_size": args.base_size,
+        "datasets": args.datasets,
+        "checkpoints": ckpt_override,
+    }
 
     device = torch.device(args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu")
     if str(device) != args.device:
@@ -569,7 +756,7 @@ def main() -> None:
     all_records: Dict[str, List[dict]] = {}
     all_overall: Dict[str, dict] = {}
 
-    if args.cache_json and cache_ready(cache_path, args.datasets):
+    if args.cache_json and cache_ready(cache_path, args.datasets, run_config):
         cached = json.loads(cache_path.read_text())
         for key in args.datasets:
             all_records[key] = cached["records"][key]
@@ -589,12 +776,17 @@ def main() -> None:
                 workers=args.workers,
                 threshold=args.threshold,
                 suffixes=args.suffixes,
+                eval_mode=args.eval_mode,
+                normalization=args.normalization,
+                adaptive_stats_scope=args.adaptive_stats_scope,
             )
             all_records[key] = records
             all_overall[key] = overall
 
         if args.cache_json:
-            cache_path.write_text(json.dumps({"records": all_records, "overall": all_overall}, indent=2))
+            cache_path.write_text(
+                json.dumps({"run_config": run_config, "records": all_records, "overall": all_overall}, indent=2)
+            )
             print(f"Saved cache: {cache_path}")
 
     print_markdown_summary(all_records, all_overall)
@@ -603,7 +795,18 @@ def main() -> None:
     write_csv(
         output_dir / "per_image_scr_iou.csv",
         per_image_rows,
-        ["dataset", "dataset_label", "id", "scr", "scr_bin", "iou", "intersection", "union", "has_target"],
+        [
+            "dataset",
+            "dataset_label",
+            "id",
+            "scr",
+            "target_scr_values",
+            "scr_bin",
+            "iou",
+            "intersection",
+            "union",
+            "has_target",
+        ],
     )
 
     summary_rows: List[dict] = []
@@ -625,7 +828,19 @@ def main() -> None:
             "std_per_image_iou",
         ],
     )
+    target_summary_rows: List[dict] = []
+    target_overall = {}
+    for key, records in all_records.items():
+        target_overall[key] = target_scr_overall(records)
+        for row in summarize_target_scr(records):
+            target_summary_rows.append({"dataset": key, "dataset_label": selected_cfgs[key].label, **row})
+    write_csv(
+        output_dir / "target_scr_bin_summary.csv",
+        target_summary_rows,
+        ["dataset", "dataset_label", "scr_bin", "n_targets", "ratio", "scr_mean", "scr_median"],
+    )
     (output_dir / "overall.json").write_text(json.dumps(all_overall, indent=2))
+    (output_dir / "target_scr_overall.json").write_text(json.dumps(target_overall, indent=2))
 
     if not args.no_plots:
         plot_results(all_records, output_dir, selected_cfgs)
